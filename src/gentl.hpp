@@ -1,0 +1,68 @@
+#pragma once
+
+#include "onegen/error.hpp"
+
+#include <GenTL/GenTL.h>
+
+#include <filesystem>
+#include <string>
+
+namespace onegen {
+
+#define OG_GENTL_SYMS(X)                     \
+  X(GCGetLastError)                          \
+  X(GCInitLib)                               \
+  X(GCCloseLib)                              \
+  X(GCReadPort)                              \
+  X(GCWritePort)                             \
+  X(GCGetPortInfo)                           \
+  X(GCRegisterEvent)                         \
+  X(GCUnregisterEvent)                       \
+  X(EventGetData)                            \
+  X(EventKill)                               \
+  X(TLOpen)                                  \
+  X(TLClose)                                 \
+  X(TLGetNumInterfaces)                      \
+  X(TLGetInterfaceID)                        \
+  X(TLOpenInterface)                         \
+  X(TLUpdateInterfaceList)                   \
+  X(IFClose)                                 \
+  X(IFGetNumDevices)                         \
+  X(IFGetDeviceID)                           \
+  X(IFUpdateDeviceList)                      \
+  X(IFGetDeviceInfo)                         \
+  X(IFOpenDevice)                            \
+  X(DevGetPort)                              \
+  X(DevGetNumDataStreams)                    \
+  X(DevGetDataStreamID)                      \
+  X(DevOpenDataStream)                       \
+  X(DevClose)                                \
+  X(DSAllocAndAnnounceBuffer)                \
+  X(DSFlushQueue)                            \
+  X(DSStartAcquisition)                      \
+  X(DSStopAcquisition)                       \
+  X(DSGetInfo)                               \
+  X(DSClose)                                 \
+  X(DSRevokeBuffer)                          \
+  X(DSQueueBuffer)                           \
+  X(DSGetBufferInfo)                         \
+  X(DSGetBufferID)                           \
+  X(GCGetNumPortURLs)                        \
+  X(GCGetPortURLInfo)
+
+struct Gentl {
+  void* lib = nullptr;
+  GenTL::TL_HANDLE tl = nullptr;
+
+#define OG_DECL(name) GenTL::P##name name = nullptr;
+  OG_GENTL_SYMS(OG_DECL)
+#undef OG_DECL
+
+  void load(const std::filesystem::path& cti);
+  void close_tl();
+  void unload();
+  [[noreturn]] void fail(const char* where) const;
+  void check(GenTL::GC_ERROR err, const char* where) const;
+};
+
+}  // namespace onegen
