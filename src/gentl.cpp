@@ -73,6 +73,13 @@ void Gentl::load(const std::filesystem::path& cti) {
   OG_GENTL_SYMS(OG_SYM)
 #undef OG_SYM
 
+  DSGetNumBufferParts = reinterpret_cast<decltype(DSGetNumBufferParts)>(
+      sym(lib, "DSGetNumBufferParts"));
+  DSGetBufferPartInfo = reinterpret_cast<decltype(DSGetBufferPartInfo)>(
+      sym(lib, "DSGetBufferPartInfo"));
+  DSGetBufferChunkData = reinterpret_cast<decltype(DSGetBufferChunkData)>(
+      sym(lib, "DSGetBufferChunkData"));
+
   check(GCInitLib(), "GCInitLib");
   check(TLOpen(&tl), "TLOpen");
 }

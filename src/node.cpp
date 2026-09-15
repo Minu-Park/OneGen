@@ -240,6 +240,18 @@ std::string Node::display_name() const {
   return inode(inode_)->GetDisplayName().c_str();
 }
 
+std::string Node::description() const {
+  if (!inode_) return {};
+  std::lock_guard<std::recursive_mutex> lk(map_->impl_->mu);
+  return inode(inode_)->GetDescription().c_str();
+}
+
+std::string Node::tooltip() const {
+  if (!inode_) return {};
+  std::lock_guard<std::recursive_mutex> lk(map_->impl_->mu);
+  return inode(inode_)->GetToolTip().c_str();
+}
+
 NodeKind Node::kind() const {
   if (!inode_) return NodeKind::Other;
   std::lock_guard<std::recursive_mutex> lk(map_->impl_->mu);
@@ -393,6 +405,12 @@ std::string Node::get_enum() const {
     std::lock_guard<std::recursive_mutex> lk(map_->impl_->mu);
     return std::string(
         GenApi::CEnumerationPtr(inode(inode_))->GetCurrentEntry()->GetSymbolic().c_str());
+  });
+}
+std::int64_t Node::get_enum_value() const {
+  return genapi("get_enum_value", [&] {
+    std::lock_guard<std::recursive_mutex> lk(map_->impl_->mu);
+    return GenApi::CEnumerationPtr(inode(inode_))->GetCurrentEntry()->GetValue();
   });
 }
 void Node::set_enum(std::string_view entry) {

@@ -112,6 +112,7 @@ int main() {
 
   pf.set("BayerRG8");
   assert(pf.get_enum() == "BayerRG8");
+  assert(pf.get_enum_value() == 1);
   pf.set("Mono8");
   assert(pf.get() == "Mono8");
 

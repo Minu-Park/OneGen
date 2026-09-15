@@ -28,9 +28,22 @@ bool nonempty_eq(std::string_view field, std::string_view q) {
 std::optional<std::string> extract_ipv4(std::string_view s) {
   static const std::regex re(R"((\d{1,3}(?:\.\d{1,3}){3}))");
   std::string t(s);
-  std::smatch m;
-  if (!std::regex_search(t, m, re)) return std::nullopt;
-  return m[1].str();
+  for (std::sregex_iterator it(t.begin(), t.end(), re), end; it != end; ++it) {
+    const auto& m = *it;
+    const auto pos = static_cast<std::size_t>(m.position());
+    const auto tail = pos + static_cast<std::size_t>(m.length());
+    if ((pos && std::isdigit(static_cast<unsigned char>(t[pos - 1]))) ||
+        (tail < t.size() && std::isdigit(static_cast<unsigned char>(t[tail]))))
+      continue;
+    const auto ip = m.str();
+    std::istringstream parts(ip);
+    std::string part;
+    bool valid = true;
+    while (std::getline(parts, part, '.'))
+      if (std::stoi(part) > 255) valid = false;
+    if (valid) return ip;
+  }
+  return std::nullopt;
 }
 
 const DeviceInfo& match_device(const std::vector<DeviceInfo>& devices,

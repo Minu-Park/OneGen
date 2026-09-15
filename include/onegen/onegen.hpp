@@ -16,6 +16,8 @@ namespace defaults {
 // Documented locations only. Nothing is loaded until loadCti().
 std::filesystem::path pylonCti();
 std::vector<std::filesystem::path> pylonCtis();
+/** Return canonical CTIs from standard GenTL paths plus documented pylon locations. */
+std::vector<std::filesystem::path> producerCtis();
 }  // namespace defaults
 
 class OneGen {
@@ -27,6 +29,8 @@ public:
 
   void loadCti(const std::filesystem::path& cti);
   void unloadCti(const std::filesystem::path& cti);
+  /** @return Whether at least one GenTL producer is loaded. */
+  bool hasCti() const;
 
   std::vector<DeviceInfo> enumerate(
       std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});

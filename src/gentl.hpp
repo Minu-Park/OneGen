@@ -58,6 +58,10 @@ struct Gentl {
   OG_GENTL_SYMS(OG_DECL)
 #undef OG_DECL
 
+  GenTL::PDSGetNumBufferParts DSGetNumBufferParts = nullptr;
+  GenTL::PDSGetBufferPartInfo DSGetBufferPartInfo = nullptr;
+  GenTL::PDSGetBufferChunkData DSGetBufferChunkData = nullptr;
+
   void load(const std::filesystem::path& cti);
   void close_tl();
   void unload();

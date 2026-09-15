@@ -3,13 +3,16 @@
 # No vendor SDKs. CTI producers are loadCti() at runtime.
 #
 # Override: -DONEGEN_GENICAM_ROOT=...  (extracted SDK root with include/GenApi)
+#           -DONEGEN_GENICAM_RUNTIME_ROOT=... (extracted runtime root)
+#           -DONEGEN_GENTL_INCLUDE=... (directory containing GenTL/GenTL.h)
 #           -DONEGEN_GENICAM_URL=...
 
 set(ONEGEN_GENICAM_VERSION "2026.07")
 set(ONEGEN_GENICAM_SHA256 "e74b8d982c3e7697399b03c254b6e8c596eddf0279959eba7de18734e279b64f")
 
-set(_cache "${CMAKE_SOURCE_DIR}/third_party/genicam")
+set(_cache "${CMAKE_CURRENT_LIST_DIR}/../third_party/genicam")
 set(_zip "${_cache}/GenICam_Package_${ONEGEN_GENICAM_VERSION}.zip")
+set(_zip_tmp "${_zip}.tmp")
 set(_pkg "${_cache}/pkg")
 file(MAKE_DIRECTORY "${_cache}")
 
@@ -76,19 +79,29 @@ if(ONEGEN_GENICAM_ROOT)
   if(NOT _sdk_root)
     message(FATAL_ERROR "ONEGEN_GENICAM_ROOT has no GenApi.h")
   endif()
+  if(ONEGEN_GENICAM_RUNTIME_ROOT)
+    set(_rt_extract "${ONEGEN_GENICAM_RUNTIME_ROOT}")
+  endif()
 else()
+  if(EXISTS "${_zip}")
+    file(SHA256 "${_zip}" _zip_hash)
+    if(NOT "${_zip_hash}" STREQUAL "${ONEGEN_GENICAM_SHA256}")
+      file(REMOVE "${_zip}")
+    endif()
+  endif()
   if(NOT EXISTS "${_zip}")
     message(STATUS "Downloading GenICam ${ONEGEN_GENICAM_VERSION}")
-    file(DOWNLOAD "${ONEGEN_GENICAM_URL}" "${_zip}"
+    file(DOWNLOAD "${ONEGEN_GENICAM_URL}" "${_zip_tmp}"
       EXPECTED_HASH SHA256=${ONEGEN_GENICAM_SHA256}
       SHOW_PROGRESS
       STATUS _st TIMEOUT 300 TLS_VERIFY ON)
     list(GET _st 0 _code)
     if(NOT _code EQUAL 0)
       list(GET _st 1 _msg)
-      file(REMOVE "${_zip}")
+      file(REMOVE "${_zip_tmp}")
       message(FATAL_ERROR "GenICam download failed: ${_msg}")
     endif()
+    file(RENAME "${_zip_tmp}" "${_zip}")
   endif()
 
   find_program(UNZIP_EXECUTABLE unzip)
@@ -148,21 +161,36 @@ endif()
 
 # GenTL.h lives in the meta package (spec header).
 set(_gentl_inc "")
-if(EXISTS "${_pkg}/GenTL/GenTL.h")
+if(ONEGEN_GENTL_INCLUDE)
+  if(NOT EXISTS "${ONEGEN_GENTL_INCLUDE}/GenTL/GenTL.h")
+    message(FATAL_ERROR "ONEGEN_GENTL_INCLUDE has no GenTL/GenTL.h")
+  endif()
+  set(_gentl_inc "${ONEGEN_GENTL_INCLUDE}")
+elseif(ONEGEN_GENICAM_ROOT AND EXISTS "${ONEGEN_GENICAM_ROOT}/include/GenTL/GenTL.h")
+  set(_gentl_inc "${ONEGEN_GENICAM_ROOT}/include")
+elseif(EXISTS "${_pkg}/GenTL/GenTL.h")
   set(_gentl_inc "${_pkg}/GenTL")
   # so #include <GenTL/GenTL.h> works
   file(MAKE_DIRECTORY "${_cache}/include/GenTL")
   configure_file("${_pkg}/GenTL/GenTL.h" "${_cache}/include/GenTL/GenTL.h" COPYONLY)
   set(_gentl_inc "${_cache}/include")
 endif()
+if(NOT _gentl_inc)
+  message(FATAL_ERROR "GenTL/GenTL.h missing; set ONEGEN_GENTL_INCLUDE")
+endif()
 
 set(_libdirs
   "${_sdk_root}/lib"
+  "${_sdk_root}/lib/${_plat}"
   "${_sdk_root}/bin"
+  "${_sdk_root}/bin/${_plat}"
   "${_sdk_root}/lib64"
 )
 if(DEFINED _rt_extract)
-  list(APPEND _libdirs "${_rt_extract}" "${_rt_extract}/lib" "${_rt_extract}/bin")
+  list(APPEND _libdirs
+    "${_rt_extract}"
+    "${_rt_extract}/lib" "${_rt_extract}/lib/${_plat}"
+    "${_rt_extract}/bin" "${_rt_extract}/bin/${_plat}")
 endif()
 
 set(_genapi_libs)
@@ -190,13 +218,20 @@ foreach(_d ${_libdirs})
 endforeach()
 
 if(NOT _genapi_libs)
-  file(GLOB_RECURSE _dylibs "${_sdk_extract}/libGenApi*" "${_rt_extract}/libGenApi*")
+  set(_search_roots "${_sdk_root}")
+  if(DEFINED _rt_extract)
+    list(APPEND _search_roots "${_rt_extract}")
+  endif()
   if(APPLE)
-    file(GLOB_RECURSE _dylibs
-      "${_sdk_extract}/*.dylib" "${_rt_extract}/*.dylib")
+    foreach(_root ${_search_roots})
+      file(GLOB_RECURSE _found "${_root}/*.dylib")
+      list(APPEND _dylibs ${_found})
+    endforeach()
   elseif(UNIX)
-    file(GLOB_RECURSE _dylibs
-      "${_sdk_extract}/*.so*" "${_rt_extract}/*.so*")
+    foreach(_root ${_search_roots})
+      file(GLOB_RECURSE _found "${_root}/*.so*")
+      list(APPEND _dylibs ${_found})
+    endforeach()
   endif()
   foreach(_f ${_dylibs})
     get_filename_component(_n "${_f}" NAME)
@@ -205,6 +240,17 @@ if(NOT _genapi_libs)
       get_filename_component(_rpath "${_f}" DIRECTORY)
     endif()
   endforeach()
+endif()
+
+set(ONEGEN_GENICAM_RUNTIME_FILES)
+if(DEFINED _rt_extract)
+  if(WIN32)
+    file(GLOB_RECURSE ONEGEN_GENICAM_RUNTIME_FILES "${_rt_extract}/*.dll")
+  elseif(APPLE)
+    file(GLOB_RECURSE ONEGEN_GENICAM_RUNTIME_FILES "${_rt_extract}/*.dylib")
+  elseif(UNIX)
+    file(GLOB_RECURSE ONEGEN_GENICAM_RUNTIME_FILES "${_rt_extract}/*.so*")
+  endif()
 endif()
 
 if(NOT _genapi_libs)

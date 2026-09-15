@@ -27,6 +27,8 @@ class Node {
 public:
   std::string name() const;
   std::string display_name() const;
+  std::string description() const;
+  std::string tooltip() const;
   NodeKind kind() const;
   bool is_readable() const;
   bool is_writable() const;
@@ -52,6 +54,8 @@ public:
   void set_string(std::string_view v);
 
   std::string get_enum() const;
+  /** Returns the numeric value of the current enumeration entry. */
+  std::int64_t get_enum_value() const;
   void set_enum(std::string_view entry);
   std::vector<std::string> enum_entries() const;
 

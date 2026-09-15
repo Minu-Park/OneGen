@@ -197,6 +197,11 @@ void OneGen::unloadCti(const std::filesystem::path& cti) {
   impl_->producers.erase(it);
 }
 
+bool OneGen::hasCti() const {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  return !impl_->producers.empty();
+}
+
 std::vector<DeviceInfo> OneGen::enumerate(std::chrono::milliseconds timeout) {
   std::lock_guard<std::recursive_mutex> lk(impl_->mu);
   if (impl_->producers.empty()) throw Error("enumerate: no CTI loaded");
