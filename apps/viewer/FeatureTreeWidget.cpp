@@ -2,6 +2,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDebug>
 #include <QDoubleSpinBox>
 #include <QLabel>
 #include <QLineEdit>
@@ -54,20 +55,70 @@ void FeatureTreeWidget::setNodeMaps(
   for (const auto& entry : maps_)
     if (entry.second) entry.second->set_invalidate_callback({});
   maps_ = std::move(maps);
+  modules_.clear();
+  read_ = [this](int index, std::string_view name) {
+    if (index < 0 || index >= static_cast<int>(maps_.size()) || !maps_[static_cast<std::size_t>(index)].second)
+      return onegen::FeatureNode{};
+    return onegen::snapshot(maps_[static_cast<std::size_t>(index)].second->find(std::string(name)));
+  };
+  write_ = [this](int index, std::string_view name, std::string_view op, std::string_view value) {
+    auto node = maps_[static_cast<std::size_t>(index)].second->find(std::string(name));
+    onegen::apply_feature(node, op, value);
+    return onegen::snapshot(node);
+  };
+  for (const auto& entry : maps_) {
+    onegen::FeatureNode root;
+    if (entry.second) root = onegen::snapshot(entry.second->root());
+    modules_.emplace_back(entry.first, std::move(root));
+  }
   camera_name_ = QString::fromUtf8(camera_name.data(), static_cast<int>(camera_name.size()));
   if (camera_name_.isEmpty()) camera_name_ = QStringLiteral("Camera");
   rebuild();
   for (std::size_t index = 0; index < maps_.size(); ++index) {
     if (maps_[index].second) {
       maps_[index].second->set_invalidate_callback(
-          [this, index](std::string_view name) { onInvalidate(static_cast<int>(index), name); });
+          [this, index](std::string_view name) { invalidate(static_cast<int>(index), name); });
     }
   }
 }
 
+void FeatureTreeWidget::setFeatureModules(
+    std::vector<std::pair<std::string, onegen::FeatureNode>> modules, FeatureRead read,
+    FeatureWrite write, std::string_view camera_name)
+{
+  for (const auto& entry : maps_)
+    if (entry.second) entry.second->set_invalidate_callback({});
+  maps_.clear();
+  modules_ = std::move(modules);
+  read_ = std::move(read);
+  write_ = std::move(write);
+  camera_name_ = QString::fromUtf8(camera_name.data(), static_cast<int>(camera_name.size()));
+  if (camera_name_.isEmpty()) camera_name_ = QStringLiteral("Camera");
+  rebuild();
+}
+
 void FeatureTreeWidget::setGrabbing(bool grabbing) {
   grabbing_ = grabbing;
-  refreshAllEditors();
+}
+
+void FeatureTreeWidget::setFeatureSnapshot(
+    std::vector<std::pair<std::string, onegen::FeatureNode>> modules) {
+  modules_ = std::move(modules);
+  pending_.clear();
+  rebuild();
+}
+
+void FeatureTreeWidget::invalidate(const int module, const std::string_view name)
+{
+  const QString q = QString::fromUtf8(name.data(), static_cast<int>(name.size()));
+  QMetaObject::invokeMethod(
+      this,
+      [this, q, module] {
+        if (rebuilding_ || grabbing_) return;
+        pending_.insert(QString::number(module) + QChar('\n') + q);
+        if (!drain_timer_->isActive()) drain_timer_->start();
+      },
+      Qt::QueuedConnection);
 }
 
 void FeatureTreeWidget::rebuild() {
@@ -82,24 +133,27 @@ void FeatureTreeWidget::rebuild() {
   const int scroll = verticalScrollBar()->value();
 
   clear();
-  if (maps_.empty()) return;
+  if (modules_.empty()) {
+    rebuilding_ = false;
+    return;
+  }
 
   auto* cam = new QTreeWidgetItem(this, QStringList(camera_name_));
   cam->setData(0, Qt::UserRole, QStringLiteral("__camera_root__"));
   try {
-    for (std::size_t index = 0; index < maps_.size(); ++index) {
-      const auto& entry = maps_[index];
-      if (!entry.second || entry.second->empty()) continue;
+    for (std::size_t index = 0; index < modules_.size(); ++index) {
+      const auto& entry = modules_[index];
       auto* parent = cam;
       if (!entry.first.empty()) {
         parent = new QTreeWidgetItem(cam, QStringList(QString::fromStdString(entry.first)));
         parent->setData(0, Qt::UserRole, QStringLiteral("__module_%1__").arg(index));
         parent->setData(0, Qt::UserRole + 1, static_cast<int>(index));
       }
-      addCategories(parent, entry.second->root(), {}, static_cast<int>(index));
+      addCategories(parent, entry.second, static_cast<int>(index));
     }
   } catch (...) {
     clear();
+    rebuilding_ = false;
     return;
   }
 
@@ -118,150 +172,106 @@ void FeatureTreeWidget::rebuild() {
   rebuilding_ = false;
 }
 
-void FeatureTreeWidget::addCategories(QTreeWidgetItem* cam, const onegen::Node& cat,
-                                      const std::string& parent_display,
+void FeatureTreeWidget::addCategories(QTreeWidgetItem* cam, const onegen::FeatureNode& cat,
                                       const int map_index) {
-  if (!cat.valid() || cat.kind() != onegen::NodeKind::Category) return;
+  if (cat.kind != onegen::NodeKind::Category && !cat.name.empty()) return;
 
   QTreeWidgetItem* item = cam;
-  if (cat.name() != "Root") {
-    if (parent_display == "Events Generation") return;
-    item = new QTreeWidgetItem(cam, QStringList(QString::fromStdString(cat.display_name())));
-    item->setData(0, Qt::UserRole, QString::fromStdString(cat.name()));
+  if (cat.name != "Root" && !cat.name.empty()) {
+    item = new QTreeWidgetItem(cam, QStringList(QString::fromStdString(cat.display_name)));
+    item->setData(0, Qt::UserRole, QString::fromStdString(cat.name));
     item->setData(0, Qt::UserRole + 1, map_index);
-    for (const auto& c : cat.children()) {
-      if (c.kind() == onegen::NodeKind::Category) continue;
+    for (const auto& c : cat.children) {
+      if (c.kind == onegen::NodeKind::Category) continue;
       addLeaf(item, c, map_index);
     }
   }
-  for (const auto& c : cat.children()) {
-    if (c.kind() == onegen::NodeKind::Category)
-      addCategories(cam, c, cat.display_name(), map_index);
+  for (const auto& c : cat.children) {
+    if (c.kind == onegen::NodeKind::Category)
+      addCategories(cam, c, map_index);
+    else if (cat.name == "Root" || cat.name.empty())
+      addLeaf(item, c, map_index);
   }
 }
 
-void FeatureTreeWidget::addLeaf(QTreeWidgetItem* parent, const onegen::Node& n,
+void FeatureTreeWidget::addLeaf(QTreeWidgetItem* parent, const onegen::FeatureNode& n,
                                 const int map_index) {
-  if (!n.valid() || !n.is_visible()) return;
-  if (!n.is_readable() && n.kind() != onegen::NodeKind::Command) return;
+  if (!shouldShow(n)) return;
   QWidget* w = createEditor(n, map_index);
   if (!w) return;
-  auto* item = new QTreeWidgetItem(parent, QStringList(QString::fromStdString(n.display_name())));
-  item->setData(0, Qt::UserRole, QString::fromStdString(n.name()));
+  auto* item = new QTreeWidgetItem(parent, QStringList(QString::fromStdString(n.display_name)));
+  item->setData(0, Qt::UserRole, QString::fromStdString(n.name));
   item->setData(0, Qt::UserRole + 1, map_index);
-  const auto help = n.tooltip().empty() ? n.description() : n.tooltip();
+  const auto help = n.tooltip.empty() ? n.description : n.tooltip;
   item->setToolTip(0, QString::fromStdString(help));
   setItemWidget(item, 1, w);
 }
 
-QWidget* FeatureTreeWidget::createEditor(const onegen::Node& n, const int map_index) {
-  const QString nodeName = QString::fromStdString(n.name());
+QWidget* FeatureTreeWidget::createEditor(const onegen::FeatureNode& n, const int map_index) {
+  const QString nodeName = QString::fromStdString(n.name);
   QWidget* w = nullptr;
   try {
-    switch (n.kind()) {
+    switch (n.kind) {
       case onegen::NodeKind::Integer: {
         auto* box = new QSpinBox;
         w = box;
         QSignalBlocker block(box);
-        box->setRange(clamp_int(n.int_min()), clamp_int(n.int_max()));
-        const auto inc = n.int_inc();
-        box->setSingleStep(inc > 0 && inc <= INT_MAX ? static_cast<int>(inc) : 1);
-        if (n.is_readable()) box->setValue(clamp_int(n.get_int()));
+        box->setRange(clamp_int(n.int_min), clamp_int(n.int_max));
+        box->setSingleStep(n.int_inc > 0 && n.int_inc <= INT_MAX ? static_cast<int>(n.int_inc) : 1);
+        if (n.readable) box->setValue(clamp_int(n.int_value));
         connect(box, &QSpinBox::valueChanged, this, [this, nodeName, map_index](int v) {
-          auto node = resolve(nodeName, map_index);
-          if (!node.valid()) return;
-          try {
-            node.set_int(v);
-          } catch (...) {
-            QSignalBlocker b(qobject_cast<QSpinBox*>(sender()));
-            if (node.is_readable())
-              qobject_cast<QSpinBox*>(sender())->setValue(clamp_int(node.get_int()));
-          }
+          write(map_index, nodeName, "int", std::to_string(v));
         });
       } break;
       case onegen::NodeKind::Float: {
         auto* box = new QDoubleSpinBox;
         w = box;
         QSignalBlocker block(box);
-        box->setRange(n.float_min(), n.float_max());
+        box->setRange(n.float_min, n.float_max);
         box->setSingleStep(0.1);
         box->setDecimals(6);
-        if (n.is_readable()) box->setValue(n.get_float());
+        if (n.readable) box->setValue(n.float_value);
         connect(box, &QDoubleSpinBox::valueChanged, this, [this, nodeName, map_index](double v) {
-          auto node = resolve(nodeName, map_index);
-          if (!node.valid()) return;
-          try {
-            node.set_float(v);
-          } catch (...) {
-            auto* box = qobject_cast<QDoubleSpinBox*>(sender());
-            QSignalBlocker b(box);
-            if (node.is_readable()) box->setValue(node.get_float());
-          }
+          write(map_index, nodeName, "float", std::to_string(v));
         });
       } break;
       case onegen::NodeKind::Boolean: {
         auto* box = new QCheckBox;
         w = box;
         QSignalBlocker block(box);
-        if (n.is_readable()) box->setChecked(n.get_bool());
+        if (n.readable) box->setChecked(n.bool_value);
         connect(box, &QCheckBox::checkStateChanged, this,
                 [this, nodeName, map_index](Qt::CheckState s) {
-          auto node = resolve(nodeName, map_index);
-          if (!node.valid()) return;
-          try {
-            node.set_bool(s == Qt::Checked);
-          } catch (...) {
-            auto* box = qobject_cast<QCheckBox*>(sender());
-            QSignalBlocker b(box);
-            if (node.is_readable()) box->setChecked(node.get_bool());
-          }
+          write(map_index, nodeName, "bool", s == Qt::Checked ? "1" : "0");
         });
       } break;
       case onegen::NodeKind::String: {
         auto* edit = new QLineEdit;
         w = edit;
         QSignalBlocker block(edit);
-        if (n.is_readable()) edit->setText(QString::fromStdString(n.get_string()));
+        if (n.readable) edit->setText(QString::fromStdString(n.string_value));
         connect(edit, &QLineEdit::editingFinished, this, [this, nodeName, map_index, edit] {
-          auto node = resolve(nodeName, map_index);
-          if (!node.valid()) return;
-          try {
-            node.set_string(edit->text().toStdString());
-          } catch (...) {
-            QSignalBlocker b(edit);
-            if (node.is_readable()) edit->setText(QString::fromStdString(node.get_string()));
-          }
+          write(map_index, nodeName, "string", edit->text().toStdString());
         });
       } break;
       case onegen::NodeKind::Enumeration: {
         auto* combo = new QComboBox;
         w = combo;
         QSignalBlocker block(combo);
-        for (const auto& e : n.enum_entries()) combo->addItem(QString::fromStdString(e), QString::fromStdString(e));
-        if (n.is_readable()) combo->setCurrentText(QString::fromStdString(n.get_enum()));
-        connect(combo, &QComboBox::currentIndexChanged, this,
-                [this, nodeName, map_index](int) {
+        for (const auto& e : n.enum_entries)
+          combo->addItem(QString::fromStdString(e), QString::fromStdString(e));
+        if (n.readable) combo->setCurrentText(QString::fromStdString(n.enum_value));
+        connect(combo, &QComboBox::currentIndexChanged, this, [this, nodeName, map_index](int) {
           auto* combo = qobject_cast<QComboBox*>(sender());
-          auto node = resolve(nodeName, map_index);
-          if (!combo || !node.valid()) return;
-          try {
-            node.set_enum(combo->currentData().toString().toStdString());
-          } catch (...) {
-            QSignalBlocker b(combo);
-            if (node.is_readable()) combo->setCurrentText(QString::fromStdString(node.get_enum()));
-          }
+          if (!combo) return;
+          write(map_index, nodeName, "enum", combo->currentData().toString().toStdString());
         });
       } break;
       case onegen::NodeKind::Command: {
         auto* btn = new QPushButton(QStringLiteral("Execute"));
         w = btn;
         connect(btn, &QPushButton::clicked, this, [this, nodeName, map_index] {
-          auto node = resolve(nodeName, map_index);
-          if (!node.valid()) return;
-          try {
-            node.execute();
-          } catch (...) {
-          }
+          write(map_index, nodeName, "execute", {});
         });
       } break;
       case onegen::NodeKind::Category:
@@ -269,71 +279,84 @@ QWidget* FeatureTreeWidget::createEditor(const onegen::Node& n, const int map_in
       default: {
         auto* lab = new QLabel;
         w = lab;
-        try {
-          lab->setText(QString::fromStdString(n.value_text()));
-        } catch (...) {
-        }
+        lab->setText(QString::fromStdString(n.string_value));
       } break;
     }
   } catch (...) {
     delete w;
     return nullptr;
   }
-  if (w) w->setEnabled(n.is_writable() || n.kind() == onegen::NodeKind::Command);
+  if (w) w->setEnabled(n.writable || n.kind == onegen::NodeKind::Command);
   return w;
 }
 
+void FeatureTreeWidget::write(const int map_index, const QString& nodeName, const std::string_view op,
+                              const std::string_view value)
+{
+  if (!write_) return;
+  try {
+    write_(map_index, nodeName.toStdString(), op, value);
+    refreshEditor(nodeName, map_index);
+  } catch (const std::exception& error) {
+    qWarning().noquote() << QStringLiteral("OneGen feature write failed: %1: %2")
+                                .arg(nodeName, QString::fromLocal8Bit(error.what()));
+    refreshEditor(nodeName, map_index);
+  } catch (...) {
+    qWarning().noquote() << QStringLiteral("OneGen feature write failed: %1").arg(nodeName);
+    refreshEditor(nodeName, map_index);
+  }
+}
+
 bool FeatureTreeWidget::refreshEditor(const QString& nodeName, const int map_index) {
-  auto n = resolve(nodeName, map_index);
-  if (!n.valid()) return false;
+  const auto n = resolve(nodeName, map_index);
+  if (n.name.empty() && n.kind == onegen::NodeKind::Other) return false;
   const auto items = itemsNamed(nodeName, map_index);
   if (items.isEmpty()) return false;
   bool ok = false;
   for (auto* item : items) {
     auto* w = itemWidget(item, 1);
     try {
-      switch (n.kind()) {
+      switch (n.kind) {
         case onegen::NodeKind::Integer:
           if (auto* box = qobject_cast<QSpinBox*>(w)) {
             QSignalBlocker b(box);
-            box->setEnabled(n.is_writable());
-            box->setRange(clamp_int(n.int_min()), clamp_int(n.int_max()));
-            const auto inc = n.int_inc();
-            box->setSingleStep(inc > 0 && inc <= INT_MAX ? static_cast<int>(inc) : 1);
-            if (n.is_readable()) box->setValue(clamp_int(n.get_int()));
+            box->setEnabled(n.writable);
+            box->setRange(clamp_int(n.int_min), clamp_int(n.int_max));
+            box->setSingleStep(n.int_inc > 0 && n.int_inc <= INT_MAX ? static_cast<int>(n.int_inc) : 1);
+            if (n.readable) box->setValue(clamp_int(n.int_value));
             ok = true;
           }
           break;
         case onegen::NodeKind::Float:
           if (auto* box = qobject_cast<QDoubleSpinBox*>(w)) {
             QSignalBlocker b(box);
-            box->setEnabled(n.is_writable());
-            box->setRange(n.float_min(), n.float_max());
-            if (n.is_readable()) box->setValue(n.get_float());
+            box->setEnabled(n.writable);
+            box->setRange(n.float_min, n.float_max);
+            if (n.readable) box->setValue(n.float_value);
             ok = true;
           }
           break;
         case onegen::NodeKind::Boolean:
           if (auto* box = qobject_cast<QCheckBox*>(w)) {
             QSignalBlocker b(box);
-            box->setEnabled(n.is_writable());
-            if (n.is_readable()) box->setChecked(n.get_bool());
+            box->setEnabled(n.writable);
+            if (n.readable) box->setChecked(n.bool_value);
             ok = true;
           }
           break;
         case onegen::NodeKind::String:
           if (auto* edit = qobject_cast<QLineEdit*>(w)) {
             QSignalBlocker b(edit);
-            edit->setEnabled(n.is_writable());
-            if (n.is_readable()) edit->setText(QString::fromStdString(n.get_string()));
+            edit->setEnabled(n.writable);
+            if (n.readable) edit->setText(QString::fromStdString(n.string_value));
             ok = true;
           }
           break;
         case onegen::NodeKind::Enumeration: {
           if (auto* combo = qobject_cast<QComboBox*>(w)) {
             QSignalBlocker b(combo);
-            combo->setEnabled(n.is_writable());
-            const auto entries = n.enum_entries();
+            combo->setEnabled(n.writable);
+            const auto& entries = n.enum_entries;
             bool same = combo->count() == static_cast<int>(entries.size());
             if (same) {
               for (int i = 0; i < combo->count(); ++i) {
@@ -348,19 +371,19 @@ bool FeatureTreeWidget::refreshEditor(const QString& nodeName, const int map_ind
               for (const auto& e : entries)
                 combo->addItem(QString::fromStdString(e), QString::fromStdString(e));
             }
-            if (n.is_readable()) combo->setCurrentText(QString::fromStdString(n.get_enum()));
+            if (n.readable) combo->setCurrentText(QString::fromStdString(n.enum_value));
             ok = true;
           }
         } break;
         case onegen::NodeKind::Command:
           if (auto* btn = qobject_cast<QPushButton*>(w)) {
-            btn->setEnabled(n.is_writable());
+            btn->setEnabled(n.writable);
             ok = true;
           }
           break;
         default:
           if (auto* lab = qobject_cast<QLabel*>(w)) {
-            if (n.is_readable()) lab->setText(QString::fromStdString(n.value_text()));
+            if (n.readable) lab->setText(QString::fromStdString(n.string_value));
             ok = true;
           }
           break;
@@ -397,26 +420,14 @@ void FeatureTreeWidget::restoreExpanded(QTreeWidgetItem* item, const QSet<QStrin
   for (int i = 0; i < item->childCount(); ++i) restoreExpanded(item->child(i), names);
 }
 
-void FeatureTreeWidget::onInvalidate(const int map_index, std::string_view name) {
-  const QString q = QString::fromUtf8(name.data(), static_cast<int>(name.size()));
-  QMetaObject::invokeMethod(
-      this,
-      [this, q, map_index] {
-        if (rebuilding_) return;
-        pending_.insert(QString::number(map_index) + QChar('\n') + q);
-        if (!drain_timer_->isActive()) drain_timer_->start();
-      },
-      Qt::QueuedConnection);
-}
-
-bool FeatureTreeWidget::shouldShow(const onegen::Node& n) const {
-  if (!n.valid() || n.kind() == onegen::NodeKind::Category) return false;
-  if (!n.is_visible()) return false;
-  return n.is_readable() || n.kind() == onegen::NodeKind::Command;
+bool FeatureTreeWidget::shouldShow(const onegen::FeatureNode& n) const {
+  if (n.kind == onegen::NodeKind::Category) return false;
+  if (!n.visible) return false;
+  return n.readable || n.kind == onegen::NodeKind::Command;
 }
 
 void FeatureTreeWidget::refreshAllEditors() {
-  if (maps_.empty() || rebuilding_) return;
+  if (modules_.empty() || rebuilding_) return;
   QList<QTreeWidgetItem*> stack;
   for (int i = 0; i < topLevelItemCount(); ++i) stack.append(topLevelItem(i));
   while (!stack.isEmpty()) {
@@ -431,7 +442,7 @@ void FeatureTreeWidget::refreshAllEditors() {
 void FeatureTreeWidget::drainInvalidates() {
   const auto batch = pending_;
   pending_.clear();
-  if (rebuilding_ || maps_.empty()) return;
+  if (rebuilding_ || modules_.empty()) return;
 
   bool need_rebuild = false;
   for (const auto& key : batch) {
@@ -441,19 +452,21 @@ void FeatureTreeWidget::drainInvalidates() {
     auto n = resolve(name, map_index);
     const bool shown = !itemsNamed(name, map_index).isEmpty();
     const bool show = shouldShow(n);
-    if (n.valid() && n.kind() == onegen::NodeKind::Category) continue;
+    if (n.kind == onegen::NodeKind::Category) continue;
     if (shown && show) {
       if (!refreshEditor(name, map_index)) need_rebuild = true;
     } else if (shown != show) {
       need_rebuild = true;
     }
   }
-  // Topology changes wait until stop so live isn't a full tree rebuild every frame.
   if (need_rebuild && !grabbing_) rebuild();
 }
 
-onegen::Node FeatureTreeWidget::resolve(const QString& nodeName, const int map_index) const {
-  if (map_index < 0 || map_index >= static_cast<int>(maps_.size()) || !maps_[map_index].second)
+onegen::FeatureNode FeatureTreeWidget::resolve(const QString& nodeName, const int map_index) const {
+  if (!read_) return {};
+  try {
+    return read_(map_index, nodeName.toStdString());
+  } catch (...) {
     return {};
-  return maps_[map_index].second->find(nodeName.toStdString());
+  }
 }

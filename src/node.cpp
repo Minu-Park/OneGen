@@ -514,4 +514,64 @@ void Node::set(bool v) {
   set_bool(v);
 }
 
+FeatureNode snapshot(const Node& node)
+{
+  FeatureNode out;
+  if (!node.valid()) return out;
+  out.name = node.name();
+  out.display_name = node.display_name();
+  out.description = node.description();
+  out.tooltip = node.tooltip();
+  out.kind = node.kind();
+  out.readable = node.is_readable();
+  out.writable = node.is_writable();
+  out.visible = node.is_visible();
+  try {
+    switch (out.kind) {
+      case NodeKind::Integer:
+        if (out.readable) out.int_value = node.get_int();
+        out.int_min = node.int_min();
+        out.int_max = node.int_max();
+        out.int_inc = node.int_inc();
+        break;
+      case NodeKind::Float:
+        if (out.readable) out.float_value = node.get_float();
+        out.float_min = node.float_min();
+        out.float_max = node.float_max();
+        break;
+      case NodeKind::Boolean:
+        if (out.readable) out.bool_value = node.get_bool();
+        break;
+      case NodeKind::Enumeration:
+        out.enum_entries = node.enum_entries();
+        if (out.readable) out.enum_value = node.get_enum();
+        break;
+      case NodeKind::String:
+        if (out.readable) out.string_value = node.get_string();
+        break;
+      default:
+        if (out.readable) out.string_value = node.value_text();
+        break;
+    }
+  } catch (...) {
+  }
+  if (out.kind == NodeKind::Category) {
+    for (const auto& child : node.children()) out.children.push_back(snapshot(child));
+  }
+  return out;
+}
+
+void apply_feature(Node node, std::string_view op, std::string_view value)
+{
+  if (!node.valid()) throw Error("feature: invalid node");
+  const std::string text(value);
+  if (op == "int") node.set_int(std::stoll(text));
+  else if (op == "float") node.set_float(std::stod(text));
+  else if (op == "bool") node.set_bool(text == "1" || text == "true");
+  else if (op == "string") node.set_string(text);
+  else if (op == "enum") node.set_enum(text);
+  else if (op == "execute") node.execute();
+  else throw Error("feature: unsupported operation " + std::string(op));
+}
+
 }  // namespace onegen

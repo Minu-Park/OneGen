@@ -5,6 +5,7 @@
 #include "onegen/onegen.hpp"
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -16,7 +17,10 @@ namespace onegen {
 struct Producer {
   std::filesystem::path path;
   Gentl api;
+  std::map<std::string, GenTL::IF_HANDLE> interfaces;
 };
+
+void close_interfaces(Producer& producer);
 
 struct FoundDevice {
   Producer* producer = nullptr;

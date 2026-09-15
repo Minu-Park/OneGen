@@ -22,6 +22,14 @@ void appendCti(std::vector<std::filesystem::path>& paths, const std::filesystem:
   if (!error) paths.push_back(canonical);
 }
 
+void appendCtisRecursively(std::vector<std::filesystem::path>& paths,
+                           const std::filesystem::path& root) {
+  std::error_code error;
+  for (std::filesystem::recursive_directory_iterator it(root, error), last;
+       !error && it != last; it.increment(error))
+    appendCti(paths, it->path());
+}
+
 }  // namespace
 
 std::vector<std::filesystem::path> pylonCtis() {
@@ -67,8 +75,21 @@ std::filesystem::path pylonCti() {
   return all.empty() ? std::filesystem::path{} : all.front();
 }
 
+std::vector<std::filesystem::path> producerCtis(const std::filesystem::path& root) {
+  std::vector<std::filesystem::path> paths;
+  std::error_code error;
+  if (std::filesystem::is_directory(root, error)) appendCtisRecursively(paths, root);
+  std::sort(paths.begin(), paths.end());
+  paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+  return paths;
+}
+
 std::vector<std::filesystem::path> producerCtis() {
   auto paths = pylonCtis();
+  if (const char* package_root = std::getenv("ONEGEN_CTI_ROOT")) {
+    const auto package_paths = producerCtis(std::filesystem::path(package_root));
+    paths.insert(paths.end(), package_paths.begin(), package_paths.end());
+  }
   const char* environment = std::getenv(sizeof(void*) == 8
       ? "GENICAM_GENTL64_PATH" : "GENICAM_GENTL32_PATH");
   if (environment) {

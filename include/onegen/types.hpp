@@ -19,6 +19,7 @@ struct DeviceInfo {
   std::string ip;
   std::string tl_type;
   std::string cti_path;
+  std::vector<std::string> cti_candidates;
 };
 
 struct DataStreamInfo {
@@ -38,6 +39,7 @@ struct Frame {
     bool incomplete = false;
     bool image_present = false;
     bool contains_chunk_data = false;
+    std::string diagnostic;
   };
 
   struct Scan3dGeometry {

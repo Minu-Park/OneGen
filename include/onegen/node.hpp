@@ -19,6 +19,30 @@ enum class NodeKind {
   Other
 };
 
+/** Copied GenApi node record with no vendor pointers. */
+struct FeatureNode {
+  std::string name;
+  std::string display_name;
+  std::string description;
+  std::string tooltip;
+  NodeKind kind = NodeKind::Other;
+  bool readable = false;
+  bool writable = false;
+  bool visible = false;
+  std::int64_t int_value = 0;
+  std::int64_t int_min = 0;
+  std::int64_t int_max = 0;
+  std::int64_t int_inc = 1;
+  double float_value = 0;
+  double float_min = 0;
+  double float_max = 0;
+  bool bool_value = false;
+  std::string string_value;
+  std::string enum_value;
+  std::vector<std::string> enum_entries;
+  std::vector<FeatureNode> children;
+};
+
 class NodeMap;
 
 struct NodeMapAccess;
@@ -110,5 +134,10 @@ private:
   Impl* impl_ = nullptr;
   void* nodemap_ = nullptr;
 };
+
+/** Copy one node, including category children. */
+FeatureNode snapshot(const Node& node);
+/** Apply a copied write: int, float, bool, string, enum, or execute. */
+void apply_feature(Node node, std::string_view op, std::string_view value);
 
 }  // namespace onegen

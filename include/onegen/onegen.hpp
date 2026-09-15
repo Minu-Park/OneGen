@@ -16,7 +16,9 @@ namespace defaults {
 // Documented locations only. Nothing is loaded until loadCti().
 std::filesystem::path pylonCti();
 std::vector<std::filesystem::path> pylonCtis();
-/** Return canonical CTIs from standard GenTL paths plus documented pylon locations. */
+/** Return canonical CTIs recursively found below one trusted package root. */
+std::vector<std::filesystem::path> producerCtis(const std::filesystem::path& root);
+/** Return canonical CTIs from ONEGEN_CTI_ROOT, standard GenTL paths, and documented locations. */
 std::vector<std::filesystem::path> producerCtis();
 }  // namespace defaults
 
@@ -27,6 +29,7 @@ public:
   OneGen(const OneGen&) = delete;
   OneGen& operator=(const OneGen&) = delete;
 
+  /** Load a producer once; repeated calls for the same canonical path are harmless. */
   void loadCti(const std::filesystem::path& cti);
   void unloadCti(const std::filesystem::path& cti);
   /** @return Whether at least one GenTL producer is loaded. */

@@ -30,22 +30,39 @@ int main() {
 #ifdef _WIN32
   char* old_path = nullptr;
   std::size_t old_path_size = 0;
+  char* old_package_root = nullptr;
+  std::size_t old_package_root_size = 0;
   _dupenv_s(&old_path, &old_path_size, "GENICAM_GENTL64_PATH");
+  _dupenv_s(&old_package_root, &old_package_root_size, "ONEGEN_CTI_ROOT");
   _putenv_s("GENICAM_GENTL64_PATH", temp.string().c_str());
+  _putenv_s("ONEGEN_CTI_ROOT", temp.string().c_str());
 #else
   const char* old_value = std::getenv("GENICAM_GENTL64_PATH");
   const std::string old_path = old_value ? old_value : "";
+  const char* old_package_value = std::getenv("ONEGEN_CTI_ROOT");
+  const std::string old_package_root = old_package_value ? old_package_value : "";
   setenv("GENICAM_GENTL64_PATH", temp.c_str(), 1);
+  setenv("ONEGEN_CTI_ROOT", temp.c_str(), 1);
 #endif
   const auto environment_ctis = onegen::defaults::producerCtis();
   assert(std::find(environment_ctis.begin(), environment_ctis.end(),
                    std::filesystem::weakly_canonical(fake_cti)) != environment_ctis.end());
+  const auto package_cti = temp / "vendor" / "nested" / "Custom.CTI";
+  std::filesystem::create_directories(package_cti.parent_path());
+  std::ofstream(package_cti).put('\0');
+  const auto refreshed_ctis = onegen::defaults::producerCtis();
+  assert(std::find(refreshed_ctis.begin(), refreshed_ctis.end(),
+                   std::filesystem::weakly_canonical(package_cti)) != refreshed_ctis.end());
 #ifdef _WIN32
   _putenv_s("GENICAM_GENTL64_PATH", old_path ? old_path : "");
+  _putenv_s("ONEGEN_CTI_ROOT", old_package_root ? old_package_root : "");
   free(old_path);
+  free(old_package_root);
 #else
   if (old_value) setenv("GENICAM_GENTL64_PATH", old_path.c_str(), 1);
   else unsetenv("GENICAM_GENTL64_PATH");
+  if (old_package_value) setenv("ONEGEN_CTI_ROOT", old_package_root.c_str(), 1);
+  else unsetenv("ONEGEN_CTI_ROOT");
 #endif
   std::filesystem::remove_all(temp);
 
@@ -98,6 +115,9 @@ int main() {
     threw = std::string(e.what()).find("none enumerated") != std::string::npos;
   }
   assert(threw);
+
+  auto& camera = system.addCamera();
+  assert(camera.buffer_count() == 10);
 
   std::cout << "test_open_query ok\n";
   return 0;

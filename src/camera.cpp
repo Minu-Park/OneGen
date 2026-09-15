@@ -10,6 +10,7 @@
 #include <GenApi/ChunkAdapterGeneric.h>
 #include <GenApi/Persistence.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -17,6 +18,8 @@
 #include <fstream>
 #include <limits>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -43,6 +46,8 @@ std::uint64_t buffer_info(Gentl* g, GenTL::DS_HANDLE hds, GenTL::BUFFER_HANDLE b
   GenTL::INFO_DATATYPE t = GenTL::INFO_DATATYPE_UNKNOWN;
   if (!g || g->DSGetBufferInfo(hds, b, cmd, &t, raw, &n) != GenTL::GC_ERR_SUCCESS) return 0;
   switch (t) {
+    case GenTL::INFO_DATATYPE_BOOL8:
+      return raw[0] != 0;
     case GenTL::INFO_DATATYPE_INT16:
     case GenTL::INFO_DATATYPE_UINT16: {
       std::uint16_t v = 0;
@@ -66,6 +71,90 @@ std::uint64_t buffer_info(Gentl* g, GenTL::DS_HANDLE hds, GenTL::BUFFER_HANDLE b
     default:
       return 0;
   }
+}
+
+void try_execute(NodeMap& map, const char* name) {
+  auto node = map.find(name);
+  if (!node.valid() || !node.is_writable()) return;
+  try {
+    node.execute();
+  } catch (...) {
+  }
+}
+
+void try_set_bool(NodeMap& map, const char* name, bool value) {
+  auto node = map.find(name);
+  if (!node.valid() || node.kind() != NodeKind::Boolean || !node.is_writable()) return;
+  try {
+    node.set_bool(value);
+  } catch (...) {
+  }
+}
+
+void try_set_int(NodeMap& map, const char* name, std::int64_t value) {
+  auto node = map.find(name);
+  if (!node.valid() || node.kind() != NodeKind::Integer || !node.is_writable()) return;
+  try {
+    const auto lo = node.int_min();
+    const auto hi = node.int_max();
+    if (hi >= lo) {
+      if (value > hi) value = hi;
+      if (value < lo) value = lo;
+    }
+    node.set_int(value);
+  } catch (...) {
+  }
+}
+
+std::uint64_t stream_info_u64(Gentl* g, GenTL::DS_HANDLE hds, GenTL::STREAM_INFO_CMD cmd) {
+  unsigned char raw[16] = {};
+  size_t n = sizeof(raw);
+  GenTL::INFO_DATATYPE type = GenTL::INFO_DATATYPE_UNKNOWN;
+  if (!g || g->DSGetInfo(hds, cmd, &type, raw, &n) != GenTL::GC_ERR_SUCCESS) return 0;
+  std::uint64_t value = 0;
+  std::memcpy(&value, raw, n < sizeof(value) ? n : sizeof(value));
+  return value;
+}
+
+std::string readable_category(NodeMap& map, const char* name) {
+  auto category = map.find(name);
+  if (!category.valid() || category.kind() != NodeKind::Category) return {};
+  std::string out;
+  for (const auto& child : category.children()) {
+    if (!child.is_readable()) continue;
+    std::string text;
+    try {
+      text = child.value_text();
+    } catch (...) {
+      continue;
+    }
+    if (text.empty()) continue;
+    if (!out.empty()) out += ", ";
+    out += child.name() + '=' + text;
+  }
+  return out;
+}
+
+std::string incomplete_error(Gentl* g, GenTL::DS_HANDLE hds, const Frame::BufferInfo& info,
+                             NodeMap& stream, std::uint64_t width, std::uint64_t height,
+                             std::uint64_t pixel_format, std::uint64_t frame_id) {
+  std::ostringstream out;
+  out << "grab: producer marked buffer incomplete; PFNC 0x" << std::hex << pixel_format
+      << std::dec << ", " << width << 'x' << height << ", frame " << frame_id
+      << "; buffer{capacity=" << info.capacity << ", filled=" << info.size_filled
+      << ", data=" << info.data_size << ", deliveredHeight=" << info.delivered_image_height
+      << ", imageOffset=" << info.image_offset << ", yPadding=" << info.y_padding
+      << ", imagePresent=" << info.image_present << ", chunk=" << info.contains_chunk_data
+      << "}; stream{delivered=" << stream_info_u64(g, hds, GenTL::STREAM_INFO_NUM_DELIVERED)
+      << ", underrun=" << stream_info_u64(g, hds, GenTL::STREAM_INFO_NUM_UNDERRUN)
+      << ", announced=" << stream_info_u64(g, hds, GenTL::STREAM_INFO_NUM_ANNOUNCED)
+      << ", queued=" << stream_info_u64(g, hds, GenTL::STREAM_INFO_NUM_QUEUED)
+      << ", started=" << stream_info_u64(g, hds, GenTL::STREAM_INFO_NUM_STARTED)
+      << ", await=" << stream_info_u64(g, hds, GenTL::STREAM_INFO_NUM_AWAIT_DELIVERY) << '}';
+  auto stats = readable_category(stream, "Statistic");
+  if (stats.empty()) stats = readable_category(stream, "Statistics");
+  if (!stats.empty()) out << "; " << stats;
+  return out.str();
 }
 
 std::uint64_t part_info(Gentl* g, GenTL::DS_HANDLE hds, GenTL::BUFFER_HANDLE b,
@@ -144,18 +233,24 @@ struct Camera::Impl {
   GenTL::EVENT_HANDLE hev = nullptr;
   size_t nbuf = 0;
   NodeMap features;
+  NodeMap stream_features;
   NodeMap interface_features;
   NodeMap device_features;
   std::mutex acq_mu;
   std::string open_key;
   std::uint32_t stream_index = 0;
   std::string stream_id;
-  std::size_t requested_buffer_count = 4;
+  std::size_t requested_buffer_count = 10;
   std::uint64_t single_timeout_ms = 10000;
   std::optional<Frame::Scan3dGeometry> scan3d_geometry;
+  std::size_t buffer_capacity = 0;
+  bool acquiring = false;
 
-  void stop_stream();
+  void release_stream();
+  void stop_acquisition();
+  void prepare_stream();
   void start_stream(uint64_t n_frames);
+  std::size_t payload_size();
   Frame grab_one(uint64_t timeout_ms);
   void cmd(const char* name);
   bool try_trigger();
@@ -182,6 +277,7 @@ NodeMap& Camera::features(const Module module) {
   switch (module) {
     case Module::Interface: return impl_->interface_features;
     case Module::Device: return impl_->device_features;
+    case Module::DataStream: return impl_->stream_features;
     case Module::RemoteDevice: return impl_->features;
   }
   return impl_->features;
@@ -204,9 +300,11 @@ std::vector<DataStreamInfo> Camera::data_streams() const {
 }
 
 void Camera::select_data_stream(const std::uint32_t index) {
-  if (impl_->hds || impl_->live) throw Error("select_data_stream: acquisition is active");
+  if (impl_->live) throw Error("select_data_stream: acquisition is active");
   const auto streams = data_streams();
   if (index >= streams.size()) throw Error("select_data_stream: index out of range");
+  if (index == impl_->stream_index) return;
+  impl_->release_stream();
   impl_->stream_index = index;
   impl_->stream_id = streams[index].id;
 }
@@ -262,6 +360,7 @@ void Camera::load_features(const std::string_view path, const Module module, con
 
 Node Camera::feature(std::string_view name) {
   Node n = impl_->features.find(name);
+  if (!n.valid()) n = impl_->stream_features.find(name);
   if (!n.valid()) n = impl_->device_features.find(name);
   if (!n.valid()) n = impl_->interface_features.find(name);
   if (!n.valid()) throw Error("feature not found: " + std::string(name));
@@ -283,7 +382,10 @@ void Camera::open(std::string_view query) {
   std::lock_guard<std::recursive_mutex> lk(og->mu);
   if (og->producers.empty()) throw Error("open: no CTI loaded");
 
-  auto found = scan_devices(og->producers, 1000);
+  // Probe left the GenTL interface open. Timeout 0 reuses that list; a closed
+  // handle would force another full GigE wait and can miss the camera.
+  auto found = scan_devices(og->producers, 0);
+  if (found.empty()) found = scan_devices(og->producers, 10000);
   std::vector<DeviceInfo> infos;
   infos.reserve(found.size());
   for (auto& f : found) infos.push_back(f.info);
@@ -298,10 +400,10 @@ void Camera::open(std::string_view query) {
   if (og->open_keys.count(key)) throw Error("open: device already open: " + hit->info.id);
 
   auto& g = hit->producer->api;
-  GenTL::IF_HANDLE hif = nullptr;
-  g.check(g.TLOpenInterface(g.tl, hit->if_id.c_str(), &hif), "TLOpenInterface");
-  bool8_t ch = 0;
-  g.check(g.IFUpdateDeviceList(hif, &ch, 1000), "IFUpdateDeviceList");
+  const auto if_it = hit->producer->interfaces.find(hit->if_id);
+  if (if_it == hit->producer->interfaces.end() || !if_it->second)
+    throw Error("open: interface is not open");
+  GenTL::IF_HANDLE hif = if_it->second;
 
   GenTL::DEVICE_ACCESS_FLAGS modes[] = {GenTL::DEVICE_ACCESS_EXCLUSIVE,
                                         GenTL::DEVICE_ACCESS_CONTROL};
@@ -312,9 +414,14 @@ void Camera::open(std::string_view query) {
     if (err == GenTL::GC_ERR_SUCCESS) break;
   }
   if (err != GenTL::GC_ERR_SUCCESS) {
-    g.IFClose(hif);
-    g.fail("IFOpenDevice");
+    bool8_t ch = 0;
+    g.check(g.IFUpdateDeviceList(hif, &ch, 10000), "IFUpdateDeviceList");
+    for (auto m : modes) {
+      err = g.IFOpenDevice(hif, hit->info.id.c_str(), m, &hdev);
+      if (err == GenTL::GC_ERR_SUCCESS) break;
+    }
   }
+  if (err != GenTL::GC_ERR_SUCCESS) g.fail("IFOpenDevice");
 
   try {
     try { load_remote_nodemap(impl_->interface_features, g, hif); } catch (...) {}
@@ -335,7 +442,6 @@ void Camera::open(std::string_view query) {
     impl_->device_features.detach();
     impl_->interface_features.detach();
     g.DevClose(hdev);
-    g.IFClose(hif);
     throw;
   }
 
@@ -373,19 +479,35 @@ void Camera::Impl::snapshot_scan3d_geometry() {
   scan3d_geometry = read_scan3d_geometry(features, "");
 }
 
-void Camera::Impl::stop_stream() {
+void Camera::Impl::stop_acquisition() {
   stop_live = true;
-  if (g && hev) g->EventKill(hev);
+  if (live_thread.joinable() && g && hev) g->EventKill(hev);
   if (live_thread.joinable() && live_thread.get_id() != std::this_thread::get_id())
     live_thread.join();
   live = false;
 
-  if (!g || !hds) return;
+  if (!g || !hds || !acquiring) return;
   try {
     cmd("AcquisitionStop");
   } catch (...) {
   }
   g->DSStopAcquisition(hds, GenTL::ACQ_STOP_FLAGS_DEFAULT);
+  g->DSFlushQueue(hds, GenTL::ACQ_QUEUE_ALL_TO_INPUT);
+  if (hev) {
+    g->GCUnregisterEvent(hds, GenTL::EVENT_NEW_BUFFER);
+    hev = nullptr;
+  }
+  acquiring = false;
+  try {
+    set_locked(0);
+  } catch (...) {
+  }
+}
+
+void Camera::Impl::release_stream() {
+  stop_acquisition();
+  if (!g || !hds) return;
+  stream_features.detach();
   if (hev) {
     g->GCUnregisterEvent(hds, GenTL::EVENT_NEW_BUFFER);
     hev = nullptr;
@@ -397,12 +519,9 @@ void Camera::Impl::stop_stream() {
       g->DSRevokeBuffer(hds, b, nullptr, nullptr);
   }
   nbuf = 0;
+  buffer_capacity = 0;
   g->DSClose(hds);
   hds = nullptr;
-  try {
-    set_locked(0);
-  } catch (...) {
-  }
 }
 
 void Camera::close() {
@@ -410,11 +529,12 @@ void Camera::close() {
   if (!impl_->opened) return;
   auto* og = impl_->owner->impl_.get();
   std::lock_guard<std::recursive_mutex> lk(og->mu);
+  impl_->release_stream();
   impl_->features.detach();
+  impl_->stream_features.detach();
   impl_->device_features.detach();
   impl_->interface_features.detach();
   if (impl_->g && impl_->hdev) impl_->g->DevClose(impl_->hdev);
-  if (impl_->g && impl_->hif) impl_->g->IFClose(impl_->hif);
   og->open_keys.erase(impl_->open_key);
   impl_->hdev = nullptr;
   impl_->hif = nullptr;
@@ -427,9 +547,9 @@ void Camera::close() {
   impl_->open_key.clear();
 }
 
-void Camera::Impl::start_stream(uint64_t n_frames) {
+void Camera::Impl::prepare_stream() {
   if (!opened || !g) throw Error("stream: camera not open");
-  if (hds) stop_stream();
+  if (hds) return;
 
   uint32_t ns = 0;
   g->check(g->DevGetNumDataStreams(hdev, &ns), "DevGetNumDataStreams");
@@ -440,10 +560,44 @@ void Camera::Impl::start_stream(uint64_t n_frames) {
   g->check(g->DevGetDataStreamID(hdev, stream_index, dsid, &dsn), "DevGetDataStreamID");
   stream_id = dsid;
   g->check(g->DevOpenDataStream(hdev, dsid, &hds), "DevOpenDataStream");
+  try { load_remote_nodemap(stream_features, *g, hds); } catch (...) {}
+  try_set_bool(stream_features, "AutoPacketSize", true);
+  try_execute(stream_features, "ProbePacketSize");
+  try_set_bool(stream_features, "EnableResend", true);
+  try_set_int(stream_features, "MaxNumBuffer",
+              static_cast<std::int64_t>(requested_buffer_count));
 
   snapshot_scan3d_geometry();
-  set_locked(1);
 
+  const auto payload = payload_size();
+  buffer_capacity = payload;
+
+  size_t min_buf = requested_buffer_count;
+  GenTL::INFO_DATATYPE t = GenTL::INFO_DATATYPE_UNKNOWN;
+  size_t sz = sizeof(min_buf);
+  if (g->DSGetInfo(hds, GenTL::STREAM_INFO_BUF_ANNOUNCE_MIN, &t, &min_buf, &sz) !=
+      GenTL::GC_ERR_SUCCESS)
+    min_buf = requested_buffer_count;
+  if (min_buf < requested_buffer_count) min_buf = requested_buffer_count;
+  auto max_buf = stream_features.find("MaxNumBuffer");
+  if (max_buf.valid() && max_buf.is_readable()) {
+    try {
+      const auto cap = static_cast<std::size_t>(max_buf.get_int());
+      if (cap && cap < min_buf) min_buf = cap;
+    } catch (...) {
+    }
+  }
+
+  nbuf = min_buf;
+  for (size_t i = 0; i < nbuf; ++i) {
+    GenTL::BUFFER_HANDLE b = nullptr;
+    g->check(g->DSAllocAndAnnounceBuffer(hds, payload, nullptr, &b), "DSAllocAndAnnounceBuffer");
+    g->check(g->DSQueueBuffer(hds, b), "DSQueueBuffer");
+  }
+
+}
+
+std::size_t Camera::Impl::payload_size() {
   size_t payload = 0;
   GenTL::INFO_DATATYPE t = GenTL::INFO_DATATYPE_UNKNOWN;
   size_t sz = sizeof(payload);
@@ -458,27 +612,51 @@ void Camera::Impl::start_stream(uint64_t n_frames) {
     auto p = features.find("PayloadSize");
     if (p.valid() && p.is_readable()) payload = static_cast<size_t>(p.get_int());
   }
-  if (payload == 0) payload = 16 * 1024 * 1024;  // ponytail: ceiling unknown until DS reports
+  if (payload == 0) throw Error("stream payload size is unavailable");
+  return payload;
+}
 
-  size_t min_buf = requested_buffer_count;
-  sz = sizeof(min_buf);
-  if (g->DSGetInfo(hds, GenTL::STREAM_INFO_BUF_ANNOUNCE_MIN, &t, &min_buf, &sz) !=
-      GenTL::GC_ERR_SUCCESS)
-    min_buf = requested_buffer_count;
-  if (min_buf < requested_buffer_count) min_buf = requested_buffer_count;
-
-  nbuf = min_buf;
-  for (size_t i = 0; i < nbuf; ++i) {
-    GenTL::BUFFER_HANDLE b = nullptr;
-    g->check(g->DSAllocAndAnnounceBuffer(hds, payload, nullptr, &b), "DSAllocAndAnnounceBuffer");
-    g->check(g->DSQueueBuffer(hds, b), "DSQueueBuffer");
+void Camera::Impl::start_stream(uint64_t n_frames) {
+  prepare_stream();
+  if (acquiring) stop_acquisition();
+  if (payload_size() > buffer_capacity) {
+    release_stream();
+    prepare_stream();
   }
-
-  g->check(g->GCRegisterEvent(hds, GenTL::EVENT_NEW_BUFFER, &hev), "GCRegisterEvent");
-  g->check(g->DSStartAcquisition(hds, GenTL::ACQ_START_FLAGS_DEFAULT, n_frames),
-           "DSStartAcquisition");
-  auto acquisition_start = features.find("AcquisitionStart");
-  if (acquisition_start.valid()) acquisition_start.execute();
+  snapshot_scan3d_geometry();
+  set_locked(1);
+  try {
+    g->check(g->GCRegisterEvent(hds, GenTL::EVENT_NEW_BUFFER, &hev), "GCRegisterEvent");
+    g->check(g->DSStartAcquisition(hds, GenTL::ACQ_START_FLAGS_DEFAULT, n_frames),
+             "DSStartAcquisition");
+    acquiring = true;
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(single_timeout_ms);
+    while (true) {
+      bool8_t grabbing = 0;
+      GenTL::INFO_DATATYPE type = GenTL::INFO_DATATYPE_UNKNOWN;
+      size_t size = sizeof(grabbing);
+      if (g->DSGetInfo(hds, GenTL::STREAM_INFO_IS_GRABBING, &type, &grabbing, &size)
+          != GenTL::GC_ERR_SUCCESS || grabbing)
+        break;
+      if (std::chrono::steady_clock::now() >= deadline)
+        throw Error("DSStartAcquisition: stream did not enter grabbing state");
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    auto acquisition_start = features.find("AcquisitionStart");
+    if (acquisition_start.valid()) acquisition_start.execute();
+  } catch (...) {
+    stop_acquisition();
+    if (hev) {
+      g->GCUnregisterEvent(hds, GenTL::EVENT_NEW_BUFFER);
+      hev = nullptr;
+    }
+    try {
+      set_locked(0);
+    } catch (...) {
+    }
+    throw;
+  }
 }
 
 Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
@@ -504,7 +682,6 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   f.buffer_info.incomplete = u64(GenTL::BUFFER_INFO_IS_INCOMPLETE) != 0;
   f.buffer_info.image_present = u64(GenTL::BUFFER_INFO_IMAGEPRESENT) != 0;
   f.buffer_info.contains_chunk_data = u64(GenTL::BUFFER_INFO_CONTAINS_CHUNKDATA) != 0;
-  if (f.buffer_info.incomplete) throw Error("grab: producer marked buffer incomplete");
 
   auto* base = reinterpret_cast<const std::uint8_t*>(static_cast<uintptr_t>(u64(GenTL::BUFFER_INFO_BASE)));
   const auto capacity = f.buffer_info.capacity;
@@ -552,6 +729,16 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
       f.stride = row_bytes + padding;
   }
   if (f.payload_type == GenTL::PAYLOAD_TYPE_JPEG && !f.stride) f.stride = filled;
+  if (f.buffer_info.incomplete && f.stride && filled > f.buffer_info.image_offset) {
+    const auto usable = filled - f.buffer_info.image_offset;
+    const auto rows = usable / f.stride;
+    if (rows && rows < f.height) f.height = static_cast<std::uint32_t>(rows);
+  }
+  if (f.buffer_info.incomplete) {
+    f.buffer_info.diagnostic = incomplete_error(g, hds, f.buffer_info, stream_features, f.width,
+                                                f.height, f.pixel_format,
+                                                u64(GenTL::BUFFER_INFO_FRAMEID));
+  }
   f.frame_id = u64(GenTL::BUFFER_INFO_FRAMEID);
   f.timestamp = u64(GenTL::BUFFER_INFO_TIMESTAMP);
   f.timestamp_ns = u64(GenTL::BUFFER_INFO_TIMESTAMP_NS);
@@ -645,11 +832,22 @@ std::vector<Frame> Camera::single(std::size_t n) {
       out.push_back(impl_->grab_one(impl_->single_timeout_ms));
     }
   } catch (...) {
-    impl_->stop_stream();
+    impl_->stop_acquisition();
     throw;
   }
-  impl_->stop_stream();
+  impl_->stop_acquisition();
   return out;
+}
+
+void Camera::prepare() {
+  if (!impl_->opened) throw Error("prepare: not open");
+  std::lock_guard<std::mutex> lk(impl_->acq_mu);
+  try {
+    impl_->prepare_stream();
+  } catch (...) {
+    impl_->release_stream();
+    throw;
+  }
 }
 
 void Camera::live() {
@@ -660,7 +858,7 @@ void Camera::live() {
   try {
     impl_->start_stream(GENTL_INFINITE);
   } catch (...) {
-    impl_->stop_stream();
+    impl_->release_stream();
     throw;
   }
   impl_->live = true;
@@ -703,7 +901,7 @@ void Camera::live() {
     });
   } catch (...) {
     impl_->live = false;
-    impl_->stop_stream();
+    impl_->stop_acquisition();
     throw;
   }
 }
@@ -722,7 +920,7 @@ void Camera::stop() {
     if (impl_->g && impl_->hev) impl_->g->EventKill(impl_->hev);
     return;
   }
-  impl_->stop_stream();
+  impl_->stop_acquisition();
 }
 
 }  // namespace onegen

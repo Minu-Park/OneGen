@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 
 namespace onegen {
 namespace {
@@ -34,31 +33,6 @@ std::string ipv4_from_int(std::uint32_t v) {
   if (plausible_ipv4(v)) return dotted_ipv4(v);
   const std::uint32_t s = bswap32(v);
   if (plausible_ipv4(s)) return dotted_ipv4(s);
-  return {};
-}
-
-// pylon ProducerGEV: DEVICE_INFO_BASLER_IPADDR at CUSTOM_ID+0 (then subnet/gateway/mac).
-std::string gentl_custom_ip(Gentl& g, GenTL::IF_HANDLE hif, const char* devid) {
-  for (int cmd = GenTL::DEVICE_INFO_CUSTOM_ID; cmd < GenTL::DEVICE_INFO_CUSTOM_ID + 4; ++cmd) {
-    unsigned char buf[256] = {};
-    size_t n = sizeof(buf);
-    GenTL::INFO_DATATYPE type = GenTL::INFO_DATATYPE_UNKNOWN;
-    if (g.IFGetDeviceInfo(hif, devid, cmd, &type, buf, &n) != GenTL::GC_ERR_SUCCESS) continue;
-    if (type == GenTL::INFO_DATATYPE_STRING) {
-      if (auto ip = extract_ipv4(reinterpret_cast<char*>(buf))) return *ip;
-    } else if (type == GenTL::INFO_DATATYPE_UINT32 || type == GenTL::INFO_DATATYPE_INT32 ||
-               type == GenTL::INFO_DATATYPE_BUFFER) {
-      std::uint32_t v = 0;
-      if (n >= 4) std::memcpy(&v, buf, 4);
-      if (auto s = ipv4_from_int(v); !s.empty()) return s;
-    } else if (type == GenTL::INFO_DATATYPE_UINT64 || type == GenTL::INFO_DATATYPE_INT64) {
-      std::uint64_t v = 0;
-      std::memcpy(&v, buf, n < 8 ? n : 8);
-      if (v <= 0xffffffffull) {
-        if (auto s = ipv4_from_int(static_cast<std::uint32_t>(v)); !s.empty()) return s;
-      }
-    }
-  }
   return {};
 }
 
@@ -97,6 +71,14 @@ void fill_ips_from_interface(Gentl& g, GenTL::IF_HANDLE hif, std::vector<FoundDe
 
 }  // namespace
 
+void close_interfaces(Producer& producer) {
+  for (auto& [id, hif] : producer.interfaces) {
+    (void)id;
+    if (hif) producer.api.IFClose(hif);
+  }
+  producer.interfaces.clear();
+}
+
 std::string gentl_string(Gentl& g, GenTL::IF_HANDLE hif, const char* devid,
                          GenTL::DEVICE_INFO_CMD cmd) {
   char buf[1024] = {};
@@ -121,7 +103,12 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
       size_t ifn = sizeof(ifid);
       g.check(g.TLGetInterfaceID(g.tl, i, ifid, &ifn), "TLGetInterfaceID");
       GenTL::IF_HANDLE hif = nullptr;
-      g.check(g.TLOpenInterface(g.tl, ifid, &hif), "TLOpenInterface");
+      if (const auto it = prod->interfaces.find(ifid); it != prod->interfaces.end()) {
+        hif = it->second;
+      } else {
+        g.check(g.TLOpenInterface(g.tl, ifid, &hif), "TLOpenInterface");
+        prod->interfaces.emplace(ifid, hif);
+      }
       bool8_t dch = 0;
       g.check(g.IFUpdateDeviceList(hif, &dch, timeout_ms), "IFUpdateDeviceList");
       uint32_t nd = 0;
@@ -143,20 +130,16 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
         fd.info.display_name = gentl_string(g, hif, devid, GenTL::DEVICE_INFO_DISPLAYNAME);
         fd.info.tl_type = gentl_string(g, hif, devid, GenTL::DEVICE_INFO_TLTYPE);
         fd.info.cti_path = prod->path.string();
-        fd.info.ip = gentl_custom_ip(g, hif, devid);
-        if (fd.info.ip.empty()) {
-          if (auto ip = extract_ipv4(fd.info.id))
-            fd.info.ip = *ip;
-          else if (auto ip2 = extract_ipv4(fd.info.display_name))
-            fd.info.ip = *ip2;
-          else if (auto ip3 = extract_ipv4(fd.info.user_defined_name))
-            fd.info.ip = *ip3;
-        }
+        if (auto ip = extract_ipv4(fd.info.id))
+          fd.info.ip = *ip;
+        else if (auto ip2 = extract_ipv4(fd.info.display_name))
+          fd.info.ip = *ip2;
+        else if (auto ip3 = extract_ipv4(fd.info.user_defined_name))
+          fd.info.ip = *ip3;
         batch.push_back(std::move(fd));
       }
       fill_ips_from_interface(g, hif, batch);
       for (auto& fd : batch) out.push_back(std::move(fd));
-      g.IFClose(hif);
     }
   }
   return out;
@@ -170,14 +153,17 @@ OneGen::~OneGen() {
     } catch (...) {
     }
   }
-  for (auto& p : impl_->producers) p->api.unload();
+  for (auto& p : impl_->producers) {
+    close_interfaces(*p);
+    p->api.unload();
+  }
 }
 
 void OneGen::loadCti(const std::filesystem::path& cti) {
   const auto canon = std::filesystem::weakly_canonical(cti);
   std::lock_guard<std::recursive_mutex> lk(impl_->mu);
   for (const auto& p : impl_->producers)
-    if (p->path == canon) throw Error("loadCti: already loaded: " + canon.string());
+    if (p->path == canon) return;
   auto prod = std::make_unique<Producer>();
   prod->path = canon;
   prod->api.load(canon);
@@ -193,6 +179,7 @@ void OneGen::unloadCti(const std::filesystem::path& cti) {
   auto it = std::find_if(impl_->producers.begin(), impl_->producers.end(),
                          [&](const auto& p) { return p->path == canon; });
   if (it == impl_->producers.end()) throw Error("unloadCti: not loaded: " + canon.string());
+  close_interfaces(**it);
   (*it)->api.unload();
   impl_->producers.erase(it);
 }

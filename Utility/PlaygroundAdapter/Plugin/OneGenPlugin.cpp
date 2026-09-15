@@ -1,15 +1,27 @@
 #include "DevicePluginTemplate.h"
 
 #include "OneGenControlWidget.h"
+#include "OneGenCoordinator.h"
 #include "OneGenSourceController.h"
 #include "onegen/onegen.hpp"
 
+#include <QDebug>
 #include <QPointer>
 #include <QStringList>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 
 namespace {
+
+QStringList toStringList(const std::vector<std::string>& values)
+{
+  QStringList list;
+  for (const auto& value : values) list.append(QString::fromStdString(value));
+  return list;
+}
 
 QVariantList toDiscoveryData(const std::vector<onegen::DeviceInfo>& devices)
 {
@@ -19,7 +31,10 @@ QVariantList toDiscoveryData(const std::vector<onegen::DeviceInfo>& devices)
                               {QStringLiteral("displayName"), QString::fromStdString(device.display_name)},
                               {QStringLiteral("serial"), QString::fromStdString(device.serial)},
                               {QStringLiteral("model"), QString::fromStdString(device.model)},
-                              {QStringLiteral("ip"), QString::fromStdString(device.ip)}});
+                              {QStringLiteral("ip"), QString::fromStdString(device.ip)},
+                              {QStringLiteral("tlType"), QString::fromStdString(device.tl_type)},
+                              {QStringLiteral("ctiPath"), QString::fromStdString(device.cti_path)},
+                              {QStringLiteral("ctiCandidates"), toStringList(device.cti_candidates)}});
   }
   return values;
 }
@@ -35,30 +50,67 @@ std::vector<onegen::DeviceInfo> fromDiscoveryData(const QVariantList& values)
     device.serial = item.value(QStringLiteral("serial")).toString().toStdString();
     device.model = item.value(QStringLiteral("model")).toString().toStdString();
     device.ip = item.value(QStringLiteral("ip")).toString().toStdString();
+    device.tl_type = item.value(QStringLiteral("tlType")).toString().toStdString();
+    device.cti_path = item.value(QStringLiteral("ctiPath")).toString().toStdString();
+    for (const auto& candidate : item.value(QStringLiteral("ctiCandidates")).toStringList())
+      device.cti_candidates.push_back(candidate.toStdString());
     devices.push_back(std::move(device));
   }
   return devices;
 }
 
+std::vector<onegen::DeviceInfo> discover(
+    const std::shared_ptr<onegen::worker::Coordinator>& coordinator)
+{
+  if (!coordinator) throw std::runtime_error("GenICam discovery is shutting down.");
+  const auto* gentl_key = sizeof(void*) == 8 ? "GENICAM_GENTL64_PATH" : "GENICAM_GENTL32_PATH";
+  const char* gentl_path = std::getenv(gentl_key);
+  qInfo().noquote() << QStringLiteral("OneGen %1=%2")
+                          .arg(QLatin1String(gentl_key),
+                               (gentl_path && *gentl_path) ? QString::fromLocal8Bit(gentl_path)
+                                                           : QStringLiteral("(unset)"));
+  QStringList producers;
+  for (const auto& cti : onegen::defaults::producerCtis())
+    producers.append(QString::fromStdString(cti.string()));
+  qInfo().noquote() << QStringLiteral("OneGen producers: %1")
+                          .arg(producers.isEmpty() ? QStringLiteral("(none)")
+                                                   : producers.join(QLatin1Char('\n')));
+  const auto result = coordinator->discover();
+  qInfo().noquote() << QStringLiteral("OneGen discovery: %1 camera(s), %2 producer failure(s)")
+                           .arg(result.devices.size())
+                           .arg(result.failures.size());
+  for (const auto& failure : result.failures)
+    qWarning().noquote() << QStringLiteral("OneGen probe failed: %1")
+                               .arg(QString::fromStdString(failure));
+  if (!result.completed && !result.failures.empty()) {
+    QStringList failures;
+    for (const auto& failure : result.failures)
+      failures.append(QString::fromStdString(failure));
+    throw std::runtime_error(failures.join(QLatin1Char('\n')).toStdString());
+  }
+  return result.devices;
+}
+
 class OneGenPluginSession final : public IDevicePluginSession {
 public:
-  OneGenPluginSession(std::shared_ptr<onegen::OneGen> system,
+  OneGenPluginSession(std::shared_ptr<onegen::worker::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices)
-      : system_(std::move(system)), camera_(&system_->addCamera()), devices_(std::move(devices)),
-        controller_(std::make_unique<OneGenSourceController>(camera_)) {}
+      : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
+        controller_(std::make_unique<OneGenSourceController>()) {}
 
   ~OneGenPluginSession() override
   {
     if (widget_) widget_->prepareForShutdown();
     controller_.reset();
-    if (system_ && camera_) system_->removeCamera(*camera_);
   }
 
   QString title() const override { return title_; }
   std::vector<DevicePluginDock> createDockWidgets(QWidget* parent) override
   {
     if (!widget_) {
-      widget_ = new OneGenControlWidget(system_, camera_, controller_.get(), devices_, parent);
+      widget_ = new OneGenControlWidget(
+          coordinator_, controller_.get(), devices_,
+          [coordinator = coordinator_] { return discover(coordinator); }, parent);
       widget_->setTitleCallback([this](const QString& title) {
         title_ = title;
         if (title_changed_) title_changed_(title_);
@@ -77,12 +129,11 @@ public:
   { title_changed_ = std::move(callback); }
 
 private:
-  std::shared_ptr<onegen::OneGen> system_;
-  onegen::Camera* camera_ = nullptr;
+  std::shared_ptr<onegen::worker::Coordinator> coordinator_;
   std::vector<onegen::DeviceInfo> devices_;
   std::unique_ptr<OneGenSourceController> controller_;
   QPointer<OneGenControlWidget> widget_;
-  QString title_ = QStringLiteral("OneGen Camera Session");
+  QString title_ = QStringLiteral("GenICam Session");
   std::function<void(const QString&)> title_changed_;
 };
 
@@ -94,30 +145,12 @@ class OneGenPlugin final : public DevicePluginTemplate {
   Q_INTERFACES(IDevicePlugin)
 public:
   DevicePluginDescriptor descriptor() const override
-  { return {QStringLiteral("onegen"), QStringLiteral("OneGen Camera"), playgroundDevicePluginVersion(), false}; }
+  { return {QStringLiteral("onegen"), QStringLiteral("GenICam"), playgroundDevicePluginVersion(), false}; }
 
   bool discoverDevices(QVariantMap* data, QString* error) override
   {
     try {
-      const auto system = oneGen();
-      if (!system) return false;
-      if (!loaded_) {
-        QStringList failures;
-        for (const auto& cti : onegen::defaults::producerCtis()) {
-          try {
-            system->loadCti(cti);
-          } catch (const std::exception& exception) {
-            failures.append(QString::fromLocal8Bit(exception.what()));
-          }
-        }
-        loaded_ = system->hasCti();
-        if (!loaded_ && !failures.isEmpty()) {
-          if (error) *error = failures.join(QLatin1Char('\n'));
-          return false;
-        }
-      }
-      const auto devices = system->hasCti()
-          ? system->enumerate() : std::vector<onegen::DeviceInfo>{};
+      const auto devices = discover(coordinator());
       if (data) data->insert(QStringLiteral("devices"), toDiscoveryData(devices));
       return true;
     } catch (const std::exception& exception) {
@@ -130,10 +163,10 @@ public:
       const QVariantMap& data, QString* error) override
   {
     try {
-      const auto system = oneGen();
-      if (!system) return {};
+      const auto worker_coordinator = coordinator();
+      if (!worker_coordinator) return {};
       return std::make_unique<OneGenPluginSession>(
-          system, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()));
+          worker_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()));
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
       return {};
@@ -144,21 +177,34 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     shutting_down_ = true;
-    system_.reset();
+    if (coordinator_) coordinator_->shutdown();
+    coordinator_.reset();
   }
 
 private:
-  std::shared_ptr<onegen::OneGen> oneGen()
+  std::shared_ptr<onegen::worker::Coordinator> coordinator()
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutting_down_) return {};
-    if (!system_) system_ = std::make_shared<onegen::OneGen>();
-    return system_;
+    if (!coordinator_) {
+      const char* root_value = std::getenv("ONEGEN_CTI_ROOT");
+      if (!root_value || !*root_value)
+        throw std::runtime_error("ONEGEN_CTI_ROOT is not configured for the GenICam package.");
+      const std::filesystem::path root(root_value);
+#ifdef _WIN32
+      const auto worker = root.parent_path() / "OneGenWorker.exe";
+#else
+      const auto worker = root.parent_path() / "OneGenWorker";
+#endif
+      if (!std::filesystem::is_regular_file(worker))
+        throw std::runtime_error("OneGenWorker is missing from the GenICam package.");
+      coordinator_ = std::make_shared<onegen::worker::Coordinator>(worker);
+    }
+    return coordinator_;
   }
 
   std::mutex mutex_;
-  std::shared_ptr<onegen::OneGen> system_;
-  bool loaded_ = false;
+  std::shared_ptr<onegen::worker::Coordinator> coordinator_;
   bool shutting_down_ = false;
 };
 

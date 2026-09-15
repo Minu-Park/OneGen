@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- Remove the Software Trigger toolbar button; execute `TriggerSoftware` from the feature tree.
+- Announce 10 stream buffers by default, raise a present `MaxNumBuffer`, and enable present `AutoPacketSize` / `EnableResend` before `ProbePacketSize` so GigE resend does not underrun the queue.
+- Deliver incomplete frames with one diagnostic warning; reject a buffer only when it cannot form an image.
+- Put GenTL buffer and stream counters, plus a present DataStream Statistic category, into incomplete-frame errors and refresh that tree after Single.
+- Execute a present DataStream `ProbePacketSize` command when preparing the stream so GigE packet size can match the path before the first grab.
+- Present the Playground device entry and session as GenICam.
+- Discover CTIs from `GENICAM_GENTL64_PATH`, documented vendor locations, and an optional package overlay; workers load those producers in place.
+- Log the system GenTL search path and inventoried producers.
+- Accept the worker local socket on an event loop so probe and connect do not wait 5 s for a handshake.
+- Reuse the per-CTI worker for later discovery instead of spawning a disposable probe process every refresh.
+- Keep GenTL interface handles after probe so Connect reuses the current GigE list instead of closing it and waiting another update.
+- Open a camera from the producer's current device list instead of waiting another 1 s GigE update that can miss it.
+- Probe each producer from a thread that owns a Qt event loop, and probe CTIs in parallel so one vendor timeout cannot stall another.
+- Add a one-CTI worker, versioned local protocol, and deadline-enforced probe client.
+- Discover and deduplicate package CTIs through isolated workers without loading producers into Playground.
+- Open cameras, GenApi module trees, and owned frames through the same per-CTI worker; Playground holds only an exclusive camera lease.
+- Reuse prepared GenTL streams and buffers across acquisitions, rebuilding them only after stream or feature changes.
+- Keep operational state in the device status bar and route errors to System Logs.
+- Recreate the GenTL new-buffer event for every acquisition so stale or killed notifications cannot corrupt the first frame of the next run.
+- Decode GenTL `BOOL8` buffer metadata so incomplete and image-present diagnostics reflect the producer's actual flags.
+- Expose the selected GenTL DataStream NodeMap with the other module trees, including producer transport controls and statistics when available.
+- Wait for the standard GenTL stream-grabbing state before starting remote acquisition so the first packets cannot race receiver startup.
+- Identify Single, Live start, Live stop, and Connect failures separately in System Logs.
+- Replace live feature invalidation RPC bursts with one asynchronous stop snapshot, remove the fixed frame-size IPC limit, and avoid a redundant live-frame copy.
+- Refresh the feature access snapshot after both Live start and stop so editors follow the producer's current writable state.
+- Refresh a feature editor after a successful write so the UI shows the value read back from the device.
+- Size reusable acquisition buffers from GenTL or standard `PayloadSize` metadata instead of a fixed fallback, and remove producer-specific custom device-info probing.
+- Replace the worker and host socket polling loops with event-driven reads and queued writes while preserving ordered depth-one acknowledgement.
+- Discard leftover macOS duplicate names such as `ProducerGEV 2.cti` when publishing the package CTI tree.
+- Deliver live frames with Ordered ack depth 1 so the worker waits for host delivery before the next grab.
 - Recover interrupted GenICam downloads instead of reusing a corrupt cache.
 - Reject invalid IPv4 octets in camera queries and device metadata.
 - Support explicit runtime and GenTL paths with local GenICam SDK roots.

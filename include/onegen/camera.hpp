@@ -16,7 +16,7 @@ class OneGen;
 
 class Camera {
 public:
-  enum class Module { Interface, Device, RemoteDevice };
+  enum class Module { Interface, Device, DataStream, RemoteDevice };
   Camera(const Camera&) = delete;
   Camera& operator=(const Camera&) = delete;
   ~Camera();
@@ -34,6 +34,8 @@ public:
   void set_single_timeout(std::chrono::milliseconds timeout);
   std::chrono::milliseconds single_timeout() const;
 
+  /** Opens the selected GenTL stream and allocates reusable acquisition buffers. */
+  void prepare();
   std::vector<Frame> single(std::size_t n);
   void live();
   void trigger();

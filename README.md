@@ -21,8 +21,11 @@ cmake --build build --target check
 Pass a vendor CTI file to `OneGen::loadCti()`, then enumerate devices or open a
 camera by ID, user-defined name, IP address, serial number, display name, or
 model. Loading a CTI executes vendor code, so only use trusted producers.
-The Playground plugin also discovers direct `.cti` entries from the standard
-`GENICAM_GENTL64_PATH` or `GENICAM_GENTL32_PATH` directories.
+The Playground plugin discovers `.cti` entries from `GENICAM_GENTL64_PATH` or
+`GENICAM_GENTL32_PATH`, documented vendor locations, and an optional package
+overlay. Isolated workers load those files from the vendor install so their
+relative library paths remain valid. Do not copy a CTI without its producer
+tree.
 
 GenTL 1.5 multipart buffers are retained without a vendor SDK. The Playground
 adapter assembles standard PFNC `Coord3D_ABC32f` and `Coord3D_C16` range data
