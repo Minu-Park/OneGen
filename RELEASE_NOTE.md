@@ -2,22 +2,26 @@
 
 ## Unreleased
 
+- Keep the control statusbar limited to Idle, Disconnected, Connected, and Live; route discovery progress, operation results, and feature-write diagnostics to application logs.
+- Open the control panel before hardware discovery completes; publish merged devices as each isolated producer finishes, without gating connection on slower producers. Deduplicate physical CTI file aliases before probing, without collapsing different producer binaries by filename.
+- Remove the unused in-process host, vendor-specific dump tool, and uncalled public wrappers; refresh the feature tree only at acquisition and feature-write state boundaries.
+- Refresh the selected stream after remote feature writes so payload changes apply to the first acquisition.
+- Keep Windows workers in kill-on-close jobs so they cannot outlive the host.
+- Decode feature module identifiers before their trees so MSVC argument evaluation cannot corrupt snapshots.
+- Fold the GenApi feature tree into `QOneGenWidget`, matching Camera/Gocator control widgets.
+- Align the module with Camera/Gocator: public headers sit in `C++/` next to sources, Qt UI is `Utility/Qt/QOneGenWidget`, Playground code stays under `Utility/PlaygroundAdapter`, and the EMVA GenICam cache is `genicam/` instead of `third_party`. Remove the unused viewer app and vendored `cti/` producers.
+- Isolate every discovered CTI in its own Qt-free `OneGenWorker` process using a versioned binary stdin/stdout protocol; keep discovery vendor-neutral and remove the package `cti/` overlay and `ONEGEN_CTI_ROOT`.
+- Resolve a CTI's sibling DLLs from its install directory on Windows when the host uses a restricted DLL search path.
 - Remove the Software Trigger toolbar button; execute `TriggerSoftware` from the feature tree.
 - Announce 10 stream buffers by default, raise a present `MaxNumBuffer`, and enable present `AutoPacketSize` / `EnableResend` before `ProbePacketSize` so GigE resend does not underrun the queue.
 - Deliver incomplete frames with one diagnostic warning; reject a buffer only when it cannot form an image.
 - Put GenTL buffer and stream counters, plus a present DataStream Statistic category, into incomplete-frame errors and refresh that tree after Single.
 - Execute a present DataStream `ProbePacketSize` command when preparing the stream so GigE packet size can match the path before the first grab.
 - Present the Playground device entry and session as GenICam.
-- Discover CTIs from `GENICAM_GENTL64_PATH`, documented vendor locations, and an optional package overlay; workers load those producers in place.
 - Log the system GenTL search path and inventoried producers.
-- Accept the worker local socket on an event loop so probe and connect do not wait 5 s for a handshake.
-- Reuse the per-CTI worker for later discovery instead of spawning a disposable probe process every refresh.
 - Keep GenTL interface handles after probe so Connect reuses the current GigE list instead of closing it and waiting another update.
 - Open a camera from the producer's current device list instead of waiting another 1 s GigE update that can miss it.
-- Probe each producer from a thread that owns a Qt event loop, and probe CTIs in parallel so one vendor timeout cannot stall another.
-- Add a one-CTI worker, versioned local protocol, and deadline-enforced probe client.
-- Discover and deduplicate package CTIs through isolated workers without loading producers into Playground.
-- Open cameras, GenApi module trees, and owned frames through the same per-CTI worker; Playground holds only an exclusive camera lease.
+- Keep discovery usable when one producer fails after another loads successfully.
 - Reuse prepared GenTL streams and buffers across acquisitions, rebuilding them only after stream or feature changes.
 - Keep operational state in the device status bar and route errors to System Logs.
 - Recreate the GenTL new-buffer event for every acquisition so stale or killed notifications cannot corrupt the first frame of the next run.
@@ -25,13 +29,9 @@
 - Expose the selected GenTL DataStream NodeMap with the other module trees, including producer transport controls and statistics when available.
 - Wait for the standard GenTL stream-grabbing state before starting remote acquisition so the first packets cannot race receiver startup.
 - Identify Single, Live start, Live stop, and Connect failures separately in System Logs.
-- Replace live feature invalidation RPC bursts with one asynchronous stop snapshot, remove the fixed frame-size IPC limit, and avoid a redundant live-frame copy.
 - Refresh the feature access snapshot after both Live start and stop so editors follow the producer's current writable state.
 - Refresh a feature editor after a successful write so the UI shows the value read back from the device.
 - Size reusable acquisition buffers from GenTL or standard `PayloadSize` metadata instead of a fixed fallback, and remove producer-specific custom device-info probing.
-- Replace the worker and host socket polling loops with event-driven reads and queued writes while preserving ordered depth-one acknowledgement.
-- Discard leftover macOS duplicate names such as `ProducerGEV 2.cti` when publishing the package CTI tree.
-- Deliver live frames with Ordered ack depth 1 so the worker waits for host delivery before the next grab.
 - Recover interrupted GenICam downloads instead of reusing a corrupt cache.
 - Reject invalid IPv4 octets in camera queries and device metadata.
 - Support explicit runtime and GenTL paths with local GenICam SDK roots.
@@ -41,14 +41,13 @@
 - Add the optional Playground PFNC image adapter, source controller, feature controls, and device plugin package.
 - Deduplicate canonical default CTI paths before plugin discovery.
 - Match Camera's device toolbar layout and open CTI producers through the host-themed file picker.
-- Keep discovery usable when one default CTI fails after another loads successfully.
 - Run CTI loading, discovery, connection, and acquisition controls outside the GUI thread.
 - Reject incomplete GenTL buffers, always return acquired buffers to the producer, and preserve frame IDs.
 - Display common PFNC Mono, RGB, RGBA, and 8/10/12/14/16-bit Bayer acquisitions in Playground.
 - Clean up partial stream startup failures so acquisition can be retried without reconnecting.
 - Surface live GenTL and unsupported-format errors in the device controls without per-frame log spam.
 - Propagate a present remote `AcquisitionStart` failure instead of arming a stream that can only time out.
-- Allow live callbacks to request stop without tearing down their own worker, serialize callback replacement, and clean up if worker creation fails.
+- Allow live callbacks to request stop without destroying the camera, serialize callback replacement, and clean up if camera creation fails.
 - Discover trusted CTIs registered through the standard GenTL environment paths.
 - Preserve GenTL multipart parts and convert calibrated PFNC Coord3D ABC32f/C16 with intensity and confidence to Playground RangeFrame.
 - Read interface, device, and remote-device GenApi module maps so CTIs can expose frame-grabber and camera controls without SDK wrappers.
@@ -60,4 +59,4 @@
 - Show Remote Device, Device, and Interface controls together below a model-and-serial camera root.
 - Report the exact frame rejection reason with PFNC, layout, payload size, and endianness.
 - Preserve and report standard GenTL buffer metadata for incomplete-frame diagnosis.
-- Document the proposed process-isolated multi-vendor CTI package and session architecture.
+- Document the process-isolated multi-vendor CTI Playground session contract.

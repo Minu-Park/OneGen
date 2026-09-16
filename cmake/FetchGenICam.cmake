@@ -10,7 +10,7 @@
 set(ONEGEN_GENICAM_VERSION "2026.07")
 set(ONEGEN_GENICAM_SHA256 "e74b8d982c3e7697399b03c254b6e8c596eddf0279959eba7de18734e279b64f")
 
-set(_cache "${CMAKE_CURRENT_LIST_DIR}/../third_party/genicam")
+set(_cache "${CMAKE_CURRENT_LIST_DIR}/../genicam")
 set(_zip "${_cache}/GenICam_Package_${ONEGEN_GENICAM_VERSION}.zip")
 set(_zip_tmp "${_zip}.tmp")
 set(_pkg "${_cache}/pkg")

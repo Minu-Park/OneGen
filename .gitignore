@@ -1,6 +1,6 @@
 build/
 .cache/
-third_party/genicam/
+genicam/
 CMakeUserPresets.json
 .DS_Store
 *.user

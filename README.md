@@ -6,9 +6,9 @@ enumerates cameras, acquires owned frame payloads, and exposes GenApi features.
 ## Build
 
 Requirements: CMake 3.24+, a C++20 compiler, and network access for the pinned
-EMVA GenICam package. For extracted local packages, set `ONEGEN_GENICAM_ROOT`,
-`ONEGEN_GENICAM_RUNTIME_ROOT`, and `ONEGEN_GENTL_INCLUDE`. Qt 6 Widgets is
-optional and only enables `onegen-viewer`.
+EMVA GenICam package cached under `genicam/`. For extracted local packages, set
+`ONEGEN_GENICAM_ROOT`, `ONEGEN_GENICAM_RUNTIME_ROOT`, and `ONEGEN_GENTL_INCLUDE`.
+Qt 6 Widgets is optional and enables `OneGen::QtWidget`.
 
 ```sh
 cmake -S . -B build
@@ -22,10 +22,11 @@ Pass a vendor CTI file to `OneGen::loadCti()`, then enumerate devices or open a
 camera by ID, user-defined name, IP address, serial number, display name, or
 model. Loading a CTI executes vendor code, so only use trusted producers.
 The Playground plugin discovers `.cti` entries from `GENICAM_GENTL64_PATH` or
-`GENICAM_GENTL32_PATH`, documented vendor locations, and an optional package
-overlay. Isolated workers load those files from the vendor install so their
-relative library paths remain valid. Do not copy a CTI without its producer
-tree.
+`GENICAM_GENTL32_PATH` and documented vendor locations. It starts one generic
+`OneGenWorker` process per CTI, preserving the producer install directory for
+relative dependencies while isolating incompatible vendor runtimes. The worker
+uses a versioned binary stdin/stdout protocol and has no Qt dependency. Do not
+copy a CTI without its producer tree.
 
 GenTL 1.5 multipart buffers are retained without a vendor SDK. The Playground
 adapter assembles standard PFNC `Coord3D_ABC32f` and `Coord3D_C16` range data
@@ -59,7 +60,7 @@ or C4Hdl calls. A CTI must expose the equivalent operation through GenTL/GenApi;
 otherwise that operation is not portable GenICam functionality.
 
 ```cpp
-#include <onegen/onegen.hpp>
+#include "OneGen.h"
 #include <iostream>
 
 onegen::OneGen gentl;
@@ -68,8 +69,16 @@ for (const auto& device : gentl.enumerate())
   std::cout << device.id << '\n';
 ```
 
-Playground composes the optional `OneGen::PlaygroundAdapter` and `OneGenPlugin`
-targets while OneGen keeps its implementation and package identity independent.
+The repository follows the Camera/Gocator layout: public headers live next to
+sources in `C++/`, internals in `C++/Internal/`, `QOneGenWidget` in
+`C++/Utility/Qt/`, and the Playground plugin under
+`C++/Utility/PlaygroundAdapter/`. Isolated CTI workers stay in
+`C++/Utility/Worker/`. The EMVA GenICam fetch cache is `genicam/`; vendor `.cti`
+files are not stored in the module.
 
-The proposed process-isolated multi-vendor CTI package and session contract is
-documented in [Multi-Vendor CTI Worker Architecture](docs/MULTI_VENDOR_CTI_WORKERS.md).
+Playground composes the optional `OneGen::QtWidget`, `OneGen::PlaygroundAdapter`,
+and `OneGenPlugin` targets while OneGen keeps its implementation and package
+identity independent.
+
+The Playground session contract is documented in
+[Multi-Vendor CTI Runtime](docs/MULTI_VENDOR_CTI_WORKERS.md).

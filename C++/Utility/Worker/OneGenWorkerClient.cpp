@@ -1,0 +1,266 @@
+#include "OneGenWorkerClient.h"
+
+#include "OneGenWorkerMessages.h"
+
+#include <QDir>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <condition_variable>
+#include <map>
+#include <mutex>
+#include <queue>
+#include <stdexcept>
+#include <thread>
+#include <utility>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace onegen::worker {
+
+namespace {
+
+QByteArray framed(Message message)
+{
+  const auto body = encode(std::move(message));
+  const auto header = frameSize(static_cast<std::uint32_t>(body.size()));
+  QByteArray bytes(reinterpret_cast<const char*>(header.data()), header.size());
+  bytes.append(reinterpret_cast<const char*>(body.data()), static_cast<qsizetype>(body.size()));
+  return bytes;
+}
+
+bool takeMessage(QByteArray& buffer, Message& message)
+{
+  if (buffer.size() < 4) return false;
+  std::array<std::byte, 4> header;
+  std::memcpy(header.data(), buffer.constData(), header.size());
+  const auto size = frameSize(header);
+  if (size > maximum_message_size) throw std::runtime_error("OneGen worker message is too large.");
+  if (buffer.size() < 4 + static_cast<qsizetype>(size)) return false;
+  std::vector<std::byte> body(size);
+  std::memcpy(body.data(), buffer.constData() + 4, size);
+  buffer.remove(0, 4 + static_cast<qsizetype>(size));
+  message = decode(body);
+  return true;
+}
+
+} // namespace
+
+struct Connection::Impl {
+  std::filesystem::path executable;
+  std::filesystem::path cti;
+  std::thread io;
+  std::thread delivery;
+  std::mutex mutex;
+  std::condition_variable cv;
+  std::queue<Message> outgoing;
+  std::queue<Frame> frames;
+  std::map<std::uint32_t, Message> replies;
+  std::uint32_t next_id = 1;
+  bool running = true;
+  bool started = false;
+  std::string start_error;
+  std::string close_error;
+  FrameFn on_frame;
+  ErrorFn on_error;
+  InvalidateFn on_invalidate;
+#ifdef _WIN32
+  HANDLE job = nullptr;
+#endif
+};
+
+Connection::Connection(std::filesystem::path worker_executable, std::filesystem::path cti)
+    : impl_(std::make_unique<Impl>())
+{
+  impl_->executable = std::move(worker_executable);
+  impl_->cti = std::move(cti);
+  impl_->delivery = std::thread([this] {
+    while (true) {
+      Frame frame;
+      FrameFn callback;
+      {
+        std::unique_lock lock(impl_->mutex);
+        impl_->cv.wait(lock, [&] { return !impl_->running || !impl_->frames.empty(); });
+        if (!impl_->running && impl_->frames.empty()) return;
+        frame = std::move(impl_->frames.front());
+        impl_->frames.pop();
+        callback = impl_->on_frame;
+      }
+      if (callback) callback(frame);
+      {
+        std::lock_guard lock(impl_->mutex);
+        impl_->outgoing.push({Operation::FrameAck});
+      }
+    }
+  });
+  impl_->io = std::thread([this] {
+    QProcess process;
+    process.setProcessChannelMode(QProcess::SeparateChannels);
+    auto environment = QProcessEnvironment::systemEnvironment();
+    const auto separator = QDir::listSeparator();
+    const auto worker_runtime = QString::fromStdString(
+        (impl_->executable.parent_path() / "runtime").string());
+    const auto producer_runtime = QString::fromStdString(impl_->cti.parent_path().string());
+    environment.insert(QStringLiteral("PATH"),
+                       worker_runtime + separator + producer_runtime + separator
+                           + environment.value(QStringLiteral("PATH")));
+    process.setProcessEnvironment(environment);
+    process.start(QString::fromStdString(impl_->executable.string()),
+                  {QStringLiteral("--cti"), QString::fromStdString(impl_->cti.string())});
+    {
+      std::lock_guard lock(impl_->mutex);
+      impl_->started = true;
+      if (!process.waitForStarted(5000)) {
+        impl_->start_error = process.errorString().toStdString();
+        impl_->running = false;
+      } else {
+#ifdef _WIN32
+        impl_->job = CreateJobObjectW(nullptr, nullptr);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        const auto process_handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE,
+                                                FALSE, process.processId());
+        if (!impl_->job
+            || !SetInformationJobObject(impl_->job, JobObjectExtendedLimitInformation,
+                                        &limits, sizeof(limits))
+            || !process_handle
+            || !AssignProcessToJobObject(impl_->job, process_handle)) {
+          if (impl_->job) CloseHandle(impl_->job);
+          impl_->job = nullptr;
+        }
+        if (process_handle) CloseHandle(process_handle);
+#endif
+      }
+      impl_->cv.notify_all();
+    }
+    if (process.state() == QProcess::NotRunning) return;
+
+    QByteArray buffer;
+    QByteArray diagnostic;
+    while (process.state() != QProcess::NotRunning) {
+      std::queue<Message> pending;
+      {
+        std::lock_guard lock(impl_->mutex);
+        if (!impl_->running) break;
+        pending.swap(impl_->outgoing);
+      }
+      while (!pending.empty()) {
+        process.write(framed(std::move(pending.front())));
+        pending.pop();
+      }
+      process.waitForBytesWritten(10);
+      process.waitForReadyRead(10);
+      try {
+        buffer.append(process.readAllStandardOutput());
+        diagnostic.append(process.readAllStandardError());
+        if (diagnostic.size() > 65536) diagnostic.remove(0, diagnostic.size() - 65536);
+        Message message;
+        while (takeMessage(buffer, message)) {
+          if (message.operation == Operation::Frame) {
+            Reader reader(message.payload);
+            std::lock_guard lock(impl_->mutex);
+            impl_->frames.push(readFrame(reader));
+            impl_->cv.notify_all();
+          } else if (message.operation == Operation::Error) {
+            ErrorFn callback;
+            { std::lock_guard lock(impl_->mutex); callback = impl_->on_error; }
+            if (callback) callback(message.error);
+          } else if (message.operation == Operation::Invalidate) {
+            Reader reader(message.payload);
+            const auto module = reader.scalar<std::int32_t>();
+            const auto name = reader.string();
+            InvalidateFn callback;
+            { std::lock_guard lock(impl_->mutex); callback = impl_->on_invalidate; }
+            if (callback) callback(module, name);
+          } else {
+            std::lock_guard lock(impl_->mutex);
+            impl_->replies[message.id] = std::move(message);
+            impl_->cv.notify_all();
+          }
+        }
+      } catch (const std::exception& error) {
+        {
+          std::lock_guard lock(impl_->mutex);
+          impl_->close_error = error.what();
+          impl_->running = false;
+          impl_->cv.notify_all();
+        }
+        process.kill();
+        break;
+      }
+    }
+    if (process.state() != QProcess::NotRunning) {
+      process.kill();
+      process.waitForFinished(5000);
+    }
+    {
+      std::lock_guard lock(impl_->mutex);
+      diagnostic.append(process.readAllStandardError());
+      diagnostic = diagnostic.trimmed();
+      if (!diagnostic.isEmpty()) impl_->close_error = diagnostic.toStdString();
+      impl_->running = false;
+      impl_->cv.notify_all();
+    }
+  });
+  std::unique_lock lock(impl_->mutex);
+  impl_->cv.wait(lock, [&] { return impl_->started; });
+  if (!impl_->start_error.empty()) {
+    const auto error = impl_->start_error;
+    lock.unlock();
+    if (impl_->io.joinable()) impl_->io.join();
+    if (impl_->delivery.joinable()) impl_->delivery.join();
+    throw std::runtime_error(error);
+  }
+}
+
+Connection::~Connection()
+{
+#ifndef _WIN32
+  try { request(Operation::Shutdown, {}, std::chrono::milliseconds{500}); } catch (...) {}
+#else
+  const auto job = std::exchange(impl_->job, nullptr);
+  if (job) CloseHandle(job);
+#endif
+  {
+    std::lock_guard lock(impl_->mutex);
+    impl_->running = false;
+    impl_->cv.notify_all();
+  }
+  if (impl_->io.joinable()) impl_->io.join();
+  if (impl_->delivery.joinable()) impl_->delivery.join();
+}
+
+std::vector<std::byte> Connection::request(Operation operation, std::vector<std::byte> payload,
+                                            const std::chrono::milliseconds timeout)
+{
+  std::uint32_t id;
+  {
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->running) throw std::runtime_error("Worker connection is closed.");
+    id = impl_->next_id++;
+    impl_->outgoing.push({operation, id, true, {}, std::move(payload)});
+  }
+  std::unique_lock lock(impl_->mutex);
+  if (!impl_->cv.wait_for(lock, timeout, [&] { return impl_->replies.count(id) || !impl_->running; }))
+    throw std::runtime_error("Worker request timed out.");
+  const auto found = impl_->replies.find(id);
+  if (found == impl_->replies.end()) {
+    throw std::runtime_error(impl_->close_error.empty()
+                                 ? "Worker connection is closed."
+                                 : impl_->close_error);
+  }
+  auto reply = std::move(found->second);
+  impl_->replies.erase(found);
+  if (!reply.success) throw std::runtime_error(reply.error);
+  return std::move(reply.payload);
+}
+
+void Connection::set_frame_callback(FrameFn callback)
+{ std::lock_guard lock(impl_->mutex); impl_->on_frame = std::move(callback); }
+void Connection::set_error_callback(ErrorFn callback)
+{ std::lock_guard lock(impl_->mutex); impl_->on_error = std::move(callback); }
+void Connection::set_invalidate_callback(InvalidateFn callback)
+{ std::lock_guard lock(impl_->mutex); impl_->on_invalidate = std::move(callback); }
+
+} // namespace onegen::worker
