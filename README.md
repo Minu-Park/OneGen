@@ -100,7 +100,18 @@ bounded to 64 KiB and registers are not read eagerly during tree snapshots.
 The feature-tree context menu copies/restores the selected module's GenApi feature
 bag through the clipboard. Restoration uses selector state and verifies values.
 A failed restore can have applied earlier entries; it is not transactional.
-The worker and client must both use protocol version 3.
+The worker and client must both use protocol version 4.
+
+Single-image payloads are copied from the producer's image offset using the
+declared row stride and delivered height; prefix bytes, Y padding and trailing
+chunk metadata are excluded. Available chunk descriptors are validated against
+delivered bytes and retained in `Frame::chunks` as owned ID/offset/raw-byte data,
+including through worker IPC. Chunk-only and other non-image payloads retain
+their raw bytes but are not interpreted as images by the graphics adapter.
+Chunk geometry is read while attached to the GenApi node map; general decoded
+chunk values are not exposed by this raw-byte contract. Compressed images with
+attached chunks require a known image boundary. Physical producer compatibility
+still requires captured-buffer validation.
 
 OneGen intentionally does not emulate frame-grabber applet loaders, GoPxL REST/GDP,
 or C4Hdl calls. A CTI must expose the equivalent operation through GenTL/GenApi;

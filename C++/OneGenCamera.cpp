@@ -6,6 +6,7 @@
 #include "Internal/ConnectTiming.h"
 #include "Internal/NodeMap.h"
 #include "Internal/OneGenImpl.h"
+#include "Internal/FramePayload.h"
 
 #include <GenApi/GenApi.h>
 #include <GenApi/ChunkAdapterGeneric.h>
@@ -767,6 +768,8 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   const auto capacity = f.buffer_info.capacity;
   size_t filled = f.buffer_info.size_filled;
   if (filled == 0) filled = f.buffer_info.data_size;
+  if (filled == 0 && (f.buffer_info.contains_chunk_data || f.buffer_info.incomplete))
+    throw Error("grab: delivered byte count is unavailable for chunk or incomplete data");
   if (filled == 0) filled = capacity;
   if ((!base && filled) || filled > capacity
       || u64(GenTL::BUFFER_INFO_DATA_LARGER_THAN_BUFFER))
@@ -825,14 +828,28 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   f.stream_index = stream_index;
   f.stream_id = stream_id;
   f.scan3d_geometry = scan3d_geometry;
-  if (base && filled && g->DSGetBufferChunkData && !features.empty()) {
+  if (base && filled && g->DSGetBufferChunkData) {
     size_t chunk_count = 0;
     auto chunk_error = g->DSGetBufferChunkData(hds, data.BufferHandle, nullptr, &chunk_count);
     if ((chunk_error == GenTL::GC_ERR_SUCCESS || chunk_error == GenTL::GC_ERR_BUFFER_TOO_SMALL)
         && chunk_count) {
+      if (chunk_count > filled) throw Error("grab: chunk count exceeds delivered storage");
       std::vector<GenTL::SINGLE_CHUNK_DATA> chunks(chunk_count);
+      const auto chunk_capacity = chunk_count;
       if (g->DSGetBufferChunkData(hds, data.BufferHandle, chunks.data(), &chunk_count)
           == GenTL::GC_ERR_SUCCESS) {
+        if (chunk_count > chunk_capacity) throw Error("grab: invalid returned chunk count");
+        for (std::size_t index = 0; index < chunk_count; ++index) {
+          const auto& chunk = chunks[index];
+          if (chunk.ChunkOffset > filled || chunk.ChunkLength > filled - chunk.ChunkOffset)
+            throw Error("grab: chunk exceeds delivered data");
+          Frame::Chunk owned;
+          owned.id = chunk.ChunkID;
+          owned.offset = chunk.ChunkOffset;
+          owned.payload.assign(base + chunk.ChunkOffset,
+                               base + chunk.ChunkOffset + chunk.ChunkLength);
+          f.chunks.push_back(std::move(owned));
+        }
         auto* map = static_cast<GenApi::CNodeMapRef*>(features.raw_nodemap());
         if (map && map->_Ptr) {
           std::vector<GenApi::SingleChunkData_t> generic_chunks;
@@ -856,6 +873,7 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   std::uint32_t part_count = 0;
   if (g->DSGetNumBufferParts && g->DSGetBufferPartInfo &&
       g->DSGetNumBufferParts(hds, data.BufferHandle, &part_count) == GenTL::GC_ERR_SUCCESS) {
+    if (part_count > filled) throw Error("grab: part count exceeds delivered storage");
     f.parts.reserve(part_count);
     for (std::uint32_t index = 0; index < part_count; ++index) {
       Frame::Part part;
@@ -885,13 +903,14 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
       const auto base_address = reinterpret_cast<std::uintptr_t>(base);
       const auto part_address = reinterpret_cast<std::uintptr_t>(part_base);
       const bool contained = base && part_base && part_address >= base_address
-          && part_address - base_address <= capacity
-          && part_size <= capacity - (part_address - base_address);
+          && part_address - base_address <= filled
+          && part_size <= filled - (part_address - base_address);
+      if (!contained && part_size) throw Error("grab: part exceeds delivered data");
       if (contained && part_size) part.payload.assign(part_base, part_base + part_size);
       if (!part.payload.empty()) f.parts.push_back(std::move(part));
     }
   }
-  if (f.parts.empty() && base && filled) f.payload.assign(base, base + filled);
+  if (f.parts.empty()) copy_single_payload(f, base, filled);
   const auto queue_error = g->DSQueueBuffer(hds, data.BufferHandle);
   requeue.release();
   if (queue_error != GenTL::GC_ERR_SUCCESS) g->fail("DSQueueBuffer");

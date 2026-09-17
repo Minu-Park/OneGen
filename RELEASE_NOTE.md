@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Separate single-image bytes from transport prefixes and chunk metadata; validate chunks and parts against delivered storage, retain owned raw chunks through worker protocol version 4, and reject non-image payloads in graphics conversion.
+- Support all four documented Gen4 PixelFormat entries in single and multipart payloads, including native Confidence32f-only previews without fabricated depth calibration.
+- Decode calibrated multipart Coord3D_C32f range and Confidence32f samples without integer truncation; preserve finite-sample masks and reject unsafe layouts and big-endian multibyte range data.
+- Keep graphics-adapter assertions enabled in Release test builds.
+
+- Use the target platform's executable suffix for the packaged worker environment binding; verify it against the built worker in CTest.
+
 - Isolate cameras sharing a CTI in separate retained workers, reusing the discovery worker for the first camera. Include model/serial in Live completion and asynchronous device-error logs.
 
 - Include the connected camera model and serial in Single acquisition completion logs.

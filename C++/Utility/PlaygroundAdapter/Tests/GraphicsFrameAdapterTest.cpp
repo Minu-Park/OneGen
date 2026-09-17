@@ -1,6 +1,9 @@
 #include "OneGenGraphicsFrameAdapter.h"
 
 #include <cassert>
+#include <cmath>
+#include <cstring>
+#include <limits>
 
 int main()
 {
@@ -71,6 +74,16 @@ int main()
   assert(!oneGenGraphicsFrame(source, 13, &rejectionReason));
   assert(rejectionReason == "big-endian multi-byte pixels are unsupported");
   source.pixel_endianness = 0;
+  source.payload_type = 8;
+  assert(!oneGenGraphicsFrame(source, 13, &rejectionReason));
+  source.payload_type = 4;
+  source.buffer_info.image_present = false;
+  assert(!oneGenGraphicsFrame(source, 13, &rejectionReason));
+  source.buffer_info.image_present = true;
+  assert(oneGenGraphicsFrame(source, 13)->hasImage());
+  source.payload_type = 2;
+  assert(!oneGenGraphicsFrame(source, 13));
+  source.payload_type = 0;
 
   onegen::Frame multipart;
   multipart.frame_id = 77;
@@ -122,6 +135,85 @@ int main()
   assert(c16Scene->rangeFrame->xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
   assert(c16Scene->rangeFrame->worldZAt(0) == 2.0);
   assert(c16Scene->rangeFrame->validMask == std::vector<std::uint8_t>({1, 0}));
+
+  onegen::Frame floating;
+  floating.scan3d_geometry = multipart.scan3d_geometry;
+  const auto scalarPart = [](std::uint64_t format, std::uint64_t type,
+                             const std::vector<float>& samples) {
+    onegen::Frame::Part part;
+    part.width = 2; part.height = 2; part.stride = 12;
+    part.data_format = format; part.data_type = type;
+    part.payload.resize(24, 0xff);
+    std::memcpy(part.payload.data(), samples.data(), 8);
+    std::memcpy(part.payload.data() + 12, samples.data() + 2, 8);
+    return part;
+  };
+  const auto nan = std::numeric_limits<float>::quiet_NaN();
+  floating.parts.push_back(scalarPart(0x012000bf, 5, {0, -2, nan, 6}));
+  floating.parts.push_back(scalarPart(0x012000c8, 9, {0.25F, 0.75F, nan, 2}));
+  const auto floatScene = oneGenGraphicsFrame(floating, 17);
+  assert(floatScene && floatScene->hasRangeFrame());
+  const auto& range = *floatScene->rangeFrame;
+  assert(range.xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
+  assert(range.worldZAt(0) == -1 && range.worldZAt(1) == -2 && range.worldZAt(3) == 2);
+  assert(range.validMask == std::vector<std::uint8_t>({1, 1, 0, 1}));
+  assert(range.rangeRaw.empty() && range.confidenceRaw.empty());
+  assert(range.rangeBits == 32 && range.confidenceBits == 32);
+  assert(range.confidence[0] == 0.25F && range.confidence[3] == 2);
+  assert(range.confidenceValidMask == std::vector<std::uint8_t>({1, 1, 0, 1}));
+  assert(range.confidenceField.bitsPerSample == 32);
+  onegen::Frame single;
+  single.width = 2; single.height = 2; single.stride = 12;
+  single.pixel_format = 0x012000bf;
+  single.payload = floating.parts[0].payload;
+  single.scan3d_geometry = floating.scan3d_geometry;
+  const auto singleRange = oneGenGraphicsFrame(single, 23);
+  assert(singleRange && singleRange->rangeFrame->worldZAt(3) == 2);
+  single.scan3d_geometry.reset();
+  assert(!oneGenGraphicsFrame(single, 24));
+  single.pixel_format = 0x012000c8;
+  single.payload = floating.parts[1].payload;
+  const auto confidencePreview = oneGenGraphicsFrame(single, 25);
+  assert(confidencePreview && confidencePreview->hasRangeFrame());
+  assert(confidencePreview->rangeFrame->rangeField.domain == MeasurementValueDomain::Native);
+  assert(confidencePreview->rangeFrame->zValues[3] == 2);
+  assert(!std::isfinite(confidencePreview->rangeFrame->xScale));
+  assert(confidencePreview->rangeFrame->validMask == std::vector<std::uint8_t>({1, 1, 0, 1}));
+  single.parts = {floating.parts[1]};
+  assert(oneGenGraphicsFrame(single, 26)->rangeFrame->rangeField.displayName == "Confidence");
+  single.pixel_endianness = 2;
+  assert(!oneGenGraphicsFrame(single, 27));
+  // The complete vendor PixelFormat enumeration, including padded monochrome rows.
+  for (const auto format : {0x01080001U, 0x01100007U}) {
+    onegen::Frame mono;
+    mono.width = 2; mono.height = 2; mono.stride = 6;
+    mono.pixel_format = format; mono.payload.resize(12);
+    assert(oneGenGraphicsFrame(mono, 28)->hasImage());
+    onegen::Frame::Part imagePart;
+    imagePart.width = 2; imagePart.height = 2; imagePart.stride = 6;
+    imagePart.data_type = 1; imagePart.data_format = format; imagePart.payload = mono.payload;
+    mono.parts = {imagePart};
+    assert(oneGenGraphicsFrame(mono, 29)->hasImage());
+    mono.scan3d_geometry = floating.scan3d_geometry;
+    mono.parts.insert(mono.parts.begin(), floating.parts[0]);
+    const auto paired = oneGenGraphicsFrame(mono, 30);
+    assert(paired && paired->hasImage() && paired->hasRangeFrame());
+    assert(paired->rangeFrame->intensity == std::vector<float>({0, 0, 0, 0}));
+    assert(paired->rangeFrame->intensityField.bitsPerSample == (format == 0x01080001U ? 8 : 16));
+  }
+  floating.scan3d_geometry->invalid_enabled[2] = true;
+  floating.scan3d_geometry->invalid_value[2] = -2;
+  assert(oneGenGraphicsFrame(floating, 18)->rangeFrame->validMask[1] == 0);
+  floating.parts[1].payload.pop_back();
+  assert(oneGenGraphicsFrame(floating, 19)->rangeFrame->confidence.empty());
+  floating.pixel_endianness = 2;
+  assert(!oneGenGraphicsFrame(floating, 20));
+  floating.pixel_endianness = 0;
+  floating.parts[0].payload.pop_back();
+  assert(!oneGenGraphicsFrame(floating, 21));
+  floating.parts[0].payload.resize(24);
+  floating.scan3d_geometry.reset();
+  assert(!oneGenGraphicsFrame(floating, 22));
 
   multipart.scan3d_geometry->distance_unit.clear();
   assert(!oneGenGraphicsFrame(multipart, 16));

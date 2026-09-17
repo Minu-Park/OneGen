@@ -28,6 +28,12 @@ struct DataStreamInfo {
 };
 
 struct Frame {
+  /** Owned raw chunk bytes; offset refers to the original transport buffer. */
+  struct Chunk {
+    std::uint64_t id = 0;
+    std::uint64_t offset = 0;
+    std::vector<std::uint8_t> payload;
+  };
   /** Raw GenTL buffer facts retained for transport diagnostics. */
   struct BufferInfo {
     std::size_t capacity = 0;
@@ -64,6 +70,7 @@ struct Frame {
 
   std::vector<std::uint8_t> payload;
   std::vector<Part> parts;
+  std::vector<Chunk> chunks;
   BufferInfo buffer_info;
   std::optional<Scan3dGeometry> scan3d_geometry;
   std::uint32_t width = 0;

@@ -115,9 +115,11 @@ constexpr std::uint64_t kPart2dImage = 1;
 constexpr std::uint64_t kPart3dImage = 5;
 constexpr std::uint64_t kPartConfidence = 9;
 constexpr std::uint64_t kCoord3dC16 = 0x011000b8;
+constexpr std::uint64_t kCoord3dC32f = 0x012000bf;
 constexpr std::uint64_t kCoord3dAbc32f = 0x026000c0;
 constexpr std::uint64_t kConfidence8 = 0x010800c6;
 constexpr std::uint64_t kConfidence16 = 0x011000c7;
+constexpr std::uint64_t kConfidence32f = 0x012000c8;
 
 std::string lower(std::string value)
 {
@@ -138,6 +140,7 @@ onegen::Frame partFrame(const onegen::Frame::Part& part, const onegen::Frame& so
   frame.frame_id = source.frame_id;
   frame.timestamp = source.timestamp;
   frame.timestamp_ns = source.timestamp_ns;
+  frame.scan3d_geometry = source.scan3d_geometry;
   return frame;
 }
 
@@ -145,9 +148,12 @@ template <typename T>
 bool copyScalarPart(const onegen::Frame::Part& part, std::vector<float>& values,
                     std::vector<std::uint16_t>* raw = nullptr)
 {
+  if (!part.width || !part.height
+      || part.width > (std::numeric_limits<std::size_t>::max)() / part.height
+      || part.width > (std::numeric_limits<std::size_t>::max)() / sizeof(T)) return false;
   const auto count = static_cast<std::size_t>(part.width) * part.height;
   const auto rowBytes = static_cast<std::size_t>(part.width) * sizeof(T);
-  if (!count || part.stride < rowBytes || part.payload.size() < part.stride * part.height)
+  if (part.stride < rowBytes || part.height > part.payload.size() / part.stride)
     return false;
   values.resize(count);
   if (raw) raw->resize(count);
@@ -170,19 +176,37 @@ bool sameShape(const onegen::Frame::Part& part, const RangeFrame& range) noexcep
       && part.height == static_cast<std::uint32_t>(range.height);
 }
 
-bool appendAuxiliary(const onegen::Frame::Part& part, RangeFrame& range)
+bool appendAuxiliary(const onegen::Frame::Part& part, RangeFrame& range,
+                     const std::uint64_t endianness)
 {
   if (!sameShape(part, range)) return false;
   const bool confidence = part.data_type == kPartConfidence
-      || part.data_format == kConfidence8 || part.data_format == kConfidence16;
-  if (!confidence && (part.data_format & 0xff000000U) != 0x01000000U) return false;
+      || part.data_format == kConfidence8 || part.data_format == kConfidence16
+      || part.data_format == kConfidence32f;
+  const auto format = pixelFormat(part.data_format);
+  if (!confidence && format != GraphicsImagePixelFormat::Mono8
+      && format != GraphicsImagePixelFormat::Mono16) return false;
+  const auto bits = static_cast<std::uint8_t>((part.data_format >> 16U) & 0xffU);
+  if (endianness == 2 && bits > 8) return false;
   auto& values = confidence ? range.confidence : range.intensity;
   auto& raw = confidence ? range.confidenceRaw : range.intensityRaw;
-  const auto bits = static_cast<std::uint8_t>((part.data_format >> 16U) & 0xffU);
-  const bool copied = bits <= 8 ? copyScalarPart<std::uint8_t>(part, values)
-                                : copyScalarPart<std::uint16_t>(part, values, &raw);
+  bool copied = false;
+  if (part.data_format == kConfidence32f) {
+    copied = copyScalarPart<float>(part, values);
+    if (copied) {
+      raw.clear(); // Floating samples have no lossless uint16 representation.
+      range.confidenceValidMask.resize(values.size());
+      for (std::size_t index = 0; index < values.size(); ++index)
+        range.confidenceValidMask[index] = std::isfinite(values[index]) ? 1U : 0U;
+    }
+  } else if (bits == 8) {
+    copied = copyScalarPart<std::uint8_t>(part, values);
+  } else if (bits == 16) {
+    copied = copyScalarPart<std::uint16_t>(part, values, &raw);
+  }
   if (!copied) return false;
   (confidence ? range.confidenceBits : range.intensityBits) = bits;
+  (confidence ? range.confidenceField : range.intensityField).bitsPerSample = bits;
   return true;
 }
 
@@ -190,6 +214,9 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
                                      const onegen::Frame& source)
 {
   if (part.data_type != kPart3dImage || !part.width || !part.height) return std::nullopt;
+  if (source.pixel_endianness == 2
+      || part.width > (std::numeric_limits<std::size_t>::max)() / part.height)
+    return std::nullopt;
   const auto count = static_cast<std::size_t>(part.width) * part.height;
   if (part.width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
       || part.height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()))
@@ -200,7 +227,6 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   range.height = static_cast<int>(part.height);
   range.sensorType = "GenTL 3D";
   range.frameId = source.frame_id ? std::to_string(source.frame_id) : std::string{};
-  range.validMask.resize(count);
   if (!source.scan3d_geometry) return std::nullopt;
   const auto& geometry = *source.scan3d_geometry;
   const auto unit = lower(geometry.distance_unit);
@@ -213,9 +239,12 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   else
     return std::nullopt;
   if (part.data_format == kCoord3dAbc32f) {
-    const auto rowBytes = static_cast<std::size_t>(part.width) * 3U * sizeof(float);
-    if (part.stride < rowBytes || part.payload.size() < part.stride * part.height)
+    if (part.width > (std::numeric_limits<std::size_t>::max)() / (3U * sizeof(float)))
       return std::nullopt;
+    const auto rowBytes = static_cast<std::size_t>(part.width) * 3U * sizeof(float);
+    if (part.stride < rowBytes || part.height > part.payload.size() / part.stride)
+      return std::nullopt;
+    range.validMask.resize(count);
     range.xyCoordinateMode = RangeFrameXYCoordinateMode::ExplicitXY;
     range.xValues.resize(count);
     range.yValues.resize(count);
@@ -240,9 +269,27 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
     range.rangeField = {"gentl.xyz.z", "Z coordinate", "",
                         MeasurementValueDomain::Calibrated,
                         MeasurementSampleKind::GridSample, 32};
+  } else if (part.data_format == kCoord3dC32f) {
+    if (!std::isfinite(geometry.scale[2]) || !std::isfinite(geometry.offset[2])
+        || !copyScalarPart<float>(part, range.zValues)) return std::nullopt;
+    range.validMask.resize(count);
+    range.xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
+    range.zScale = geometry.scale[2];
+    range.zOffset = geometry.offset[2];
+    range.rangeBits = 32;
+    range.rangeField = {"gentl.coord3d-c", "Coordinate C", "",
+                        MeasurementValueDomain::Calibrated,
+                        MeasurementSampleKind::GridSample, 32};
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto sample = range.zValues[index];
+      range.validMask[index] = std::isfinite(sample)
+          && std::isfinite(geometry.offset[2] + sample * geometry.scale[2])
+          && !(geometry.invalid_enabled[2] && sample == geometry.invalid_value[2]) ? 1U : 0U;
+    }
   } else if (part.data_format == kCoord3dC16) {
     if (!copyScalarPart<std::uint16_t>(part, range.zValues, &range.rangeRaw))
       return std::nullopt;
+    range.validMask.resize(count);
     range.xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
     range.zScale = geometry.scale[2];
     range.zOffset = geometry.offset[2];
@@ -282,12 +329,68 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     if (result.rangeFrame) {
       for (const auto& part : source.parts)
         if (part.data_type == kPartConfidence || part.data_type == kPart2dImage)
-          appendAuxiliary(part, *result.rangeFrame);
+          appendAuxiliary(part, *result.rangeFrame, source.pixel_endianness);
+    }
+    if (!result.rangeFrame && !result.image) {
+      for (const auto& part : source.parts) {
+        if (part.data_format != kConfidence32f) continue;
+        auto preview = oneGenGraphicsFrame(partFrame(part, source), sequence, rejection_reason);
+        if (preview) {
+          result.rangeFrame = std::move(preview->rangeFrame);
+          break;
+        }
+      }
     }
     result.metadata.frameIndex = sequence;
     if (source.frame_id) result.metadata.frameId = std::to_string(source.frame_id);
     return result.isValid() ? std::optional<GraphicsFrame>(std::move(result))
                             : reject("multipart payload has no supported image or range data");
+  }
+  if (source.payload_type != 0 && source.payload_type != 1
+      && source.payload_type != 4 && source.payload_type != kPayloadJpeg)
+    return reject("payload type does not describe a supported image");
+  if (source.payload_type == 4 && !source.buffer_info.image_present)
+    return reject("chunk payload contains no image");
+  if (source.pixel_format == kCoord3dC16 || source.pixel_format == kCoord3dC32f
+      || source.pixel_format == kCoord3dAbc32f || source.pixel_format == kConfidence32f) {
+    const auto bytesPerPixel = ((source.pixel_format >> 16U) & 0xffU) / 8U;
+    if (source.width > (std::numeric_limits<std::size_t>::max)() / bytesPerPixel)
+      return reject("coordinate row size exceeds the supported integer range");
+    onegen::Frame::Part part;
+    part.payload = source.payload;
+    part.width = source.width;
+    part.height = source.height;
+    part.stride = source.stride ? source.stride
+        : static_cast<std::size_t>(source.width) * bytesPerPixel;
+    part.data_format = source.pixel_format;
+    part.data_type = kPart3dImage;
+    GraphicsFrame frame;
+    if (source.pixel_format == kConfidence32f) {
+      // Reuse the native scalar preview contract; confidence is not depth.
+      RangeFrame preview;
+      if (source.pixel_endianness == 2
+          || source.width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
+          || source.height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
+          || !copyScalarPart<float>(part, preview.zValues))
+        return reject("invalid floating confidence layout or byte order");
+      preview.width = static_cast<int>(part.width);
+      preview.height = static_cast<int>(part.height);
+      preview.xScale = preview.yScale = std::numeric_limits<double>::quiet_NaN();
+      preview.rangeBits = 32;
+      preview.rangeField = {"gentl.confidence", "Confidence", "",
+          MeasurementValueDomain::Native, MeasurementSampleKind::GridSample, 32};
+      preview.sensorType = "GenTL confidence (native scalar preview)";
+      preview.validMask.resize(preview.zValues.size());
+      for (std::size_t i = 0; i < preview.zValues.size(); ++i)
+        preview.validMask[i] = std::isfinite(preview.zValues[i]) ? 1U : 0U;
+      frame.rangeFrame = std::move(preview);
+    } else {
+      frame.rangeFrame = rangeFrame(part, source);
+    }
+    frame.metadata.frameIndex = sequence;
+    if (source.frame_id) frame.metadata.frameId = std::to_string(source.frame_id);
+    return frame.isValid() ? std::optional<GraphicsFrame>(std::move(frame))
+                           : reject("invalid coordinate layout or missing Scan3d calibration");
   }
   const auto format = source.payload_type == kPayloadJpeg
       ? GraphicsImagePixelFormat::Jpeg : pixelFormat(source.pixel_format);

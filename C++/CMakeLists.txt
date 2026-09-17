@@ -131,6 +131,10 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
       $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
       $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
     add_test(NAME test_worker COMMAND test_worker $<TARGET_FILE:OneGenWorker>)
+    add_test(NAME test_worker_package COMMAND ${CMAKE_COMMAND}
+      "-DWORKER_FILE=$<TARGET_FILE:OneGenWorker>"
+      "-DCMAKE_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_worker_package.cmake")
     if(ONEGEN_GENICAM_RUNTIME_FILES)
       list(GET ONEGEN_GENICAM_RUNTIME_FILES 0 _onegen_runtime_file)
       get_filename_component(_onegen_runtime_dir "${_onegen_runtime_file}" DIRECTORY)
@@ -186,6 +190,9 @@ if(ONEGEN_BUILD_PLAYGROUND_ADAPTER)
     add_executable(onegen_graphics_frame_adapter_test
       Utility/PlaygroundAdapter/Tests/GraphicsFrameAdapterTest.cpp)
     target_link_libraries(onegen_graphics_frame_adapter_test PRIVATE OneGen::PlaygroundAdapter)
+    target_compile_options(onegen_graphics_frame_adapter_test PRIVATE
+      $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+      $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
     add_test(NAME onegen_graphics_frame_adapter_test COMMAND onegen_graphics_frame_adapter_test)
   endif()
   message(STATUS "[OneGen] OneGen::PlaygroundAdapter enabled.")

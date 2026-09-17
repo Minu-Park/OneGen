@@ -1,4 +1,5 @@
 #include "OneGenWorkerMessages.h"
+#include "../Internal/FramePayload.h"
 
 #include <cassert>
 
@@ -25,6 +26,7 @@ int main()
   source.height = 2;
   source.pixel_format = 0x01080001;
   source.buffer_info.size_filled = source.payload.size();
+  source.chunks.push_back({17, 8, {9, 10, 11}});
   source.scan3d_geometry.emplace();
   source.scan3d_geometry->scale = {0.1, 0.2, 0.3};
   source.scan3d_geometry->invalid_enabled = {true, false, true};
@@ -37,6 +39,8 @@ int main()
 
   assert(reader.empty());
   assert(copy.payload == source.payload);
+  assert(copy.chunks.size() == 1 && copy.chunks[0].id == 17 && copy.chunks[0].offset == 8);
+  assert(copy.chunks[0].payload == source.chunks[0].payload);
   assert(copy.width == source.width);
   assert(copy.height == source.height);
   assert(copy.pixel_format == source.pixel_format);
@@ -44,4 +48,50 @@ int main()
   assert(copy.scan3d_geometry);
   assert(copy.scan3d_geometry->scale == source.scan3d_geometry->scale);
   assert(copy.scan3d_geometry->invalid_enabled == source.scan3d_geometry->invalid_enabled);
+
+  const std::vector<std::uint8_t> transport{99, 98, 1, 2, 0, 0, 3, 4, 0, 0, 7, 8};
+  onegen::Frame image;
+  image.payload_type = GenTL::PAYLOAD_TYPE_CHUNK_DATA;
+  image.buffer_info.image_present = true;
+  image.buffer_info.contains_chunk_data = true;
+  image.buffer_info.image_offset = 2;
+  image.width = 2; image.height = 2; image.stride = 4;
+  image.chunks.push_back({1, 10, {7, 8}});
+  onegen::copy_single_payload(image, transport.data(), transport.size());
+  assert(image.payload == std::vector<std::uint8_t>({1, 2, 0, 0, 3, 4, 0, 0}));
+  assert(image.chunks[0].payload == std::vector<std::uint8_t>({7, 8}));
+  // Legacy image chunks include the image itself rather than only metadata.
+  image.chunks.insert(image.chunks.begin(), {2, 2, image.payload});
+  onegen::copy_single_payload(image, transport.data(), transport.size());
+  assert(image.payload.size() == 8 && image.payload[0] == 1);
+  const auto rejected = [&](onegen::Frame invalid, std::size_t filled) {
+    try { onegen::copy_single_payload(invalid, transport.data(), filled); }
+    catch (const onegen::Error&) { return true; }
+    return false;
+  };
+  auto invalid = image;
+  invalid.buffer_info.image_offset = 13;
+  assert(rejected(invalid, transport.size()));
+  invalid = image;
+  invalid.chunks = {{1, 8, {7, 8}}};
+  assert(rejected(invalid, transport.size()));
+  invalid = image;
+  invalid.chunks = {{1, 11, {7, 8}}};
+  assert(rejected(invalid, transport.size()));
+  invalid = image;
+  invalid.chunks.clear();
+  assert(rejected(invalid, 9));
+  invalid.height = 2; invalid.stride = (std::numeric_limits<std::size_t>::max)();
+  assert(rejected(invalid, transport.size()));
+  auto jpeg = image;
+  jpeg.payload_type = GenTL::PAYLOAD_TYPE_JPEG;
+  onegen::copy_single_payload(jpeg, transport.data(), transport.size());
+  assert(jpeg.payload == image.payload);
+  jpeg.chunks.clear();
+  assert(rejected(jpeg, transport.size()));
+  auto chunk_only = image;
+  chunk_only.payload_type = GenTL::PAYLOAD_TYPE_CHUNK_ONLY;
+  chunk_only.buffer_info.image_present = false;
+  onegen::copy_single_payload(chunk_only, transport.data(), transport.size());
+  assert(chunk_only.payload == transport && chunk_only.chunks.size() == 2);
 }

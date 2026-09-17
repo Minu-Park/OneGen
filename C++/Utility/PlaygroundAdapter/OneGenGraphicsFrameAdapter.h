@@ -9,7 +9,7 @@
 #include <optional>
 #include <string>
 
-/** Convert one supported PFNC image without depending on a vendor SDK. */
+/** Convert PFNC images, calibrated coordinates and native confidence previews without a vendor SDK. */
 [[nodiscard]] std::optional<GraphicsFrame> oneGenGraphicsFrame(
     const onegen::Frame& source, std::uint64_t sequence,
     std::string* rejection_reason = nullptr);
