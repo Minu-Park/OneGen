@@ -52,6 +52,16 @@ public:
   void set_frame_callback(FrameFn cb);
   void set_error_callback(ErrorFn cb);
   void set_invalidate_callback(InvalidateFn cb);
+  /** Advances GenApi polling and drains supported producer events. */
+  void poll_features(std::uint32_t elapsed_ms);
+  /** Reads an explicitly requested register from its owning module. */
+  std::vector<std::uint8_t> read_register(int module, std::string_view name);
+  /** Writes a register through the worker's access and length checks. */
+  void write_register(int module, std::string_view name, const std::vector<std::uint8_t>& bytes);
+  /** Exports a selector-aware GenApi feature bag for one module. */
+  std::string save_features(int module);
+  /** Restores and verifies one module's GenApi feature bag while Live is stopped. */
+  void load_features(int module, std::string_view contents);
 
 private:
   std::shared_ptr<Connection> connection_;
@@ -62,6 +72,7 @@ private:
 
 class Coordinator {
 public:
+  /** Receives cumulative snapshots on completion or after five seconds without a completion. */
   using ProgressFn = std::function<void(const DiscoveryResult&)>;
   /**
    * @param probe_timeout Wait passed to GenTL TLUpdateInterfaceList and
@@ -82,8 +93,9 @@ public:
 
 private:
   friend class Lease;
-  std::shared_ptr<Connection> connection(const std::string& cti);
-  void release(const std::string& identity, const std::string& cti);
+  std::shared_ptr<Connection> connection(const std::string& cti, const std::string& device = {});
+  /** Retains successfully closed workers for rediscovery-free reconnects. */
+  void release(const std::string& identity, const std::string& cti, bool reusable);
 
   std::filesystem::path worker_executable_;
   std::filesystem::path cti_root_;
@@ -91,6 +103,7 @@ private:
   std::mutex mutex_;
   std::mutex discovery_mutex_;
   std::unordered_map<std::string, std::shared_ptr<Connection>> connections_;
+  std::unordered_map<std::string, std::shared_ptr<Connection>> device_connections_;
   std::unordered_set<std::string> leased_;
 };
 

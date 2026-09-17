@@ -88,6 +88,10 @@ inline void write(Writer& out, const FeatureNode& value)
   writeStrings(out, value.enum_entries);
   out.scalar(static_cast<std::uint32_t>(value.children.size()));
   for (const auto& child : value.children) write(out, child);
+  out.string(value.unit);
+  out.string(value.representation);
+  out.scalar(value.float_inc);
+  out.scalar(value.register_length);
 }
 
 inline FeatureNode readFeatureNode(Reader& in)
@@ -116,6 +120,10 @@ inline FeatureNode readFeatureNode(Reader& in)
   value.children.reserve(count);
   for (std::uint32_t index = 0; index < count; ++index)
     value.children.push_back(readFeatureNode(in));
+  value.unit = in.string();
+  value.representation = in.string();
+  value.float_inc = in.scalar<double>();
+  value.register_length = in.scalar<std::uint64_t>();
   return value;
 }
 

@@ -15,7 +15,7 @@ class OneGen;
 
 class Camera {
 public:
-  enum class Module { Interface, Device, DataStream, RemoteDevice };
+  enum class Module { Interface, Device, DataStream, RemoteDevice, System };
   Camera(const Camera&) = delete;
   Camera& operator=(const Camera&) = delete;
   ~Camera();
@@ -45,6 +45,8 @@ public:
 
   NodeMap& features();
   NodeMap& features(Module module);
+  /** Polls GenApi intervals and drains supported events on the owning worker thread. */
+  void poll_features(std::int64_t elapsed_ms);
 
 private:
   friend class OneGen;

@@ -38,6 +38,8 @@ struct OneGen::Impl {
   std::recursive_mutex mu;
   std::vector<std::unique_ptr<Producer>> producers;
   std::vector<std::unique_ptr<Camera>> cameras;
+  // Discovery retains the device/interface association for direct opening.
+  std::vector<FoundDevice> discovered;
   std::set<std::string> open_keys;
 };
 

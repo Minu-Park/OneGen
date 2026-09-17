@@ -2,7 +2,44 @@
 
 ## Unreleased
 
-- Keep the control statusbar limited to Idle, Disconnected, Connected, and Live; route discovery progress, operation results, and feature-write diagnostics to application logs.
+- Isolate cameras sharing a CTI in separate retained workers, reusing the discovery worker for the first camera. Include model/serial in Live completion and asynchronous device-error logs.
+
+- Include the connected camera model and serial in Single acquisition completion logs.
+
+- Defer GUI-thread invalidation node reads during control/acquisition operations; retain the complete post-acquisition feature snapshot without blocking early frame painting. Extend opt-in timing to Single acquisition and stop stages.
+
+- Retain successfully closed producer workers and their discovery cache across Disconnect/Connect; discard workers after failed Close and release retained workers at shutdown.
+
+- Open discovered device IDs directly using their retained producer/interface association; refresh only for uncached queries or failed device opening, avoiding the recurring ten-second Connect scan.
+
+- Add opt-in `ONEGEN_TRACE_CONNECT=1` stage timings for device opening, XML loading, stream preparation, feature snapshots, worker round trips, and GUI tree construction.
+
+- Summarize discovery at start/completion and at most every five seconds; keep producer paths/results at Debug and group optional-producer unavailability at Info. Include camera, stream, and attempted feature-write details in control failures.
+
+- Hide feature categories and module groups with no displayed children after access filtering.
+
+- Remove periodic control-panel feature polling so refreshes do not interrupt item selection or editing.
+
+- Separate local XML URL query metadata such as `?SchemaVersion=1.0.0` from the hexadecimal length before validation.
+
+- Preserve semicolon-delimited local XML lengths and padded hexadecimal fields while retaining strict numeric and transfer bounds.
+
+- Limit the control statusbar to Idle, Connected, and Live; route operation messages to application logs.
+
+- Expose writable-only features, preserve signed 64-bit integers and double precision in numeric editors, and carry unit, representation, and increment metadata through worker protocol version 3.
+- Try all bounded local/file/HTTP(S) XML URLs, retrieve variable-length URL and port names, and reject malformed lengths and short port reads. Use native WinHTTP on Windows and installed libcurl where available on other platforms.
+- Add System/TL features, GenApi polling, and supported generic/invalidation producer events with bounded draining and node-map-owned adapter lifetimes.
+- Add explicit bounded raw-register inspection/writes and selector-aware, verified GenApi feature-bag copy/restore; stop Live before restoring settings or writing raw registers.
+
+- Report module XML/node-map load failures through the error callback, including worker errors before a camera controller is attached, while preserving optional-module fallback.
+
+- Place remote-device feature categories directly below the model-and-serial camera root, alongside Data Stream, Device, Interface, and System/TL.
+
+- Prefix control, discovery, and acquisition logs with `[GenICam]`.
+
+- Keep the startup loading overlay until the first camera is found or ten seconds elapse; hand the same ongoing scan to the controls for remaining producer results.
+
+- Keep the control statusbar limited to Idle, Connected, and Live; route discovery progress, operation results, and feature-write diagnostics to application logs.
 - Open the control panel before hardware discovery completes; publish merged devices as each isolated producer finishes, without gating connection on slower producers. Deduplicate physical CTI file aliases before probing, without collapsing different producer binaries by filename.
 - Remove the unused in-process host, vendor-specific dump tool, and uncalled public wrappers; refresh the feature tree only at acquisition and feature-write state boundaries.
 - Refresh the selected stream after remote feature writes so payload changes apply to the first acquisition.

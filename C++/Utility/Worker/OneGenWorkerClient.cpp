@@ -3,6 +3,7 @@
 #include "OneGenWorkerMessages.h"
 
 #include <QDir>
+#include <QDebug>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <condition_variable>
@@ -138,6 +139,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
 
     QByteArray buffer;
     QByteArray diagnostic;
+    QByteArray timing_lines;
     while (process.state() != QProcess::NotRunning) {
       std::queue<Message> pending;
       {
@@ -153,7 +155,16 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
       process.waitForReadyRead(10);
       try {
         buffer.append(process.readAllStandardOutput());
-        diagnostic.append(process.readAllStandardError());
+        const auto stderr_bytes = process.readAllStandardError();
+        diagnostic.append(stderr_bytes);
+        timing_lines.append(stderr_bytes);
+        for (auto newline = timing_lines.indexOf('\n'); newline >= 0; newline = timing_lines.indexOf('\n')) {
+          const auto line = timing_lines.left(newline).trimmed();
+          timing_lines.remove(0, newline + 1);
+          if (line.startsWith("[GenICam] connect timing:"))
+            qInfo().noquote() << QString::fromUtf8(line) << "cti=" << QString::fromStdString(impl_->cti.string());
+        }
+        if (timing_lines.size() > 65536) timing_lines.clear();
         if (diagnostic.size() > 65536) diagnostic.remove(0, diagnostic.size() - 65536);
         Message message;
         while (takeMessage(buffer, message)) {
@@ -166,6 +177,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
             ErrorFn callback;
             { std::lock_guard lock(impl_->mutex); callback = impl_->on_error; }
             if (callback) callback(message.error);
+            else qWarning().noquote() << "[GenICam]" << QString::fromStdString(message.error);
           } else if (message.operation == Operation::Invalidate) {
             Reader reader(message.payload);
             const auto module = reader.scalar<std::int32_t>();

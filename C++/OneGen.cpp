@@ -174,6 +174,7 @@ std::vector<DeviceInfo> OneGen::enumerate(std::chrono::milliseconds timeout) {
   std::lock_guard<std::recursive_mutex> lk(impl_->mu);
   if (impl_->producers.empty()) throw Error("enumerate: no CTI loaded");
   auto found = scan_devices(impl_->producers, static_cast<uint64_t>(timeout.count()));
+  impl_->discovered = found;
   std::vector<DeviceInfo> out;
   out.reserve(found.size());
   for (auto& f : found) out.push_back(std::move(f.info));

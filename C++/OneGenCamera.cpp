@@ -3,6 +3,7 @@
 #include "OneGen.h"
 
 #include "Internal/Match.h"
+#include "Internal/ConnectTiming.h"
 #include "Internal/NodeMap.h"
 #include "Internal/OneGenImpl.h"
 
@@ -19,6 +20,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <set>
 #include <thread>
 
 namespace onegen {
@@ -237,6 +239,7 @@ struct Camera::Impl {
   NodeMap stream_features;
   NodeMap interface_features;
   NodeMap device_features;
+  NodeMap system_features;
   std::mutex acq_mu;
   std::string open_key;
   std::uint32_t stream_index = 0;
@@ -244,6 +247,27 @@ struct Camera::Impl {
   std::optional<Frame::Scan3dGeometry> scan3d_geometry;
   std::size_t buffer_capacity = 0;
   bool acquiring = false;
+  struct FeatureEvent {
+    GenTL::EVENT_HANDLE event;
+    GenTL::PORT_HANDLE module;
+    NodeMap* map;
+    GenTL::EVENT_TYPE type;
+    std::vector<std::uint8_t> bytes;
+  };
+  std::vector<FeatureEvent> feature_events;
+  std::set<std::pair<GenTL::PORT_HANDLE, GenTL::EVENT_TYPE>> attempted_events;
+  /** Unregisters feature events before their producer module is closed. */
+  void clear_feature_events(GenTL::PORT_HANDLE module = nullptr) {
+    for (auto it = feature_events.begin(); it != feature_events.end();) {
+      if (!module || it->module == module) {
+        g->GCUnregisterEvent(it->module, it->type);
+        it = feature_events.erase(it);
+      } else ++it;
+    }
+    for (auto it = attempted_events.begin(); it != attempted_events.end();)
+      if (!module || it->first == module) it = attempted_events.erase(it);
+      else ++it;
+  }
 
   void release_stream();
   void stop_acquisition();
@@ -255,6 +279,15 @@ struct Camera::Impl {
   bool try_trigger();
   void set_locked(int64_t v);
   void snapshot_scan3d_geometry();
+  /** Loads one module while forwarding diagnostics through the installed error callback. */
+  void load_module(NodeMap& map, Gentl& gentl, GenTL::PORT_HANDLE port,
+                   std::string_view module) {
+    load_remote_nodemap(map, gentl, port, module, [this](std::string_view message) {
+      ErrorFn callback;
+      { std::lock_guard lock(callback_mu); callback = on_error; }
+      if (callback) callback(message);
+    });
+  }
 };
 
 Camera::Camera(OneGen* owner) : impl_(std::make_unique<Impl>()) { impl_->owner = owner; }
@@ -278,6 +311,7 @@ NodeMap& Camera::features(const Module module) {
     case Module::Device: return impl_->device_features;
     case Module::DataStream: return impl_->stream_features;
     case Module::RemoteDevice: return impl_->features;
+    case Module::System: return impl_->system_features;
   }
   return impl_->features;
 }
@@ -312,21 +346,105 @@ void Camera::set_frame_callback(FrameFn cb) {
   std::lock_guard<std::mutex> lk(impl_->callback_mu);
   impl_->on_frame = std::move(cb);
 }
+
+void Camera::poll_features(std::int64_t elapsed_ms) {
+  if (!impl_->opened) return;
+  for (auto* map : {&impl_->features, &impl_->stream_features, &impl_->device_features,
+                   &impl_->interface_features, &impl_->system_features}) map->poll(elapsed_ms);
+  auto& g = *impl_->g;
+  if (!g.EventGetInfo || !g.EventGetDataInfo) return;
+  const auto register_event = [&](GenTL::PORT_HANDLE module, NodeMap& map, GenTL::EVENT_TYPE type) {
+    if (!module || map.empty() || !impl_->attempted_events.emplace(module, type).second) return;
+    GenTL::EVENT_HANDLE event = nullptr;
+    if (g.GCRegisterEvent(module, type, &event) != GenTL::GC_ERR_SUCCESS) return;
+    std::size_t maximum = 0, size = sizeof(maximum);
+    GenTL::INFO_DATATYPE datatype = GenTL::INFO_DATATYPE_UNKNOWN;
+    if (g.EventGetInfo(event, GenTL::EVENT_SIZE_MAX, &datatype, &maximum, &size) != GenTL::GC_ERR_SUCCESS
+        || !maximum || maximum > 1024U * 1024U) {
+      g.GCUnregisterEvent(module, type);
+      return;
+    }
+    impl_->feature_events.push_back({event, module, &map, type, std::vector<std::uint8_t>(maximum)});
+  };
+  for (const auto& entry : {std::pair{g.tl, &impl_->system_features},
+                           std::pair{impl_->hif, &impl_->interface_features},
+                           std::pair{impl_->hdev, &impl_->device_features},
+                           std::pair{impl_->hds, &impl_->stream_features}}) {
+    register_event(entry.first, *entry.second, GenTL::EVENT_FEATURE_INVALIDATE);
+    register_event(entry.first, *entry.second, GenTL::EVENT_MODULE);
+  }
+  register_event(impl_->hdev, impl_->features, GenTL::EVENT_REMOTE_DEVICE);
+  for (auto& event : impl_->feature_events) {
+    // Bound each drain so producer event floods cannot starve acquisition commands.
+    for (int count = 0; count < 32; ++count) {
+      std::size_t size = event.bytes.size();
+      const auto received = g.EventGetData(event.event, event.bytes.data(), &size, 0);
+      if (received == GenTL::GC_ERR_TIMEOUT) break;
+      g.check(received, "EventGetData(feature)");
+      if (size > event.bytes.size()) throw Error("Feature event exceeds registered size");
+      GenTL::INFO_DATATYPE datatype = GenTL::INFO_DATATYPE_UNKNOWN;
+      if (event.type == GenTL::EVENT_FEATURE_INVALIDATE) {
+        std::vector<char> name(65537, 0);
+        std::size_t name_size = name.size() - 1;
+        g.check(g.EventGetDataInfo(event.event, event.bytes.data(), size, GenTL::EVENT_DATA_ID,
+                                  &datatype, name.data(), &name_size), "EventGetDataInfo(feature name)");
+        if (datatype != GenTL::INFO_DATATYPE_STRING || name_size > 65536)
+          throw Error("Feature invalidation event has an invalid identifier");
+        event.map->invalidate(name.data());
+      } else {
+        std::uint64_t id = 0;
+        std::size_t id_size = sizeof(id);
+        const auto id_result = g.EventGetDataInfo(event.event, event.bytes.data(), size, GenTL::EVENT_DATA_NUMID,
+                                                &datatype, &id, &id_size);
+        const bool numeric_id = id_result == GenTL::GC_ERR_SUCCESS
+            && datatype == GenTL::INFO_DATATYPE_UINT64 && id_size == sizeof(id);
+        std::string string_id;
+        if (!numeric_id) {
+          std::vector<char> name(65537, 0);
+          std::size_t name_size = name.size() - 1;
+          g.check(g.EventGetDataInfo(event.event, event.bytes.data(), size, GenTL::EVENT_DATA_ID,
+                                    &datatype, name.data(), &name_size), "EventGetDataInfo(event string ID)");
+          if (datatype != GenTL::INFO_DATATYPE_STRING || name_size > 65536)
+            throw Error("Generic feature event has an invalid identifier");
+          string_id = name.data();
+        }
+        std::size_t payload_size = 0;
+        const auto payload_query = g.EventGetDataInfo(event.event, event.bytes.data(), size, GenTL::EVENT_DATA_VALUE,
+                                                     &datatype, nullptr, &payload_size);
+        if (payload_query != GenTL::GC_ERR_SUCCESS && payload_query != GenTL::GC_ERR_BUFFER_TOO_SMALL)
+          g.check(payload_query, "EventGetDataInfo(event payload size)");
+        if (payload_size > 1024U * 1024U) throw Error("Generic feature event payload exceeds 1 MiB");
+        std::vector<std::uint8_t> payload(payload_size + 1);
+        const auto capacity = payload_size;
+        g.check(g.EventGetDataInfo(event.event, event.bytes.data(), size, GenTL::EVENT_DATA_VALUE,
+                                  &datatype, payload.data(), &payload_size), "EventGetDataInfo(event payload)");
+        if (payload_size > capacity) throw Error("Generic feature event payload is too large");
+        payload.resize(payload_size);
+        if (numeric_id) event.map->deliver_event(payload, id);
+        else event.map->deliver_event(payload, string_id);
+      }
+    }
+  }
+}
 void Camera::set_error_callback(ErrorFn cb) {
   std::lock_guard<std::mutex> lk(impl_->callback_mu);
   impl_->on_error = std::move(cb);
 }
 
 void Camera::open(std::string_view query) {
+  ConnectTiming timing("device-open");
   if (impl_->opened) throw Error("open: camera already open");
   auto* og = impl_->owner->impl_.get();
   std::lock_guard<std::recursive_mutex> lk(og->mu);
   if (og->producers.empty()) throw Error("open: no CTI loaded");
 
-  // Probe left the GenTL interface open. Timeout 0 reuses that list; a closed
-  // handle would force another full GigE wait and can miss the camera.
-  auto found = scan_devices(og->producers, 0);
-  if (found.empty()) found = scan_devices(og->producers, 10000);
+  // Open an enumerated ID directly; zero-timeout refresh can discard producer results.
+  auto found = og->discovered;
+  if (std::none_of(found.begin(), found.end(), [&](const auto& device) { return device.info.id == query; })) {
+    found = scan_devices(og->producers, 10000);
+    og->discovered = found;
+  }
+  timing.mark("discovery-result-resolution");
   std::vector<DeviceInfo> infos;
   infos.reserve(found.size());
   for (auto& f : found) infos.push_back(f.info);
@@ -363,14 +481,19 @@ void Camera::open(std::string_view query) {
     }
   }
   if (err != GenTL::GC_ERR_SUCCESS) g.fail("IFOpenDevice");
+  timing.mark("IFOpenDevice");
 
   try {
-    try { load_remote_nodemap(impl_->interface_features, g, hif); } catch (...) {}
-    try { load_remote_nodemap(impl_->device_features, g, hdev); } catch (...) {}
+    try { impl_->load_module(impl_->system_features, g, g.tl, "System/TL"); } catch (...) {}
+    timing.mark("System/TL-XML");
+    try { impl_->load_module(impl_->interface_features, g, hif, "Interface"); } catch (...) {}
+    timing.mark("Interface-XML");
+    try { impl_->load_module(impl_->device_features, g, hdev, "Device"); } catch (...) {}
+    timing.mark("Device-XML");
     GenTL::PORT_HANDLE hport = nullptr;
     if (g.DevGetPort(hdev, &hport) == GenTL::GC_ERR_SUCCESS) {
       try {
-        load_remote_nodemap(impl_->features, g, hport);
+        impl_->load_module(impl_->features, g, hport, "Remote Device");
         impl_->hport = hport;
       } catch (...) {
         if (impl_->device_features.empty()) throw;
@@ -382,11 +505,13 @@ void Camera::open(std::string_view query) {
     impl_->features.detach();
     impl_->device_features.detach();
     impl_->interface_features.detach();
+    impl_->system_features.detach();
     g.DevClose(hdev);
     throw;
   }
 
   impl_->g = &g;
+  timing.mark("Remote-Device-XML");
   impl_->hif = hif;
   impl_->hdev = hdev;
   impl_->info = hit->info;
@@ -421,6 +546,7 @@ void Camera::Impl::snapshot_scan3d_geometry() {
 }
 
 void Camera::Impl::stop_acquisition() {
+  ConnectTiming timing("acquisition-stop");
   stop_live = true;
   if (live_thread.joinable() && g && hev) g->EventKill(hev);
   if (live_thread.joinable() && live_thread.get_id() != std::this_thread::get_id())
@@ -433,21 +559,26 @@ void Camera::Impl::stop_acquisition() {
   } catch (...) {
   }
   g->DSStopAcquisition(hds, GenTL::ACQ_STOP_FLAGS_DEFAULT);
+  timing.mark("AcquisitionStop-and-DSStopAcquisition");
   g->DSFlushQueue(hds, GenTL::ACQ_QUEUE_ALL_TO_INPUT);
+  timing.mark("DSFlushQueue");
   if (hev) {
     g->GCUnregisterEvent(hds, GenTL::EVENT_NEW_BUFFER);
     hev = nullptr;
   }
   acquiring = false;
+  timing.mark("event-unregister");
   try {
     set_locked(0);
   } catch (...) {
   }
+  timing.mark("unlock-parameters");
 }
 
 void Camera::Impl::release_stream() {
   stop_acquisition();
   if (!g || !hds) return;
+  clear_feature_events(hds);
   stream_features.detach();
   if (hev) {
     g->GCUnregisterEvent(hds, GenTL::EVENT_NEW_BUFFER);
@@ -471,10 +602,12 @@ void Camera::close() {
   auto* og = impl_->owner->impl_.get();
   std::lock_guard<std::recursive_mutex> lk(og->mu);
   impl_->release_stream();
+  impl_->clear_feature_events();
   impl_->features.detach();
   impl_->stream_features.detach();
   impl_->device_features.detach();
   impl_->interface_features.detach();
+  impl_->system_features.detach();
   if (impl_->g && impl_->hdev) impl_->g->DevClose(impl_->hdev);
   og->open_keys.erase(impl_->open_key);
   impl_->hdev = nullptr;
@@ -489,6 +622,7 @@ void Camera::close() {
 }
 
 void Camera::Impl::prepare_stream() {
+  ConnectTiming timing("stream-prepare");
   if (!opened || !g) throw Error("stream: camera not open");
   if (hds) return;
 
@@ -501,9 +635,12 @@ void Camera::Impl::prepare_stream() {
   g->check(g->DevGetDataStreamID(hdev, stream_index, dsid, &dsn), "DevGetDataStreamID");
   stream_id = dsid;
   g->check(g->DevOpenDataStream(hdev, dsid, &hds), "DevOpenDataStream");
-  try { load_remote_nodemap(stream_features, *g, hds); } catch (...) {}
+  timing.mark("DevOpenDataStream");
+  try { load_module(stream_features, *g, hds, "Data Stream"); } catch (...) {}
+  timing.mark("Data-Stream-XML");
   try_set_bool(stream_features, "AutoPacketSize", true);
   try_execute(stream_features, "ProbePacketSize");
+  timing.mark("AutoPacketSize-and-ProbePacketSize");
   try_set_bool(stream_features, "EnableResend", true);
   try_set_int(stream_features, "MaxNumBuffer",
               static_cast<std::int64_t>(acquisition_buffer_count));
@@ -512,6 +649,7 @@ void Camera::Impl::prepare_stream() {
 
   const auto payload = payload_size();
   buffer_capacity = payload;
+  timing.mark("stream-settings-geometry-payload");
 
   size_t min_buf = acquisition_buffer_count;
   GenTL::INFO_DATATYPE t = GenTL::INFO_DATATYPE_UNKNOWN;
@@ -535,6 +673,7 @@ void Camera::Impl::prepare_stream() {
     g->check(g->DSAllocAndAnnounceBuffer(hds, payload, nullptr, &b), "DSAllocAndAnnounceBuffer");
     g->check(g->DSQueueBuffer(hds, b), "DSQueueBuffer");
   }
+  timing.mark("buffer-allocation-and-queue");
 
 }
 
@@ -760,6 +899,7 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
 }
 
 std::vector<Frame> Camera::single(std::size_t n) {
+  ConnectTiming timing("single");
   if (!impl_->opened) throw Error("single: not open");
   if (impl_->live.load()) throw Error("single: live in progress");
   if (n == 0) throw Error("single: n == 0");
@@ -768,15 +908,19 @@ std::vector<Frame> Camera::single(std::size_t n) {
   out.reserve(n);
   try {
     impl_->start_stream(n);
+    timing.mark("stream-start");
     for (std::size_t i = 0; i < n; ++i) {
       impl_->try_trigger();
+      timing.mark("software-trigger-if-enabled");
       out.push_back(impl_->grab_one(acquisition_timeout_ms));
+      timing.mark("frame-received-and-copied");
     }
   } catch (...) {
     impl_->stop_acquisition();
     throw;
   }
   impl_->stop_acquisition();
+  timing.mark("stop-before-return");
   return out;
 }
 

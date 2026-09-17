@@ -1,6 +1,7 @@
 #include "OneGenWorkerMessages.h"
 
 #include "OneGen.h"
+#include "Internal/ConnectTiming.h"
 
 #include <algorithm>
 #include <array>
@@ -70,7 +71,8 @@ int moduleIndex(onegen::Camera::Module module)
     case onegen::Camera::Module::RemoteDevice: return 0;
     case onegen::Camera::Module::DataStream: return 1;
     case onegen::Camera::Module::Device: return 2;
-    default: return 3;
+    case onegen::Camera::Module::Interface: return 3;
+    default: return 4;
   }
 }
 
@@ -79,7 +81,9 @@ onegen::Camera::Module moduleFromIndex(int index)
   if (index == 0) return onegen::Camera::Module::RemoteDevice;
   if (index == 1) return onegen::Camera::Module::DataStream;
   if (index == 2) return onegen::Camera::Module::Device;
-  return onegen::Camera::Module::Interface;
+  if (index == 3) return onegen::Camera::Module::Interface;
+  if (index == 4) return onegen::Camera::Module::System;
+  throw std::runtime_error("Invalid feature module index.");
 }
 
 template <class T>
@@ -124,7 +128,8 @@ int main(int argc, char** argv)
       for (const auto module : {onegen::Camera::Module::RemoteDevice,
                                 onegen::Camera::Module::DataStream,
                                 onegen::Camera::Module::Device,
-                                onegen::Camera::Module::Interface}) {
+                                onegen::Camera::Module::Interface,
+                                      onegen::Camera::Module::System}) {
         opened.features(module).set_invalidate_callback([index = moduleIndex(module)](std::string_view name) {
           Writer out;
           out.scalar(index);
@@ -154,11 +159,21 @@ int main(int argc, char** argv)
             break;
           }
           case Operation::Open: {
+            onegen::ConnectTiming timing("worker-open");
             auto& opened = ensureCamera();
             if (opened.is_open()) opened.close();
+            opened.set_error_callback([](std::string_view error) {
+              send({Operation::Error, 0, false, std::string(error)});
+            });
             opened.open(input.string());
+            timing.mark("camera-open");
             opened.prepare();
+            timing.mark("camera-prepare");
             wireInvalidates(opened);
+            try { opened.poll_features(0); }
+            catch (const std::exception& error) {
+              send({Operation::Error, 0, false, std::string("Feature event setup failed: ") + error.what()});
+            }
             opened.set_frame_callback([](const onegen::Frame& frame) {
               Writer out;
               onegen::worker::write(out, frame);
@@ -170,9 +185,7 @@ int main(int argc, char** argv)
               std::unique_lock lock(ack_mutex);
               ack_ready.wait(lock, [] { return frame_acked || stopping; });
             });
-            opened.set_error_callback([](std::string_view error) {
-              send({Operation::Error, 0, false, std::string(error)});
-            });
+            timing.mark("callbacks-and-event-setup");
             break;
           }
           case Operation::Close:
@@ -186,13 +199,19 @@ int main(int argc, char** argv)
             ensureCamera().prepare();
             break;
           case Operation::DescribeFeatures: {
-            output.scalar(std::uint32_t{4});
+            onegen::ConnectTiming timing("describe-features");
+            output.scalar(std::uint32_t{5});
             for (const auto module : {onegen::Camera::Module::RemoteDevice,
                                       onegen::Camera::Module::DataStream,
                                       onegen::Camera::Module::Device,
-                                      onegen::Camera::Module::Interface}) {
+                                      onegen::Camera::Module::Interface,
+                                      onegen::Camera::Module::System}) {
               output.scalar(moduleIndex(module));
               onegen::worker::write(output, onegen::snapshot(ensureCamera().features(module).root()));
+              timing.mark(module == onegen::Camera::Module::RemoteDevice ? "Remote-Device"
+                  : module == onegen::Camera::Module::DataStream ? "Data-Stream"
+                  : module == onegen::Camera::Module::Device ? "Device"
+                  : module == onegen::Camera::Module::Interface ? "Interface" : "System/TL");
             }
             break;
           }
@@ -216,10 +235,43 @@ int main(int argc, char** argv)
             onegen::worker::write(output, changed);
             break;
           }
+          case Operation::PollFeatures:
+            ensureCamera().poll_features((std::min)(input.scalar<std::uint32_t>(), 60000U));
+            break;
+          case Operation::RegisterRead: {
+            const auto module = moduleFromIndex(input.scalar<std::int32_t>());
+            const auto bytes = ensureCamera().features(module).find(input.string()).read_register();
+            onegen::worker::writeBytes(output, bytes);
+            break;
+          }
+          case Operation::RegisterWrite: {
+            const auto module = moduleFromIndex(input.scalar<std::int32_t>());
+            const auto name = input.string();
+            const auto bytes = onegen::worker::readBytes(input);
+            if (ensureCamera().is_live()) throw std::runtime_error("Stop Live before raw register writes.");
+            ensureCamera().features(module).find(name).write_register(bytes);
+            ensureCamera().prepare();
+            break;
+          }
+          case Operation::SaveFeatures: {
+            const auto module = moduleFromIndex(input.scalar<std::int32_t>());
+            output.string(ensureCamera().features(module).save_features());
+            break;
+          }
+          case Operation::LoadFeatures: {
+            const auto module = moduleFromIndex(input.scalar<std::int32_t>());
+            if (ensureCamera().is_live()) throw std::runtime_error("Stop Live before restoring features.");
+            ensureCamera().features(module).load_features(input.string());
+            ensureCamera().prepare();
+            break;
+          }
           case Operation::GrabOne: {
+            onegen::ConnectTiming timing("worker-single");
             const auto frames = ensureCamera().single(1);
+            timing.mark("acquire-and-stop");
             if (frames.empty()) throw std::runtime_error("Single acquisition returned no frame.");
             onegen::worker::write(output, frames.front());
+            timing.mark("frame-serialization");
             break;
           }
           case Operation::StartLive:

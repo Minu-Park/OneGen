@@ -16,7 +16,8 @@ enum class NodeKind {
   Enumeration,
   Command,
   String,
-  Other
+  Other,
+  Register
 };
 
 /** Copied GenApi node record with no vendor pointers. */
@@ -41,6 +42,10 @@ struct FeatureNode {
   std::string enum_value;
   std::vector<std::string> enum_entries;
   std::vector<FeatureNode> children;
+  std::string unit;
+  std::string representation;
+  double float_inc = 0;
+  std::uint64_t register_length = 0;
 };
 
 class NodeMap;
@@ -70,6 +75,12 @@ public:
   void set_float(double v);
   double float_min() const;
   double float_max() const;
+  /** Returns a declared floating-point increment, or zero when none is specified. */
+  double float_inc() const;
+  /** Returns the unit exposed by a numeric node. */
+  std::string unit() const;
+  /** Returns the preferred numeric representation exposed by the node. */
+  std::string representation() const;
 
   bool get_bool() const;
   void set_bool(bool v);
@@ -84,6 +95,12 @@ public:
   std::vector<std::string> enum_entries() const;
 
   void execute();
+  /** Reads an explicitly requested raw register, bounded to 64 KiB. */
+  std::vector<std::uint8_t> read_register() const;
+  /** Writes a raw register only when its exact declared length matches. */
+  void write_register(const std::vector<std::uint8_t>& bytes);
+  /** Returns the raw register byte length. */
+  std::uint64_t register_length() const;
 
   std::string value_text() const;
 
@@ -112,6 +129,18 @@ public:
   Node root() const;
   Node find(std::string_view name) const;
   bool empty() const;
+  /** Advances GenApi-declared polling intervals without inventing register-read intervals. */
+  void poll(std::int64_t elapsed_ms);
+  /** Invalidates a producer-reported feature and its GenApi dependents. */
+  void invalidate(std::string_view name);
+  /** Delivers a generic GenTL event payload using its producer-provided event identifier. */
+  void deliver_event(const std::vector<std::uint8_t>& bytes, std::uint64_t event_id);
+  /** Delivers a generic event whose producer exposes a string identifier. */
+  void deliver_event(const std::vector<std::uint8_t>& bytes, std::string_view event_id);
+  /** Serializes streamable features with their selector state using GenApi. */
+  std::string save_features() const;
+  /** Restores a GenApi feature bag and verifies the resulting values. */
+  void load_features(std::string_view contents);
 
   using InvalidateFn = std::function<void(std::string_view name)>;
   void set_invalidate_callback(InvalidateFn cb);

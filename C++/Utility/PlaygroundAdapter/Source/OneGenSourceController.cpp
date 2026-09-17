@@ -36,10 +36,11 @@ void OneGenSourceController::bindLease()
   const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
   lease_->set_frame_callback(
       [this, sourceName](const onegen::Frame& source) { deliver(source, sourceName); });
-  lease_->set_error_callback([this](const std::string_view error) {
+  lease_->set_error_callback([model = info.model, serial = info.serial](const std::string_view error) {
     qWarning().noquote()
-        << "OneGen acquisition failed:"
-        << QString::fromLocal8Bit(error.data(), static_cast<qsizetype>(error.size()));
+        << QStringLiteral("[GenICam] camera=%1 serial=%2; cause=%3")
+               .arg(QString::fromStdString(model), QString::fromStdString(serial),
+                    QString::fromLocal8Bit(error.data(), static_cast<qsizetype>(error.size())));
   });
 }
 
@@ -83,7 +84,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
                 .arg(source.buffer_info.size_filled)
                 .arg(source.buffer_info.capacity)
           : QString::fromStdString(source.buffer_info.diagnostic);
-      qWarning().noquote() << "OneGen incomplete frame delivered:" << diagnostic;
+      qWarning().noquote() << "[GenICam] incomplete frame delivered:" << diagnostic;
     }
     std::string rejectionReason;
     auto payload = oneGenGraphicsFrame(source, sequence, &rejectionReason);
@@ -102,7 +103,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
             .arg(source.buffer_info.image_offset).arg(source.buffer_info.y_padding)
             .arg(source.buffer_info.incomplete).arg(source.buffer_info.image_present)
             .arg(source.buffer_info.contains_chunk_data);
-        qWarning().noquote() << "OneGen" << message;
+        qWarning().noquote() << "[GenICam]" << message;
       }
       return;
     }
@@ -113,9 +114,9 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     frame.frameSeq = sequence;
     consumer_(std::move(frame), source.stream_index);
   } catch (const std::exception& error) {
-    qWarning() << "OneGen frame delivery failed:" << error.what();
+    qWarning() << "[GenICam] frame delivery failed:" << error.what();
   } catch (...) {
-    qWarning() << "OneGen frame delivery failed with an unknown exception.";
+    qWarning() << "[GenICam] frame delivery failed with an unknown exception.";
   }
 }
 

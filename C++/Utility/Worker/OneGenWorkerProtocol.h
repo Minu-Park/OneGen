@@ -12,12 +12,13 @@
 
 namespace onegen::worker {
 
-inline constexpr std::uint32_t protocol_version = 2;
+inline constexpr std::uint32_t protocol_version = 3;
 inline constexpr std::uint32_t maximum_message_size = 256U * 1024U * 1024U;
 
 enum class Operation : std::uint8_t {
   Probe, Open, Close, ListStreams, SelectStream, DescribeFeatures, NodeRead, NodeWrite,
   GrabOne, StartLive, StopLive, Trigger, Shutdown, Frame, Error, Invalidate, FrameAck,
+  PollFeatures, RegisterRead, RegisterWrite, SaveFeatures, LoadFeatures,
 };
 
 struct Message {

@@ -110,7 +110,6 @@ private:
   QFutureWatcher<AsyncResult> discovery_watcher_;
   Operation operation_ = Operation::None;
   bool shutting_down_ = false;
-  bool connection_attempted_ = false;
   bool feature_grabbing_ = false;
   bool rebuilding_features_ = false;
 };

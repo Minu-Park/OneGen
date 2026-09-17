@@ -1,4 +1,6 @@
 #include "QOneGenWidget.h"
+#include <QElapsedTimer>
+#include "NumericFeatureEditor.h"
 
 #include "OneGenCoordinator.h"
 #include "OneGenSourceController.h"
@@ -6,17 +8,22 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDebug>
-#include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QClipboard>
+#include <QApplication>
+#include <QMenu>
+#include <QPlainTextEdit>
+#include <QRegularExpression>
 #include <QMetaObject>
 #include <QPushButton>
 #include <QPointer>
 #include <QScrollBar>
 #include <QSignalBlocker>
-#include <QSpinBox>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTimer>
@@ -24,16 +31,9 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QtConcurrent>
-#include <climits>
 #include <exception>
 
 namespace {
-
-int clamp_int(std::int64_t v) {
-  if (v < INT_MIN) return INT_MIN;
-  if (v > INT_MAX) return INT_MAX;
-  return static_cast<int>(v);
-}
 
 void expand_camera_only(QTreeWidgetItem* item, int depth) {
   if (!item) return;
@@ -125,6 +125,30 @@ QOneGenWidget::QOneGenWidget(
   features_->setHeaderLabels({QStringLiteral("Feature"), QStringLiteral("Value")});
   features_->setUniformRowHeights(true);
   features_->setRootIsDecorated(true);
+  features_->setContextMenuPolicy(Qt::CustomContextMenu);
+  connect(features_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    if (!lease_ || operation_watcher_.isRunning() || grab_live_button_->isChecked()) return;
+    const auto* item = features_->itemAt(position);
+    if (!item) return;
+    const int module = item->data(0, Qt::UserRole + 1).toInt();
+    QMenu menu(this);
+    auto* copy = menu.addAction(QStringLiteral("Copy module settings"));
+    auto* restore = menu.addAction(QStringLiteral("Restore module settings from clipboard"));
+    restore->setEnabled(!QApplication::clipboard()->text().isEmpty());
+    const auto* chosen = menu.exec(features_->viewport()->mapToGlobal(position));
+    try {
+      if (chosen == copy) {
+        QApplication::clipboard()->setText(QString::fromStdString(lease_->save_features(module)));
+        qInfo() << "[GenICam] module settings copied";
+      } else if (chosen == restore) {
+        lease_->load_features(module, QApplication::clipboard()->text().toStdString());
+        setFeatureSnapshot(lease_->describe_features());
+        qInfo() << "[GenICam] module settings restored and verified";
+      }
+    } catch (const std::exception& error) {
+      qWarning().noquote() << "[GenICam] module settings failed:" << error.what();
+    }
+  });
   feature_drain_timer_ = new QTimer(this);
   feature_drain_timer_->setSingleShot(true);
   feature_drain_timer_->setInterval(50);
@@ -153,7 +177,7 @@ QOneGenWidget::QOneGenWidget(
     try {
       lease_->select_data_stream(streams_box_->currentData().toUInt());
     } catch (const std::exception& error) {
-      qWarning().noquote() << QStringLiteral("OneGen stream selection failed: %1")
+      qWarning().noquote() << QStringLiteral("[GenICam] stream selection failed: %1")
                                   .arg(QString::fromLocal8Bit(error.what()));
     }
   });
@@ -191,7 +215,7 @@ QOneGenWidget::QOneGenWidget(
     const auto result = discovery_watcher_.result();
     if (result.error.isEmpty()) updateDiscoveryDevices(result.devices);
     if (!result.error.isEmpty())
-      qWarning().noquote() << QStringLiteral("OneGen discovery failed: %1").arg(result.error);
+      qWarning().noquote() << QStringLiteral("[GenICam] discovery failed: %1").arg(result.error);
     setOperationActive(operation_watcher_.isRunning());
   });
   for (const auto& device : devices_) {
@@ -230,7 +254,6 @@ void QOneGenWidget::refresh()
 {
   if (shutting_down_ || discovery_watcher_.isRunning() || lease_
       || operation_watcher_.isRunning() || !discover_) return;
-  qInfo() << "OneGen discovery started";
   QPointer<QOneGenWidget> self(this);
   discovery_watcher_.setFuture(QtConcurrent::run([discover = discover_, self] {
     AsyncResult result;
@@ -240,8 +263,6 @@ void QOneGenWidget::refresh()
         QMetaObject::invokeMethod(self, [self, update] {
           if (!self || self->shutting_down_) return;
           self->updateDiscoveryDevices(update.devices);
-          qInfo().noquote() << QStringLiteral("OneGen discovery: %1 camera(s), producers %2/%3")
-              .arg(update.devices.size()).arg(update.finished_producers).arg(update.total_producers);
           self->setOperationActive(self->operation_watcher_.isRunning());
         }, Qt::QueuedConnection);
       });
@@ -275,27 +296,38 @@ void QOneGenWidget::connectCamera()
     connect_button_->setChecked(false);
   };
   if (!coordinator_ || devices_box_->currentIndex() < 0) {
-    qWarning().noquote() << QStringLiteral("OneGen connect skipped: no camera selected");
+    qInfo().noquote() << QStringLiteral("[GenICam] connect skipped: no camera selected; connect a camera and refresh the list");
     revert();
     return;
   }
   const auto selected = devices_.at(static_cast<std::size_t>(devices_box_->currentIndex()));
-  qInfo().noquote() << QStringLiteral("OneGen connect: id=%1 cti=%2")
-                          .arg(QString::fromStdString(selected.id),
+  qInfo().noquote() << QStringLiteral("[GenICam] camera connection requested: model=%1 serial=%2 id=%3 cti=%4")
+                          .arg(QString::fromStdString(selected.model), QString::fromStdString(selected.serial), QString::fromStdString(selected.id),
                                QString::fromStdString(selected.cti_path));
-  connection_attempted_ = true;
+
   updateStatus();
   if (!run(Operation::Connect, [this, selected] {
         AsyncResult result;
+        QElapsedTimer timing;
+        timing.start();
+        const auto mark = [&](const char* stage) {
+          const auto elapsed = timing.restart();
+          if (qEnvironmentVariableIntValue("ONEGEN_TRACE_CONNECT") == 1)
+            qInfo().noquote() << QStringLiteral("[GenICam] connect timing: scope=host stage=%1 duration=%2 ms camera=%3")
+                .arg(QLatin1String(stage)).arg(elapsed).arg(QString::fromStdString(selected.id));
+        };
         result.lease = std::shared_ptr<onegen::worker::Lease>(coordinator_->open(selected).release());
+        mark("open-worker-roundtrip");
         const auto& info = result.lease->info();
         const auto name = info.display_name.empty() ? info.id : info.display_name;
         result.title = QString::fromStdString(name);
         result.streams = result.lease->data_streams();
+        mark("list-streams-roundtrip");
         try {
           result.features = result.lease->describe_features();
+          mark("feature-snapshot-roundtrip");
         } catch (const std::exception& error) {
-          qWarning().noquote() << QStringLiteral("OneGen feature tree: %1")
+          qWarning().noquote() << QStringLiteral("[GenICam] feature tree: %1")
                                      .arg(QString::fromLocal8Bit(error.what()));
         }
         return result;
@@ -321,7 +353,7 @@ void QOneGenWidget::disconnectCamera()
 bool QOneGenWidget::run(Operation operation, std::function<AsyncResult()> work)
 {
   if (shutting_down_ || operation_watcher_.isRunning()) {
-    qWarning().noquote() << QStringLiteral("OneGen ignored operation while busy");
+    qDebug().noquote() << QStringLiteral("[GenICam] operation skipped: another control operation is running or shutdown is in progress");
     return false;
   }
   operation_ = operation;
@@ -338,7 +370,7 @@ bool QOneGenWidget::run(Operation operation, std::function<AsyncResult()> work)
       try {
         result.features = lease_->describe_features();
       } catch (const std::exception& error) {
-        qWarning().noquote() << QStringLiteral("OneGen feature tree refresh failed: %1")
+        qWarning().noquote() << QStringLiteral("[GenICam] feature tree refresh failed: %1")
                                     .arg(QString::fromLocal8Bit(error.what()));
       }
     }
@@ -359,7 +391,8 @@ void QOneGenWidget::finishOperation()
         : operation == Operation::Stop ? QStringLiteral("live stop")
         : operation == Operation::Connect ? QStringLiteral("connect")
         : QStringLiteral("control");
-    qWarning().noquote() << QStringLiteral("OneGen %1 failed: %2").arg(action, result.error);
+    qWarning().noquote() << QStringLiteral("[GenICam] %1 failed: camera=%2 stream=%3; cause=%4")
+        .arg(action, devices_box_->currentText(), streams_box_->currentText(), result.error);
     if (operation == Operation::Connect) {
       const QSignalBlocker blocker(connect_button_);
       connect_button_->setChecked(false);
@@ -386,6 +419,8 @@ void QOneGenWidget::finishOperation()
     const auto& info = lease_->info();
     auto camera_name = info.model.empty() ? result.title.toStdString() : info.model;
     if (!info.serial.empty()) camera_name += " (" + info.serial + ")";
+    QElapsedTimer tree_timing;
+    tree_timing.start();
     setFeatureModules(
         result.features,
         [this](const int module, const std::string_view name) {
@@ -396,10 +431,13 @@ void QOneGenWidget::finishOperation()
           return lease_->write_node(module, name, op, value);
         },
         camera_name);
+    if (qEnvironmentVariableIntValue("ONEGEN_TRACE_CONNECT") == 1)
+      qInfo().noquote() << QStringLiteral("[GenICam] connect timing: scope=host stage=feature-tree-build duration=%1 ms camera=%2")
+          .arg(tree_timing.elapsed()).arg(result.title);
     lease_->set_invalidate_callback([this](const int module, const std::string_view name) {
       invalidateFeature(module, name);
     });
-    qInfo().noquote() << QStringLiteral("OneGen connected: %1").arg(result.title);
+    qInfo().noquote() << QStringLiteral("[GenICam] connected: %1").arg(result.title);
     if (title_callback_) title_callback_(result.title);
   } else if (operation == Operation::Disconnect) {
     if (lease_) lease_->set_invalidate_callback({});
@@ -407,20 +445,26 @@ void QOneGenWidget::finishOperation()
     streams_box_->clear();
     lease_.reset();
     updateDiscoveryDevices(devices_);
-    qInfo() << "OneGen disconnected";
+    qInfo() << "[GenICam] disconnected";
   } else if (operation == Operation::GrabOne) {
     if (!result.features.empty()) setFeatureSnapshot(result.features);
-    qInfo() << "OneGen single acquisition completed";
+    qInfo().noquote() << QStringLiteral("[GenICam] single acquisition completed: camera=%1 serial=%2")
+        .arg(QString::fromStdString(lease_->info().model), QString::fromStdString(lease_->info().serial));
   } else if (operation == Operation::Start || operation == Operation::Stop) {
     setFeatureGrabbing(operation == Operation::Start);
     if (!result.features.empty()) setFeatureSnapshot(result.features);
-    qInfo() << (operation == Operation::Start ? "OneGen live started" : "OneGen live stopped");
+    qInfo().noquote() << QStringLiteral("[GenICam] live %1: camera=%2 serial=%3 stream=%4")
+        .arg(operation == Operation::Start ? QStringLiteral("started") : QStringLiteral("stopped"),
+             QString::fromStdString(lease_->info().model), QString::fromStdString(lease_->info().serial), streams_box_->currentText());
   }
   setOperationActive(false);
 }
 
 void QOneGenWidget::setOperationActive(bool active)
 {
+  if (active) feature_drain_timer_->stop();
+  else if (operation_ == Operation::None && !feature_grabbing_ && !pending_features_.empty()
+           && !feature_drain_timer_->isActive()) feature_drain_timer_->start();
   const bool connected = static_cast<bool>(lease_);
   devices_box_->setEnabled(!active && !connected);
   streams_box_->setEnabled(!active && connected && !grab_live_button_->isChecked()
@@ -438,11 +482,7 @@ void QOneGenWidget::updateStatus()
   const bool connected = static_cast<bool>(lease_);
   const bool live = connected && controller_ && controller_->isGrabbing();
   status_->setText(live ? QStringLiteral("Live") : connected ? QStringLiteral("Connected")
-      : connection_attempted_ ? QStringLiteral("Disconnected") : QStringLiteral("Idle"));
-  status_->setProperty("status", live ? "grabbing" : connected ? "connected"
-      : connection_attempted_ ? "disconnected" : "idle");
-  status_->style()->unpolish(status_);
-  status_->style()->polish(status_);
+      : QStringLiteral("Idle"));
 }
 
 void QOneGenWidget::setFeatureModules(
@@ -480,7 +520,7 @@ void QOneGenWidget::invalidateFeature(const int module, const std::string_view n
       [this, q, module] {
         if (rebuilding_features_) return;
         pending_features_.insert(QString::number(module) + QChar('\n') + q);
-        if (!feature_grabbing_ && !feature_drain_timer_->isActive()) feature_drain_timer_->start();
+        if (operation_ == Operation::None && !feature_grabbing_ && !feature_drain_timer_->isActive()) feature_drain_timer_->start();
       },
       Qt::QueuedConnection);
 }
@@ -510,12 +550,13 @@ void QOneGenWidget::rebuildFeatures()
     for (std::size_t index = 0; index < feature_modules_.size(); ++index) {
       const auto& entry = feature_modules_[index];
       auto* parent = cam;
-      if (!entry.first.empty()) {
+      if (!entry.first.empty() && entry.first != "Remote Device") {
         parent = new QTreeWidgetItem(cam, QStringList(QString::fromStdString(entry.first)));
         parent->setData(0, Qt::UserRole, QStringLiteral("__module_%1__").arg(index));
         parent->setData(0, Qt::UserRole + 1, static_cast<int>(index));
       }
       addFeatureCategories(parent, entry.second, static_cast<int>(index));
+      if (parent != cam && parent->childCount() == 0) delete parent;
     }
   } catch (...) {
     features_->clear();
@@ -559,6 +600,7 @@ void QOneGenWidget::addFeatureCategories(QTreeWidgetItem* cam, const onegen::Fea
     else if (cat.name == "Root" || cat.name.empty())
       addFeatureLeaf(item, c, map_index);
   }
+  if (item != cam && item->childCount() == 0) delete item;
 }
 
 void QOneGenWidget::addFeatureLeaf(QTreeWidgetItem* parent, const onegen::FeatureNode& n,
@@ -581,34 +623,22 @@ QWidget* QOneGenWidget::createFeatureEditor(const onegen::FeatureNode& n, const 
   QWidget* w = nullptr;
   try {
     switch (n.kind) {
-      case onegen::NodeKind::Integer: {
-        auto* box = new QSpinBox;
-        w = box;
-        QSignalBlocker block(box);
-        box->setRange(clamp_int(n.int_min), clamp_int(n.int_max));
-        box->setSingleStep(n.int_inc > 0 && n.int_inc <= INT_MAX ? static_cast<int>(n.int_inc) : 1);
-        if (n.readable) box->setValue(clamp_int(n.int_value));
-        connect(box, &QSpinBox::valueChanged, this, [this, nodeName, map_index](int v) {
-          writeFeature(map_index, nodeName, "int", std::to_string(v));
-        });
-      } break;
+      case onegen::NodeKind::Integer:
       case onegen::NodeKind::Float: {
-        auto* box = new QDoubleSpinBox;
-        w = box;
-        QSignalBlocker block(box);
-        box->setRange(n.float_min, n.float_max);
-        box->setSingleStep(0.1);
-        box->setDecimals(6);
-        if (n.readable) box->setValue(n.float_value);
-        connect(box, &QDoubleSpinBox::valueChanged, this, [this, nodeName, map_index](double v) {
-          writeFeature(map_index, nodeName, "float", std::to_string(v));
+        auto* edit = new QLineEdit;
+        w = edit;
+        updateNumericFeatureEditor(edit, n);
+        connect(edit, &QLineEdit::editingFinished, this, [this, nodeName, map_index, edit, kind = n.kind] {
+          writeFeature(map_index, nodeName, kind == onegen::NodeKind::Integer ? "int" : "float",
+                       edit->text().toStdString());
         });
       } break;
       case onegen::NodeKind::Boolean: {
         auto* box = new QCheckBox;
         w = box;
         QSignalBlocker block(box);
-        if (n.readable) box->setChecked(n.bool_value);
+        box->setTristate(!n.readable);
+        box->setCheckState(n.readable ? (n.bool_value ? Qt::Checked : Qt::Unchecked) : Qt::PartiallyChecked);
         connect(box, &QCheckBox::checkStateChanged, this,
                 [this, nodeName, map_index](Qt::CheckState s) {
           writeFeature(map_index, nodeName, "bool", s == Qt::Checked ? "1" : "0");
@@ -630,6 +660,7 @@ QWidget* QOneGenWidget::createFeatureEditor(const onegen::FeatureNode& n, const 
         for (const auto& e : n.enum_entries)
           combo->addItem(QString::fromStdString(e), QString::fromStdString(e));
         if (n.readable) combo->setCurrentText(QString::fromStdString(n.enum_value));
+        else combo->setCurrentIndex(-1);
         connect(combo, &QComboBox::currentIndexChanged, this, [this, nodeName, map_index](int) {
           auto* combo = qobject_cast<QComboBox*>(sender());
           if (!combo) return;
@@ -641,6 +672,63 @@ QWidget* QOneGenWidget::createFeatureEditor(const onegen::FeatureNode& n, const 
         w = btn;
         connect(btn, &QPushButton::clicked, this, [this, nodeName, map_index] {
           writeFeature(map_index, nodeName, "execute", {});
+        });
+      } break;
+      case onegen::NodeKind::Register: {
+        auto* button = new QPushButton(QStringLiteral("Inspect register…"));
+        w = button;
+        connect(button, &QPushButton::clicked, this, [this, nodeName, map_index] {
+          if (!lease_ || operation_watcher_.isRunning()) return;
+          const auto n = resolveFeature(nodeName, map_index);
+          try {
+            if (!n.register_length || n.register_length > 65536)
+              throw std::runtime_error("Raw register length must be between 1 and 65536 bytes.");
+            QDialog dialog(this);
+            dialog.setWindowTitle(nodeName);
+            auto* layout = new QVBoxLayout(&dialog);
+            auto* bytes = new QPlainTextEdit;
+            bytes->setReadOnly(true);
+            if (n.readable) {
+              const auto value = lease_->read_register(map_index, nodeName.toStdString());
+              bytes->setPlainText(QString::fromLatin1(QByteArray(
+                  reinterpret_cast<const char*>(value.data()), static_cast<qsizetype>(value.size())).toHex(' ')));
+            }
+            auto* allow = new QCheckBox(QStringLiteral("Enable raw register writes"));
+            allow->setEnabled(n.writable && !grab_live_button_->isChecked());
+            auto* actions = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+            actions->button(QDialogButtonBox::Save)->setEnabled(false);
+            connect(allow, &QCheckBox::toggled, &dialog, [bytes, actions](bool checked) {
+              bytes->setReadOnly(!checked);
+              actions->button(QDialogButtonBox::Save)->setEnabled(checked);
+            });
+            layout->addWidget(new QLabel(QStringLiteral("%1 bytes. Raw writes bypass named feature controls.").arg(n.register_length)));
+            layout->addWidget(bytes);
+            layout->addWidget(allow);
+            layout->addWidget(actions);
+            connect(actions, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            connect(actions, &QDialogButtonBox::accepted, &dialog, [&] {
+              auto hex = bytes->toPlainText();
+              hex.remove(QRegularExpression(QStringLiteral("\\s+")));
+              if (hex.size() != static_cast<qsizetype>(n.register_length * 2)
+                  || !QRegularExpression(QStringLiteral("\\A[0-9a-fA-F]+\\z")).match(hex).hasMatch()) {
+                qWarning() << "[GenICam] register write requires the exact number of hexadecimal bytes";
+                return;
+              }
+              const auto raw = QByteArray::fromHex(hex.toLatin1());
+              try {
+                lease_->write_register(map_index, nodeName.toStdString(),
+                    std::vector<std::uint8_t>(raw.begin(), raw.end()));
+                qInfo().noquote() << "[GenICam] raw register written:" << nodeName;
+                dialog.accept();
+              } catch (const std::exception& error) {
+                qWarning().noquote() << "[GenICam] register write failed:" << error.what();
+              }
+            });
+            dialog.exec();
+            if (lease_) setFeatureSnapshot(lease_->describe_features());
+          } catch (const std::exception& error) {
+            qWarning().noquote() << "[GenICam] register inspection failed:" << error.what();
+          }
         });
       } break;
       case onegen::NodeKind::Category:
@@ -655,7 +743,7 @@ QWidget* QOneGenWidget::createFeatureEditor(const onegen::FeatureNode& n, const 
     delete w;
     return nullptr;
   }
-  if (w) w->setEnabled(n.writable || n.kind == onegen::NodeKind::Command);
+  if (w) w->setEnabled(n.kind == onegen::NodeKind::Register ? n.readable || n.writable : n.writable);
   return w;
 }
 
@@ -665,22 +753,24 @@ void QOneGenWidget::writeFeature(const int map_index, const QString& nodeName,
   if (!feature_write_) return;
   try {
     feature_write_(map_index, nodeName.toStdString(), op, value);
-    qInfo().noquote() << QStringLiteral("OneGen feature write: module=%1 node=%2 operation=%3")
-        .arg(map_index).arg(nodeName, QString::fromUtf8(op.data(), static_cast<int>(op.size())));
+    qInfo().noquote() << QStringLiteral("[GenICam] feature write completed: module=%1 node=%2 operation=%3 value=%4")
+        .arg(map_index).arg(nodeName, QString::fromUtf8(op.data(), static_cast<int>(op.size())),
+                            QString::fromUtf8(value.data(), static_cast<int>(value.size())));
   } catch (const std::exception& error) {
-    qWarning().noquote() << QStringLiteral("OneGen feature write failed: %1: %2")
-                                .arg(nodeName, QString::fromLocal8Bit(error.what()));
+    qWarning().noquote() << QStringLiteral("[GenICam] feature write failed: module=%1 node=%2 operation=%3 value=%4; cause=%5")
+        .arg(map_index).arg(nodeName, QString::fromUtf8(op.data(), static_cast<int>(op.size())),
+                           QString::fromUtf8(value.data(), static_cast<int>(value.size())), QString::fromLocal8Bit(error.what()));
     refreshFeatureEditor(nodeName, map_index);
     return;
   } catch (...) {
-    qWarning().noquote() << QStringLiteral("OneGen feature write failed: %1").arg(nodeName);
+    qWarning().noquote() << QStringLiteral("[GenICam] feature write failed: %1").arg(nodeName);
     refreshFeatureEditor(nodeName, map_index);
     return;
   }
   try {
     if (lease_) setFeatureSnapshot(lease_->describe_features());
   } catch (const std::exception& error) {
-    qWarning().noquote() << QStringLiteral("OneGen feature tree refresh failed: %1")
+    qWarning().noquote() << QStringLiteral("[GenICam] feature tree refresh failed: %1")
                                 .arg(QString::fromLocal8Bit(error.what()));
     refreshFeatureEditor(nodeName, map_index);
   }
@@ -698,21 +788,9 @@ bool QOneGenWidget::refreshFeatureEditor(const QString& nodeName, const int map_
     try {
       switch (n.kind) {
         case onegen::NodeKind::Integer:
-          if (auto* box = qobject_cast<QSpinBox*>(w)) {
-            QSignalBlocker b(box);
-            box->setEnabled(n.writable);
-            box->setRange(clamp_int(n.int_min), clamp_int(n.int_max));
-            box->setSingleStep(n.int_inc > 0 && n.int_inc <= INT_MAX ? static_cast<int>(n.int_inc) : 1);
-            if (n.readable) box->setValue(clamp_int(n.int_value));
-            ok = true;
-          }
-          break;
         case onegen::NodeKind::Float:
-          if (auto* box = qobject_cast<QDoubleSpinBox*>(w)) {
-            QSignalBlocker b(box);
-            box->setEnabled(n.writable);
-            box->setRange(n.float_min, n.float_max);
-            if (n.readable) box->setValue(n.float_value);
+          if (auto* edit = qobject_cast<QLineEdit*>(w)) {
+            updateNumericFeatureEditor(edit, n);
             ok = true;
           }
           break;
@@ -720,7 +798,8 @@ bool QOneGenWidget::refreshFeatureEditor(const QString& nodeName, const int map_
           if (auto* box = qobject_cast<QCheckBox*>(w)) {
             QSignalBlocker b(box);
             box->setEnabled(n.writable);
-            if (n.readable) box->setChecked(n.bool_value);
+            box->setTristate(!n.readable);
+            box->setCheckState(n.readable ? (n.bool_value ? Qt::Checked : Qt::Unchecked) : Qt::PartiallyChecked);
             ok = true;
           }
           break;
@@ -752,9 +831,16 @@ bool QOneGenWidget::refreshFeatureEditor(const QString& nodeName, const int map_
                 combo->addItem(QString::fromStdString(e), QString::fromStdString(e));
             }
             if (n.readable) combo->setCurrentText(QString::fromStdString(n.enum_value));
+            else combo->setCurrentIndex(-1);
             ok = true;
           }
         } break;
+        case onegen::NodeKind::Register:
+          if (auto* button = qobject_cast<QPushButton*>(w)) {
+            button->setEnabled(n.readable || n.writable);
+            ok = true;
+          }
+          break;
         case onegen::NodeKind::Command:
           if (auto* btn = qobject_cast<QPushButton*>(w)) {
             btn->setEnabled(n.writable);
@@ -808,11 +894,15 @@ bool QOneGenWidget::shouldShowFeature(const onegen::FeatureNode& n) const
 {
   if (n.kind == onegen::NodeKind::Category) return false;
   if (!n.visible) return false;
-  return n.readable || n.kind == onegen::NodeKind::Command;
+  return n.readable || n.writable;
 }
 
 void QOneGenWidget::drainFeatureInvalidates()
 {
+  // Defer synchronous node reads so acquisition and queued frame painting remain responsive.
+  if (operation_ != Operation::None || feature_grabbing_ || shutting_down_) return;
+  QElapsedTimer timing;
+  timing.start();
   const auto batch = pending_features_;
   pending_features_.clear();
   if (rebuilding_features_ || feature_modules_.empty()) return;
@@ -833,6 +923,9 @@ void QOneGenWidget::drainFeatureInvalidates()
     }
   }
   if (need_rebuild && !feature_grabbing_) rebuildFeatures();
+  if (qEnvironmentVariableIntValue("ONEGEN_TRACE_CONNECT") == 1)
+    qInfo().noquote() << QStringLiteral("[GenICam] connect timing: scope=host stage=feature-invalidation-drain nodes=%1 duration=%2 ms")
+        .arg(batch.size()).arg(timing.elapsed());
 }
 
 onegen::FeatureNode QOneGenWidget::resolveFeature(const QString& nodeName,

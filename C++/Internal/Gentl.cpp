@@ -87,6 +87,8 @@ void Gentl::load(const std::filesystem::path& cti) {
       sym(lib, "DSGetBufferChunkData"));
 
   check(GCInitLib(), "GCInitLib");
+  EventGetInfo = reinterpret_cast<decltype(EventGetInfo)>(sym(lib, "EventGetInfo"));
+  EventGetDataInfo = reinterpret_cast<decltype(EventGetDataInfo)>(sym(lib, "EventGetDataInfo"));
   check(TLOpen(&tl), "TLOpen");
 }
 

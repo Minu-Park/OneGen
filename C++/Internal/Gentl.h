@@ -61,6 +61,8 @@ struct Gentl {
   GenTL::PDSGetNumBufferParts DSGetNumBufferParts = nullptr;
   GenTL::PDSGetBufferPartInfo DSGetBufferPartInfo = nullptr;
   GenTL::PDSGetBufferChunkData DSGetBufferChunkData = nullptr;
+  GenTL::PEventGetInfo EventGetInfo = nullptr;
+  GenTL::PEventGetDataInfo EventGetDataInfo = nullptr;
 
   void load(const std::filesystem::path& cti);
   void close_tl();

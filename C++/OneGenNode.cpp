@@ -1,12 +1,19 @@
 #include "Internal/NodeMap.h"
+#include "Internal/XmlHttp.h"
+#include <fstream>
+#include <filesystem>
 
 #include "OneGenError.h"
 
 #include <GenApi/GenApi.h>
 #include <GenApi/NodeCallback.h>
+#include <GenApi/Persistence.h>
+#include <GenApi/EventAdapterGeneric.h>
 
 #include <cctype>
 #include <cstdint>
+#include <charconv>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -24,15 +31,19 @@ public:
   bool open = true;
 
   void Read(void* buffer, int64_t addr, int64_t length) override {
+    if (addr < 0 || length < 0) throw GENERIC_EXCEPTION("IPort::Read: invalid range");
     if (!open || !g || !port) throw GENERIC_EXCEPTION("IPort::Read: closed");
     auto size = static_cast<size_t>(length);
-    if (g->GCReadPort(port, static_cast<uint64_t>(addr), buffer, &size) != GenTL::GC_ERR_SUCCESS)
+    if (g->GCReadPort(port, static_cast<uint64_t>(addr), buffer, &size) != GenTL::GC_ERR_SUCCESS
+        || size != static_cast<size_t>(length))
       throw GENERIC_EXCEPTION("IPort::Read failed");
   }
   void Write(const void* buffer, int64_t addr, int64_t length) override {
+    if (addr < 0 || length < 0) throw GENERIC_EXCEPTION("IPort::Write: invalid range");
     if (!open || !g || !port) throw GENERIC_EXCEPTION("IPort::Write: closed");
     auto size = static_cast<size_t>(length);
-    if (g->GCWritePort(port, static_cast<uint64_t>(addr), buffer, &size) != GenTL::GC_ERR_SUCCESS)
+    if (g->GCWritePort(port, static_cast<uint64_t>(addr), buffer, &size) != GenTL::GC_ERR_SUCCESS
+        || size != static_cast<size_t>(length))
       throw GENERIC_EXCEPTION("IPort::Write failed");
   }
   GenApi::EAccessMode GetAccessMode() const override {
@@ -64,6 +75,7 @@ struct NodeMap::Impl {
   std::unique_ptr<CPort> port;
   std::vector<GenApi::CallbackHandleType> cbs;
   InvalidateFn on_invalidate;
+  std::unique_ptr<GenApi::CEventAdapterGeneric> event_adapter;
 };
 
 NodeMap::NodeMap() : impl_(new Impl) {}
@@ -86,6 +98,7 @@ void NodeMap::detach() {
     }
   }
   impl_->cbs.clear();
+  impl_->event_adapter.reset();
   if (impl_->port) impl_->port->open = false;
   impl_->nm.reset();
   impl_->port.reset();
@@ -104,6 +117,74 @@ bool NodeMap::empty() const {
 
 Node NodeMap::root() const { return find("Root"); }
 
+void NodeMap::poll(std::int64_t elapsed_ms) {
+  if (elapsed_ms < 0) throw Error("poll interval cannot be negative");
+  genapi("poll", [&] {
+    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+    if (!empty()) impl_->nm->_Ptr->Poll(elapsed_ms);
+  });
+}
+
+void NodeMap::invalidate(std::string_view name) {
+  genapi("invalidate", [&] {
+    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+    auto node = find(name);
+    if (!node.valid()) throw Error("event references an unknown feature");
+    inode(node.inode_)->InvalidateNode();
+  });
+}
+
+void NodeMap::deliver_event(const std::vector<std::uint8_t>& bytes, std::uint64_t event_id) {
+  if (bytes.size() > 1024U * 1024U) throw Error("event payload exceeds 1 MiB");
+  genapi("event", [&] {
+    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+    if (empty()) throw Error("event node map is unavailable");
+    if (!impl_->event_adapter)
+      impl_->event_adapter = std::make_unique<GenApi::CEventAdapterGeneric>(impl_->nm->_Ptr);
+    impl_->event_adapter->DeliverMessage(bytes.data(), static_cast<std::uint32_t>(bytes.size()), event_id);
+  });
+}
+
+void NodeMap::deliver_event(const std::vector<std::uint8_t>& bytes, std::string_view event_id) {
+  if (bytes.size() > 1024U * 1024U || event_id.size() > 65536)
+    throw Error("event payload or identifier exceeds supported bounds");
+  genapi("event", [&] {
+    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+    if (empty()) throw Error("event node map is unavailable");
+    if (!impl_->event_adapter)
+      impl_->event_adapter = std::make_unique<GenApi::CEventAdapterGeneric>(impl_->nm->_Ptr);
+    impl_->event_adapter->DeliverMessage(bytes.data(), static_cast<std::uint32_t>(bytes.size()),
+        GENICAM_NAMESPACE::gcstring(std::string(event_id).c_str()));
+  });
+}
+
+std::string NodeMap::save_features() const {
+  return genapi("save features", [&] {
+    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+    if (empty()) throw Error("feature node map is unavailable");
+    GenApi::CFeatureBag bag;
+    bag.StoreToBag(impl_->nm->_Ptr, 100000);
+    std::ostringstream output;
+    output << bag;
+    auto contents = output.str();
+    if (contents.size() > maximum_xml_size) throw Error("feature bag exceeds 32 MiB");
+    return contents;
+  });
+}
+
+void NodeMap::load_features(std::string_view contents) {
+  if (contents.size() > maximum_xml_size) throw Error("feature bag exceeds 32 MiB");
+  genapi("load features", [&] {
+    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+    if (empty()) throw Error("feature node map is unavailable");
+    GenApi::CFeatureBag bag;
+    std::istringstream input{std::string(contents)};
+    input >> bag;
+    if (input.fail()) throw Error("invalid GenApi feature bag");
+    if (!bag.LoadFromBag(impl_->nm->_Ptr, true)) throw Error("feature bag restore or verification failed");
+  });
+}
+
 Node NodeMap::find(std::string_view name) const {
   std::lock_guard<std::recursive_mutex> lk(impl_->mu);
   Node n;
@@ -120,8 +201,24 @@ struct NodeMapAccess {
   static void load_string(NodeMap& map, const char* xml);
 };
 
-void load_remote_nodemap(NodeMap& map, Gentl& g, GenTL::PORT_HANDLE port) {
-  NodeMapAccess::load(map, g, port);
+void load_remote_nodemap(NodeMap& map, Gentl& g, GenTL::PORT_HANDLE port,
+                         std::string_view module,
+                         std::function<void(std::string_view)> diagnostic) {
+  try {
+    NodeMapAccess::load(map, g, port);
+  } catch (const std::exception& error) {
+    if (diagnostic) {
+      const auto message = std::string(module) + " XML/node map loading failed: " + error.what();
+      try { diagnostic(message); } catch (...) { /* Diagnostics must not replace the load failure. */ }
+    }
+    throw;
+  } catch (...) {
+    if (diagnostic) {
+      try { diagnostic(std::string(module) + " XML/node map loading failed: unknown exception"); }
+      catch (...) { /* Diagnostics must not replace the load failure. */ }
+    }
+    throw;
+  }
 }
 
 void load_string_nodemap(NodeMap& map, const char* xml) {
@@ -136,58 +233,116 @@ void NodeMapAccess::load(NodeMap& map, Gentl& g, GenTL::PORT_HANDLE port) {
   uint32_t nurl = 0;
   g.check(g.GCGetNumPortURLs(port, &nurl), "GCGetNumPortURLs");
   if (nurl == 0) throw Error("device port has no XML URL");
+  if (nurl > 16) throw Error("device port exposes more than 16 XML URLs");
 
-  char urlbuf[1024] = {};
-  size_t urlsize = sizeof(urlbuf);
-  GenTL::INFO_DATATYPE type = GenTL::INFO_DATATYPE_UNKNOWN;
-  g.check(g.GCGetPortURLInfo(port, 0, GenTL::URL_INFO_URL, &type, urlbuf, &urlsize),
-          "GCGetPortURLInfo");
-  const std::string url = urlbuf;
-  const std::string url_l = to_lower(url);
-
-  auto nm = std::make_unique<GenApi::CNodeMapRef>();
-  if (url_l.rfind("local:", 0) == 0) {
-    size_t i = 6;
-    if (url.compare(i, 3, "///") == 0) i += 3;
-    std::string rest = url.substr(i);
-    std::string name, saddr, slen;
-    {
-      std::istringstream in(rest);
-      std::getline(in, name, ';');
-      std::getline(in, saddr, ';');
-      std::getline(in, slen, ';');
+  std::unique_ptr<GenApi::CNodeMapRef> nm;
+  std::string failures;
+  for (std::uint32_t index = 0; index < nurl; ++index) {
+    try {
+      GenTL::INFO_DATATYPE type = GenTL::INFO_DATATYPE_UNKNOWN;
+      std::size_t size = 0;
+      const auto query = g.GCGetPortURLInfo(port, index, GenTL::URL_INFO_URL, &type, nullptr, &size);
+      if (query != GenTL::GC_ERR_SUCCESS && query != GenTL::GC_ERR_BUFFER_TOO_SMALL)
+        g.check(query, "GCGetPortURLInfo(size)");
+      if (!size || size > 65536) throw Error("XML URL length is invalid");
+      std::vector<char> url_bytes(size + 1, 0);
+      const auto capacity = size;
+      g.check(g.GCGetPortURLInfo(port, index, GenTL::URL_INFO_URL, &type, url_bytes.data(), &size), "GCGetPortURLInfo");
+      if (size > capacity || type != GenTL::INFO_DATATYPE_STRING) throw Error("XML URL response is invalid");
+      const std::string url(url_bytes.data());
+      const auto scheme = to_lower(url);
+      auto candidate = std::make_unique<GenApi::CNodeMapRef>();
+      std::vector<char> xml;
+      bool zip = false;
+      if (scheme.rfind("local:", 0) == 0) {
+        const auto first = url.find(';');
+        const auto second = first == std::string::npos ? first : url.find(';', first + 1);
+        if (second == std::string::npos) throw Error("Malformed local XML URL");
+        const auto parse_hex = [](std::string_view field) {
+          const auto begin = field.find_first_not_of(" \t\r\n");
+          if (begin == std::string_view::npos) throw Error("Invalid local XML address or length");
+          field = field.substr(begin, field.find_last_not_of(" \t\r\n") - begin + 1);
+          if (field.starts_with("0x") || field.starts_with("0X")) field.remove_prefix(2);
+          std::uint64_t value = 0;
+          const auto parsed = std::from_chars(field.data(), field.data() + field.size(), value, 16);
+          if (parsed.ec != std::errc{} || parsed.ptr != field.data() + field.size())
+            throw Error("Invalid local XML address or length");
+          return value;
+        };
+        const auto address = parse_hex(std::string_view(url).substr(first + 1, second - first - 1));
+        const auto third = url.find_first_of(";?", second + 1);
+        const auto length = parse_hex(std::string_view(url).substr(second + 1, third - second - 1));
+        if (!length || length > maximum_xml_size || address > UINT64_MAX - length)
+          throw Error("Local XML length or address is outside supported bounds");
+        xml.resize(static_cast<std::size_t>(length));
+        size = xml.size();
+        g.check(g.GCReadPort(port, address, xml.data(), &size), "GCReadPort(xml)");
+        if (size != xml.size()) throw Error("Short local XML read");
+        zip = to_lower(url.substr(0, first)).ends_with(".zip");
+      } else if (scheme.rfind("file:", 0) == 0) {
+        std::string path = url.substr(5);
+#ifdef _WIN32
+        if (path.starts_with("///")) path.erase(0, 3);
+#else
+        if (path.starts_with("///")) path.erase(0, 2);
+        else if (path.starts_with("//localhost/")) path.erase(0, 11);
+        else if (path.starts_with("//")) throw Error("Remote file URL authorities are unsupported on this platform");
+#endif
+        std::string decoded;
+        for (std::size_t position = 0; position < path.size(); ++position) {
+          if (path[position] != '%') { decoded.push_back(path[position]); continue; }
+          unsigned int byte = 0;
+          if (position + 2 >= path.size()) throw Error("Malformed escaped file XML URL");
+          const auto parsed = std::from_chars(path.data() + position + 1, path.data() + position + 3, byte, 16);
+          if (parsed.ec != std::errc{} || parsed.ptr != path.data() + position + 3 || byte == 0)
+            throw Error("Malformed escaped file XML URL");
+          decoded.push_back(static_cast<char>(byte));
+          position += 2;
+        }
+        std::ifstream input(std::filesystem::u8path(decoded), std::ios::binary | std::ios::ate);
+        if (!input) throw Error("Could not open XML file");
+        const auto length = input.tellg();
+        if (length <= 0 || length > static_cast<std::streamoff>(maximum_xml_size))
+          throw Error("XML file length is outside supported bounds");
+        xml.resize(static_cast<std::size_t>(length));
+        input.seekg(0);
+        if (!input.read(xml.data(), static_cast<std::streamsize>(xml.size()))) throw Error("Short XML file read");
+        zip = to_lower(path).ends_with(".zip");
+      } else if (scheme.starts_with("http:") || scheme.starts_with("https:")) {
+        xml = fetch_xml_http(url);
+        zip = xml.size() >= 4 && xml[0] == 'P' && xml[1] == 'K' && xml[2] == 3 && xml[3] == 4;
+      } else {
+        throw Error("Unsupported XML URL scheme");
+      }
+      if (zip) candidate->_LoadXMLFromZIPData(xml.data(), xml.size());
+      else {
+        xml.push_back('\0');
+        candidate->_LoadXMLFromString(GENICAM_NAMESPACE::gcstring(xml.data()));
+      }
+      // A valid XML with a failing port connection also permits the next URL.
+      std::size_t name_size = 0;
+      const auto name_query = g.GCGetPortInfo(port, GenTL::PORT_INFO_PORTNAME, &type, nullptr, &name_size);
+      if (name_query != GenTL::GC_ERR_SUCCESS && name_query != GenTL::GC_ERR_BUFFER_TOO_SMALL)
+        g.check(name_query, "GCGetPortInfo(size)");
+      if (!name_size || name_size > 65536) throw Error("Port name length is invalid");
+      std::vector<char> name(name_size + 1, 0);
+      const auto name_capacity = name_size;
+      g.check(g.GCGetPortInfo(port, GenTL::PORT_INFO_PORTNAME, &type, name.data(), &name_size), "GCGetPortInfo");
+      if (name_size > name_capacity || type != GenTL::INFO_DATATYPE_STRING) throw Error("Port name response is invalid");
+      auto candidate_port = std::make_unique<CPort>();
+      candidate_port->g = &g;
+      candidate_port->port = port;
+      if (!candidate->_Connect(candidate_port.get(), name.data())) throw Error("NodeMap port connection failed");
+      map.impl_->port = std::move(candidate_port);
+      nm = std::move(candidate);
+      break;
+    } catch (const std::exception& error) {
+      failures += "URL[" + std::to_string(index) + "]: " + error.what() + "\n";
+    } catch (const GENICAM_NAMESPACE::GenericException& error) {
+      failures += "URL[" + std::to_string(index) + "]: " + error.what() + "\n";
     }
-    const uint64_t address = std::stoull(saddr, nullptr, 16);
-    auto length = static_cast<size_t>(std::stoull(slen, nullptr, 16));
-    std::vector<char> buf(length + 1, 0);
-    size_t n = length;
-    g.check(g.GCReadPort(port, address, buf.data(), &n), "GCReadPort(xml)");
-    const bool zip = name.size() >= 4 && to_lower(name.substr(name.size() - 4)) == ".zip";
-    if (zip) {
-      nm->_LoadXMLFromZIPData(buf.data(), n);
-    } else {
-      nm->_LoadXMLFromString(GENICAM_NAMESPACE::gcstring(buf.data()));
-    }
-  } else if (url_l.rfind("file:", 0) == 0) {
-    size_t i = 5;
-    if (url.compare(i, 3, "///") == 0) i += 3;
-    std::string path = url.substr(i);
-    if (path.size() >= 4 && to_lower(path.substr(path.size() - 4)) == ".zip")
-      nm->_LoadXMLFromZIPFile(path.c_str());
-    else
-      nm->_LoadXMLFromFile(path.c_str());
-  } else {
-    throw Error("unsupported port URL: " + url);
   }
-
-  char pname[256] = {};
-  size_t pns = sizeof(pname);
-  g.check(g.GCGetPortInfo(port, GenTL::PORT_INFO_PORTNAME, &type, pname, &pns), "GCGetPortInfo");
-
-  auto cport = std::make_unique<CPort>();
-  cport->g = &g;
-  cport->port = port;
-  if (!nm->_Connect(cport.get(), pname)) throw Error(std::string("NodeMap connect failed: ") + pname);
+  if (!nm) throw Error("All XML URLs failed:\n" + failures);
 
   if (nm->_Ptr) {
     GenApi::NodeList_t nodes;
@@ -210,7 +365,7 @@ void NodeMapAccess::load(NodeMap& map, Gentl& g, GenTL::PORT_HANDLE port) {
   }
 
   map.impl_->nm = std::move(nm);
-  map.impl_->port = std::move(cport);
+
   map.nodemap_ = map.impl_->nm.get();
   } catch (const GENICAM_NAMESPACE::GenericException& e) {
     throw Error(std::string("nodemap: ") + e.what());
@@ -270,6 +425,8 @@ NodeKind Node::kind() const {
       return NodeKind::Command;
     case GenApi::intfIString:
       return NodeKind::String;
+    case GenApi::intfIRegister:
+      return NodeKind::Register;
     default:
       return NodeKind::Other;
   }
@@ -370,6 +527,40 @@ double Node::float_max() const {
   });
 }
 
+double Node::float_inc() const {
+  return genapi("float_inc", [&] {
+    std::lock_guard<std::recursive_mutex> lock(map_->impl_->mu);
+    GenApi::CFloatPtr node(inode(inode_));
+    return node->HasInc() ? node->GetInc() : 0.0;
+  });
+}
+
+std::string Node::unit() const {
+  return genapi("unit", [&]() -> std::string {
+    std::lock_guard<std::recursive_mutex> lock(map_->impl_->mu);
+    if (kind() == NodeKind::Float) return GenApi::CFloatPtr(inode(inode_))->GetUnit().c_str();
+    if (kind() == NodeKind::Integer) return GenApi::CIntegerPtr(inode(inode_))->GetUnit().c_str();
+    return {};
+  });
+}
+
+std::string Node::representation() const {
+  return genapi("representation", [&]() -> std::string {
+    std::lock_guard<std::recursive_mutex> lock(map_->impl_->mu);
+    const auto value = kind() == NodeKind::Float
+        ? GenApi::CFloatPtr(inode(inode_))->GetRepresentation()
+        : GenApi::CIntegerPtr(inode(inode_))->GetRepresentation();
+    switch (value) {
+      case GenApi::HexNumber: return "Hexadecimal";
+      case GenApi::IPV4Address: return "IPv4";
+      case GenApi::MACAddress: return "MAC address";
+      case GenApi::Logarithmic: return "Logarithmic";
+      case GenApi::Linear: return "Linear";
+      default: return "Decimal";
+    }
+  });
+}
+
 bool Node::get_bool() const {
   return genapi("get_bool", [&] {
     std::lock_guard<std::recursive_mutex> lk(map_->impl_->mu);
@@ -443,6 +634,34 @@ void Node::execute() {
     GenApi::CCommandPtr p(inode(inode_));
     if (!p.IsValid()) throw Error("not a command");
     p->Execute();
+  });
+}
+
+std::uint64_t Node::register_length() const {
+  if (kind() != NodeKind::Register) throw Error("not a raw register node");
+  return genapi("register length", [&] {
+    std::lock_guard<std::recursive_mutex> lock(map_->impl_->mu);
+    return static_cast<std::uint64_t>(GenApi::CRegisterPtr(inode(inode_))->GetLength());
+  });
+}
+
+std::vector<std::uint8_t> Node::read_register() const {
+  return genapi("read register", [&] {
+    std::lock_guard<std::recursive_mutex> lock(map_->impl_->mu);
+    const auto length = register_length();
+    if (!is_readable() || !length || length > 65536) throw Error("register is unreadable or exceeds 64 KiB");
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
+    GenApi::CRegisterPtr(inode(inode_))->Get(bytes.data(), length);
+    return bytes;
+  });
+}
+
+void Node::write_register(const std::vector<std::uint8_t>& bytes) {
+  genapi("write register", [&] {
+    std::lock_guard<std::recursive_mutex> lock(map_->impl_->mu);
+    if (!is_writable() || bytes.empty() || bytes.size() > 65536 || bytes.size() != register_length())
+      throw Error("register is unwritable or its byte length does not match");
+    GenApi::CRegisterPtr(inode(inode_))->Set(bytes.data(), bytes.size());
   });
 }
 
@@ -531,11 +750,16 @@ FeatureNode snapshot(const Node& node)
         out.int_min = node.int_min();
         out.int_max = node.int_max();
         out.int_inc = node.int_inc();
+        out.unit = node.unit();
+        out.representation = node.representation();
         break;
       case NodeKind::Float:
         if (out.readable) out.float_value = node.get_float();
         out.float_min = node.float_min();
         out.float_max = node.float_max();
+        out.float_inc = node.float_inc();
+        out.unit = node.unit();
+        out.representation = node.representation();
         break;
       case NodeKind::Boolean:
         if (out.readable) out.bool_value = node.get_bool();
@@ -546,6 +770,9 @@ FeatureNode snapshot(const Node& node)
         break;
       case NodeKind::String:
         if (out.readable) out.string_value = node.get_string();
+        break;
+      case NodeKind::Register:
+        out.register_length = node.register_length();
         break;
       default:
         if (out.readable) out.string_value = node.value_text();
@@ -563,9 +790,23 @@ void apply_feature(Node node, std::string_view op, std::string_view value)
 {
   if (!node.valid()) throw Error("feature: invalid node");
   const std::string text(value);
-  if (op == "int") node.set_int(std::stoll(text));
-  else if (op == "float") node.set_float(std::stod(text));
-  else if (op == "bool") node.set_bool(text == "1" || text == "true");
+  if (op == "int") {
+    std::int64_t number = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), number);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+      throw Error("integer value is invalid or outside the signed 64-bit range");
+    node.set_int(number);
+  } else if (op == "float") {
+    double number = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), number);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !std::isfinite(number))
+      throw Error("floating-point value must be finite and completely parsed");
+    node.set_float(number);
+  } else if (op == "bool") {
+    if (text != "0" && text != "1" && text != "true" && text != "false")
+      throw Error("invalid boolean value");
+    node.set_bool(text == "1" || text == "true");
+  }
   else if (op == "string") node.set_string(text);
   else if (op == "enum") node.set_enum(text);
   else if (op == "execute") node.execute();

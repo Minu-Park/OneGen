@@ -12,6 +12,7 @@ add_library(onegen
   OneGenCamera.cpp
   OneGenNode.cpp
   Internal/Gentl.cpp
+  Internal/XmlHttp.cpp
   Internal/Match.cpp
   Internal/OneGenDefaults.cpp
 )
@@ -19,6 +20,15 @@ add_library(OneGen::OneGen ALIAS onegen)
 target_compile_features(onegen PUBLIC cxx_std_20)
 target_include_directories(onegen PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(onegen PUBLIC genicam::genicam)
+if(WIN32)
+  target_link_libraries(onegen PRIVATE winhttp)
+else()
+  find_package(CURL QUIET)
+  if(CURL_FOUND)
+    target_link_libraries(onegen PRIVATE CURL::libcurl)
+    target_compile_definitions(onegen PRIVATE ONEGEN_HAVE_CURL=1)
+  endif()
+endif()
 if(UNIX)
   target_link_libraries(onegen PRIVATE ${CMAKE_DL_LIBS})
 endif()
@@ -51,6 +61,20 @@ if(ONEGEN_BUILD_TESTS)
   endif()
 
   add_custom_target(check COMMAND test_open_query COMMAND test_node)
+  if(WIN32 OR CURL_FOUND)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+      add_executable(test_xml_http Tests/test_xml_http.cpp)
+      target_link_libraries(test_xml_http PRIVATE onegen)
+      target_compile_options(test_xml_http PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+      add_test(NAME test_xml_http COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_xml_http.py" $<TARGET_FILE:test_xml_http>)
+      set_tests_properties(test_xml_http PROPERTIES ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+    endif()
+  endif()
 endif()
 
 if(ONEGEN_BUILD_WORKER)
@@ -89,6 +113,18 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Worker")
   target_link_libraries(OneGenWorkerClient PUBLIC onegen Qt6::Core)
   if(ONEGEN_BUILD_TESTS)
+    find_package(Qt6 QUIET COMPONENTS Widgets)
+    if(TARGET Qt6::Widgets)
+      add_executable(test_numeric_editor Tests/test_numeric_editor.cpp)
+      target_link_libraries(test_numeric_editor PRIVATE onegen Qt6::Widgets)
+      target_compile_options(test_numeric_editor PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+      add_test(NAME test_numeric_editor COMMAND test_numeric_editor)
+      set_tests_properties(test_numeric_editor PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+    endif()
     add_executable(test_worker Tests/test_worker.cpp)
     target_link_libraries(test_worker PRIVATE OneGen::WorkerClient)
     target_compile_options(test_worker PRIVATE
