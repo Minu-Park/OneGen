@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.0
+
 - Leave PixelGrid CalibratedC X/Y without a stored pitch; `xScale` remains UniformPhysical sampling only.
 - Read C-only and explicit selector-free CalibratedC metadata without requiring unused axes; preserve calibration availability, output mode, coordinate system and stereo parameters through worker protocol v6.
 - Decode unpacked C/AC/ABC8,16,32f/64f and packed 10/12-bit `p` layouts, including planar storage and both byte orders; apply RectifiedC physical XY sampling, assemble uniquely matched coordinate planes, and preserve native UncalibratedC previews.
