@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -54,6 +55,16 @@ struct Frame {
     std::array<double, 3> invalid_value{};
     std::array<bool, 3> invalid_enabled{};
     std::string distance_unit;
+    /** Explicit SFNC interpretation; empty strings retain legacy producer behavior. */
+    std::string output_mode;
+    std::string coordinate_system;
+    /** Calibration availability per A/B/C axis, independent of default numeric values. */
+    std::array<bool, 3> calibrated_axes{true, true, true};
+    /** Disparity reconstruction; NaN when the corresponding node is absent. */
+    double focal_length = std::numeric_limits<double>::quiet_NaN();
+    double baseline = std::numeric_limits<double>::quiet_NaN();
+    double principal_u = std::numeric_limits<double>::quiet_NaN();
+    double principal_v = std::numeric_limits<double>::quiet_NaN();
   };
   struct Part {
     std::vector<std::uint8_t> payload;

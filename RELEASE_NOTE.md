@@ -2,9 +2,16 @@
 
 ## Unreleased
 
-- Separate single-image bytes from transport prefixes and chunk metadata; validate chunks and parts against delivered storage, retain owned raw chunks through worker protocol version 4, and reject non-image payloads in graphics conversion.
+- Leave PixelGrid CalibratedC X/Y without a stored pitch; `xScale` remains UniformPhysical sampling only.
+- Read C-only and explicit selector-free CalibratedC metadata without requiring unused axes; preserve calibration availability, output mode, coordinate system and stereo parameters through worker protocol v6.
+- Decode unpacked C/AC/ABC8,16,32f/64f and packed 10/12-bit `p` layouts, including planar storage and both byte orders; apply RectifiedC physical XY sampling, assemble uniquely matched coordinate planes, and preserve native UncalibratedC previews.
+- Reconstruct DisparityC with focal length and baseline, accept RectifiedAC like CalibratedAC, convert Spherical/Cylindrical samples to Cartesian, map meter/inch physical units to millimetres without rescaling PixelGrid X/Y, preserve Confidence1/1p, and byte-swap unpacked 2D images.
+- Keep chunk Scan3d overlays from dropping stereo parameters; emit CalibratedABC_PointCloud coordinates from `physicalXAt`/`physicalYAt`/`physicalZAt` so unit conversion cannot split XYZ.
+- Present unorganized calibrated ABC data as points without invented grid surfaces; align auxiliary fields and reject unsupported geometry modes and unsafe layouts.
+
+- Separate single-image bytes from transport prefixes and chunk metadata; validate chunks and parts against delivered storage, retain owned raw chunks through worker protocol version 5, and reject non-image payloads in graphics conversion.
 - Support all four documented Gen4 PixelFormat entries in single and multipart payloads, including native Confidence32f-only previews without fabricated depth calibration.
-- Decode calibrated multipart Coord3D_C32f range and Confidence32f samples without integer truncation; preserve finite-sample masks and reject unsafe layouts and big-endian multibyte range data.
+- Decode calibrated multipart Coord3D_C32f range and Confidence32f samples without integer truncation; preserve finite-sample masks and reject unsafe layouts and unknown endian identifiers.
 - Keep graphics-adapter assertions enabled in Release test builds.
 
 - Use the target platform's executable suffix for the packaged worker environment binding; verify it against the built worker in CTest.

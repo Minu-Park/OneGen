@@ -222,6 +222,13 @@ inline void write(Writer& out, const Frame& value)
     for (const auto item : value.scan3d_geometry->invalid_value) out.scalar(item);
     for (const auto item : value.scan3d_geometry->invalid_enabled) out.scalar(item);
     out.string(value.scan3d_geometry->distance_unit);
+    out.string(value.scan3d_geometry->output_mode);
+    out.string(value.scan3d_geometry->coordinate_system);
+    for (const auto item : value.scan3d_geometry->calibrated_axes) out.scalar(item);
+    out.scalar(value.scan3d_geometry->focal_length);
+    out.scalar(value.scan3d_geometry->baseline);
+    out.scalar(value.scan3d_geometry->principal_u);
+    out.scalar(value.scan3d_geometry->principal_v);
   }
   out.scalar(value.width);
   out.scalar(value.height);
@@ -261,6 +268,13 @@ inline Frame readFrame(Reader& in)
     for (auto& item : geometry.invalid_value) item = in.scalar<double>();
     for (auto& item : geometry.invalid_enabled) item = in.scalar<bool>();
     geometry.distance_unit = in.string();
+    geometry.output_mode = in.string();
+    geometry.coordinate_system = in.string();
+    for (auto& item : geometry.calibrated_axes) item = in.scalar<bool>();
+    geometry.focal_length = in.scalar<double>();
+    geometry.baseline = in.scalar<double>();
+    geometry.principal_u = in.scalar<double>();
+    geometry.principal_v = in.scalar<double>();
     value.scan3d_geometry = std::move(geometry);
   }
   value.width = in.scalar<std::uint32_t>();

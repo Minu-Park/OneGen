@@ -36,19 +36,19 @@ with matching mono intensity and confidence parts. SFNC coordinate scale,
 offset, invalid-value, and distance-unit features are snapshotted before
 acquisition; missing calibration is rejected instead of guessed.
 
-GenDC parsing, disparity calibration, vendor motion/trigger recipes, and
-proprietary pixel formats are not GenTL services and still require a documented
-standard payload or an explicit device-family profile before removing their
-SDK paths.
+GenDC parsing, vendor motion/trigger recipes, and proprietary pixel formats are
+not GenTL services and still require a documented standard payload or an explicit
+device-family profile before removing their SDK paths.
 
 ## Vendor SDK replacement map
 
 | Existing module capability | GenICam replacement in OneGen | Status |
 | --- | --- | --- |
 | Camera discovery, connection, feature tree, Single/Live/Stop | GenTL system/interface/device/stream plus remote GenApi | Implemented |
-| Camera 2D image delivery | PFNC image payload, standard GenTL JPEG payload, and owned buffer copy | Implemented; big-endian multi-byte pixels fail safely |
-| Camera multipart XYZ, intensity, confidence | GenTL parts plus PFNC and SFNC Scan3d metadata | Implemented for ABC32f/C16 |
-| Camera GenDC and stereo disparity reconstruction | GenDC descriptor parsing and a documented calibration profile | Pending payload evidence |
+| Camera 2D image delivery | PFNC image payload, standard GenTL JPEG payload, and owned buffer copy | Implemented; unpacked multi-byte pixels convert both byte orders; packed `p` stays LSB-first |
+| Camera multipart XYZ, intensity, confidence | GenTL parts plus PFNC and SFNC Scan3d metadata | Implemented for unpacked/packed C/AC/ABC, 64f, disparity, RectifiedAC, and spherical/cylindrical reconstruction |
+| Camera stereo DisparityC | SFNC baseline, focal length, and optional principal-point reconstruction | Implemented; hardware pending |
+| Camera GenDC | GenDC descriptor parsing | Pending payload evidence |
 | Framegrabber board/applet/camera feature access | GenTL interface/device/remote-device module node maps | Implemented when exposed by the CTI |
 | Framegrabber DMA selection and source routing | GenTL data-stream enumeration and selection | Implemented one active stream at a time |
 | Framegrabber applet/configuration files | CTI-owned GenApi features and standard feature persistence | Feature bags implemented with selector-aware verification; native applet loaders remain producer-owned |
@@ -100,7 +100,7 @@ bounded to 64 KiB and registers are not read eagerly during tree snapshots.
 The feature-tree context menu copies/restores the selected module's GenApi feature
 bag through the clipboard. Restoration uses selector state and verifies values.
 A failed restore can have applied earlier entries; it is not transactional.
-The worker and client must both use protocol version 4.
+The worker and client must both use protocol version 6.
 
 Single-image payloads are copied from the producer's image offset using the
 declared row stride and delivered height; prefix bytes, Y padding and trailing
@@ -112,6 +112,34 @@ Chunk geometry is read while attached to the GenApi node map; general decoded
 chunk values are not exposed by this raw-byte contract. Compressed images with
 attached chunks require a known image boundary. Physical producer compatibility
 still requires captured-buffer validation.
+
+3D conversion supports unpacked PFNC C, AC and ABC at 8/16-bit integer and 32/64-bit
+float depth, plus packed 10/12-bit `p` layouts. AC/ABC support interleaved and planar
+storage in either byte order. CalibratedC needs only C calibration, including a readable
+C-only selector or selector-free scalar calibration identified by an explicit CalibratedC
+mode. RectifiedC requires all three calibrated axes and applies physical XY sampling.
+CalibratedAC reconstructs B from the declared uniform row scale/offset. ABC grid
+payloads retain explicit XYZ; CalibratedABC_PointCloud produces only unorganized
+points from the RangeFrame world domain so meter/inch conversion cannot split Z
+from XY, with invalid points removed and auxiliary fields kept aligned. Separate
+A/B/C planes must have unique matching source/region IDs, dimensions and namespace.
+Auxiliary fields must match the selected range source/region. UncalibratedC is a
+native scalar preview with unspecified physical XY, not calibrated geometry.
+DisparityC reconstructs Z as baseline*focal/disparity when those nodes exist;
+principal-point projection is applied when U/V are present. RectifiedAC uses the
+same A/C samples and uniform B row reconstruction as CalibratedAC. Spherical and
+Cylindrical ABC/AC/RectifiedC samples are converted to Cartesian using radians after
+scale/offset. Meter and inch distance units convert physical axes to millimetres
+and leave PixelGrid X/Y as pixel indices. Confidence1 and Confidence1p are preserved
+as 0/1 auxiliaries. Calibration availability, output mode, coordinate system and
+stereo parameters survive worker IPC.
+Endian identifier 0 retains the legacy native-host interpretation; explicit
+little/big endian identifiers use byte-order conversion for unpacked multi-byte
+coordinates and 2D images. Packed `p` formats stay LSB-first.
+Known encoder-dependent Linescan modes, Scan3d transform matrices, GenDC containers,
+multiple simultaneous range presentations and per-part calibration selector contexts
+are not implemented. They require their own metadata and presentation contracts;
+no vendor-specific acquisition bypass or invented physical calibration is used.
 
 OneGen intentionally does not emulate frame-grabber applet loaders, GoPxL REST/GDP,
 or C4Hdl calls. A CTI must expose the equivalent operation through GenTL/GenApi;

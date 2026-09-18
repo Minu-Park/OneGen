@@ -7,6 +7,8 @@
 #include "Internal/NodeMap.h"
 #include "Internal/OneGenImpl.h"
 #include "Internal/FramePayload.h"
+#include "Internal/CoordinateFormat.h"
+#include "Internal/Scan3dGeometry.h"
 
 #include <GenApi/GenApi.h>
 #include <GenApi/ChunkAdapterGeneric.h>
@@ -174,47 +176,6 @@ std::uint64_t part_info(Gentl* g, GenTL::DS_HANDLE hds, GenTL::BUFFER_HANDLE b,
   return value;
 }
 
-std::optional<Frame::Scan3dGeometry> read_scan3d_geometry(
-    NodeMap& features, const std::string_view prefix) {
-  const auto named = [prefix](const char* suffix) { return std::string(prefix) + suffix; };
-  auto selector = features.find(named("Scan3dCoordinateSelector"));
-  auto scale = features.find(named("Scan3dCoordinateScale"));
-  auto offset = features.find(named("Scan3dCoordinateOffset"));
-  auto invalid_flag = features.find(named("Scan3dInvalidDataFlag"));
-  auto invalid_value = features.find(named("Scan3dInvalidDataValue"));
-  auto unit = features.find(named("Scan3dDistanceUnit"));
-  if (!selector.valid() || !selector.is_readable() || !selector.is_writable()
-      || !scale.valid() || !scale.is_readable() || !offset.valid() || !offset.is_readable()
-      || !unit.valid() || !unit.is_readable())
-    return std::nullopt;
-  const auto previous = selector.get_enum();
-  std::optional<Frame::Scan3dGeometry> result;
-  try {
-    Frame::Scan3dGeometry geometry;
-    const char* coordinates[] = {"CoordinateA", "CoordinateB", "CoordinateC"};
-    for (std::size_t index = 0; index < 3; ++index) {
-      selector.set_enum(coordinates[index]);
-      geometry.scale[index] = scale.get_float();
-      geometry.offset[index] = offset.get_float();
-      if (invalid_flag.valid() && invalid_flag.is_readable())
-        geometry.invalid_enabled[index] = invalid_flag.kind() == NodeKind::Boolean
-            ? invalid_flag.get_bool() : invalid_flag.get_int() != 0;
-      if (geometry.invalid_enabled[index] && invalid_value.valid() && invalid_value.is_readable())
-        geometry.invalid_value[index] = invalid_value.kind() == NodeKind::Float
-            ? invalid_value.get_float() : static_cast<double>(invalid_value.get_int());
-    }
-    geometry.distance_unit = unit.kind() == NodeKind::Enumeration
-        ? unit.get_enum() : unit.get_string();
-    result = std::move(geometry);
-  } catch (...) {
-  }
-  try {
-    selector.set_enum(previous);
-  } catch (...) {
-    throw Error(named("Scan3dCoordinateSelector") + " could not be restored");
-  }
-  return result;
-}
 
 }  // namespace
 
@@ -802,7 +763,9 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
       }
     }
   }
-  const auto bits_per_pixel = static_cast<std::size_t>((f.pixel_format >> 16U) & 0xffU);
+  const auto layout = coordinate_format(f.pixel_format);
+  const auto bits_per_pixel = layout.planar ? layout.sample_bits
+      : static_cast<std::size_t>((f.pixel_format >> 16U) & 0xffU);
   const auto padding = static_cast<std::size_t>(u64(GenTL::BUFFER_INFO_XPADDING));
   if (bits_per_pixel
       && static_cast<std::size_t>(f.width)
@@ -861,8 +824,24 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
             GenApi::CChunkAdapterGeneric adapter(map->_Ptr);
             adapter.AttachBuffer(const_cast<std::uint8_t*>(base), generic_chunks.data(),
                                  static_cast<std::int64_t>(generic_chunks.size()));
-            if (auto geometry = read_scan3d_geometry(features, "Chunk"))
+            if (auto geometry = read_scan3d_geometry(features, "Chunk",
+                    f.scan3d_geometry ? &*f.scan3d_geometry : nullptr)) {
+              if (f.scan3d_geometry
+                  && geometry->distance_unit == f.scan3d_geometry->distance_unit
+                  && geometry->output_mode == f.scan3d_geometry->output_mode
+                  && geometry->coordinate_system == f.scan3d_geometry->coordinate_system) {
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                  if (!geometry->calibrated_axes[axis] && f.scan3d_geometry->calibrated_axes[axis]) {
+                    geometry->scale[axis] = f.scan3d_geometry->scale[axis];
+                    geometry->offset[axis] = f.scan3d_geometry->offset[axis];
+                    geometry->invalid_enabled[axis] = f.scan3d_geometry->invalid_enabled[axis];
+                    geometry->invalid_value[axis] = f.scan3d_geometry->invalid_value[axis];
+                    geometry->calibrated_axes[axis] = true;
+                  }
+                }
+              }
               f.scan3d_geometry = std::move(geometry);
+            }
             adapter.DetachBuffer();
           } catch (...) {
           }
@@ -893,7 +872,9 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
       part.source_id = info(GenTL::BUFFER_PART_INFO_SOURCE_ID);
       part.region_id = info(GenTL::BUFFER_PART_INFO_REGION_ID);
       part.purpose_id = info(GenTL::BUFFER_PART_INFO_DATA_PURPOSE_ID);
-      const auto bits = static_cast<std::size_t>((part.data_format >> 16U) & 0xffU);
+      const auto layout = coordinate_format(part.data_format);
+      const auto bits = layout.planar ? layout.sample_bits
+          : static_cast<std::size_t>((part.data_format >> 16U) & 0xffU);
       const auto padding = static_cast<std::size_t>(info(GenTL::BUFFER_PART_INFO_XPADDING));
       if (bits && part.width <= ((std::numeric_limits<std::size_t>::max)() - 7U) / bits) {
         const auto packed = (static_cast<std::size_t>(part.width) * bits + 7U) / 8U;

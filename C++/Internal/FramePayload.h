@@ -2,6 +2,7 @@
 
 #include "OneGenTypes.h"
 #include "OneGenError.h"
+#include "Internal/CoordinateFormat.h"
 #include <GenTL/GenTL.h>
 #include <limits>
 
@@ -28,6 +29,12 @@ inline void copy_single_payload(Frame& frame, const std::uint8_t* base, std::siz
         || frame.height > (std::numeric_limits<std::size_t>::max)() / frame.stride)
       throw Error("grab: invalid single-image dimensions or stride");
     bytes = frame.stride * frame.height;
+    const auto layout = coordinate_format(frame.pixel_format);
+    if (layout.planar) {
+      if (bytes > (std::numeric_limits<std::size_t>::max)() / layout.components)
+        throw Error("grab: planar image size exceeds the supported range");
+      bytes *= layout.components;
+    }
     if (bytes > filled - offset) throw Error("grab: image exceeds delivered data");
   }
   bool boundary_known = !frame.buffer_info.contains_chunk_data;

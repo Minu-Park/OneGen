@@ -1,7 +1,9 @@
 #include "Internal/NodeMap.h"
+#include "Internal/Scan3dGeometry.h"
 #include "OneGenError.h"
 
 #include <cassert>
+#include <memory>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -351,6 +353,75 @@ int main(int argc, char** argv) try {
   onegen::load_remote_nodemap(short_xml, producer, &port);
   assert(short_xml.find("Width").valid());
   std::filesystem::remove(file);
+
+  // Real GenApi XML exercises missing/read-only/C-only selector calibration.
+  const auto geometryMap = [](const std::string& mode, const std::string& selector,
+                              const std::string& extra = "") {
+    const std::string xml = R"(<RegisterDescription ModelName="Scan3dTest" VendorName="OneGen" StandardNameSpace="None" SchemaMajorVersion="1" SchemaMinorVersion="1" SchemaSubMinorVersion="0" MajorVersion="1" MinorVersion="0" SubMinorVersion="0" ProductGuid="B6B08EB8-B16D-4C62-BDA7-3A9698C9B27C" VersionGuid="B6B08EB8-B16D-4C62-BDA7-3A9698C9B27C" xmlns="http://www.genicam.org/GenApi/Version_1_1">
+      <Category Name="Root"/>
+      <String Name="Scan3dOutputMode"><Value>)" + mode + R"(</Value></String>
+      <String Name="Scan3dDistanceUnit"><Value>Millimeter</Value></String>
+      <Float Name="Scan3dCoordinateScale"><Value>0.5</Value></Float>
+      <Float Name="Scan3dCoordinateOffset"><Value>-1</Value></Float>)" + selector + extra + "</RegisterDescription>";
+    auto nodes = std::make_unique<onegen::NodeMap>();
+    onegen::load_string_nodemap(*nodes, xml.c_str());
+    return nodes;
+  };
+  auto scalar = geometryMap("CalibratedC", "");
+  const auto cGeometry = onegen::read_scan3d_geometry(*scalar, "");
+  assert(cGeometry && cGeometry->scale[2] == 0.5 && cGeometry->offset[2] == -1);
+  assert(cGeometry->calibrated_axes == (std::array<bool, 3>{false, false, true}));
+  auto ambiguous = geometryMap("RectifiedC", "");
+  assert(!onegen::read_scan3d_geometry(*ambiguous, ""));
+  const std::string cSelector = R"(<Enumeration Name="Scan3dCoordinateSelector"><EnumEntry Name="CoordinateC"><Value>2</Value></EnumEntry><Value>2</Value></Enumeration>)";
+  auto onlyC = geometryMap("CalibratedC", cSelector);
+  assert(onegen::read_scan3d_geometry(*onlyC, "")->calibrated_axes[2]);
+  auto readOnlyC = geometryMap("CalibratedC", std::string(R"(<Enumeration Name="Scan3dCoordinateSelector"><ImposedAccessMode>RO</ImposedAccessMode><EnumEntry Name="CoordinateC"><Value>2</Value></EnumEntry><Value>2</Value></Enumeration>)"));
+  assert(onegen::read_scan3d_geometry(*readOnlyC, "")->calibrated_axes[2]);
+  const std::string xyzSelector = R"(<Enumeration Name="Scan3dCoordinateSelector"><EnumEntry Name="CoordinateA"><Value>0</Value></EnumEntry><EnumEntry Name="CoordinateB"><Value>1</Value></EnumEntry><EnumEntry Name="CoordinateC"><Value>2</Value></EnumEntry><Value>1</Value></Enumeration>)";
+  auto rectified = geometryMap("RectifiedC", xyzSelector);
+  const auto rectifiedGeometry = onegen::read_scan3d_geometry(*rectified, "");
+  assert(rectifiedGeometry && rectifiedGeometry->calibrated_axes == (std::array<bool, 3>{true, true, true}));
+  assert(rectified->find("Scan3dCoordinateSelector").get_enum() == "CoordinateB");
+  auto missingInvalid = geometryMap("CalibratedC", "", R"(<Boolean Name="Scan3dInvalidDataFlag"><Value>1</Value></Boolean>)");
+  assert(!onegen::read_scan3d_geometry(*missingInvalid, ""));
+  auto nativeGeometryMap = geometryMap("UncalibratedC", "");
+  assert(onegen::read_scan3d_geometry(*nativeGeometryMap, "")->output_mode == "UncalibratedC");
+  auto disparityMap = geometryMap("DisparityC", "",
+      R"(<Float Name="Scan3dFocalLength"><Value>12</Value></Float><Float Name="Scan3dBaseline"><Value>80</Value></Float>)");
+  const auto disparityGeometry = onegen::read_scan3d_geometry(*disparityMap, "");
+  assert(disparityGeometry && disparityGeometry->focal_length == 12 && disparityGeometry->baseline == 80);
+  assert(disparityGeometry->calibrated_axes[2]);
+  auto rectifiedAcMap = geometryMap("RectifiedAC", xyzSelector);
+  const auto rectifiedAcGeometry = onegen::read_scan3d_geometry(*rectifiedAcMap, "");
+  assert(rectifiedAcGeometry && rectifiedAcGeometry->output_mode == "RectifiedAC");
+  assert(rectifiedAcGeometry->calibrated_axes == (std::array<bool, 3>{true, true, true}));
+
+  std::string nativeOnlyXml = kXml;
+  nativeOnlyXml.insert(nativeOnlyXml.find("</RegisterDescription>"),
+      R"(<String Name="Scan3dOutputMode"><Value>UncalibratedC</Value></String>)");
+  onegen::NodeMap nativeOnly;
+  onegen::load_string_nodemap(nativeOnly, nativeOnlyXml.c_str());
+  const auto nativeOnlyGeometry = onegen::read_scan3d_geometry(nativeOnly, "");
+  assert(nativeOnlyGeometry && nativeOnlyGeometry->calibrated_axes == (std::array<bool, 3>{false, false, false}));
+
+  std::string chunkXml = kXml;
+  chunkXml.insert(chunkXml.find("</RegisterDescription>"),
+      R"(<Float Name="ChunkScan3dCoordinateScale"><Value>2</Value></Float><Float Name="ChunkScan3dCoordinateOffset"><Value>7</Value></Float>)");
+  onegen::NodeMap chunkNodes;
+  onegen::load_string_nodemap(chunkNodes, chunkXml.c_str());
+  auto baseline = *cGeometry;
+  baseline.invalid_enabled[2] = true; baseline.invalid_value[2] = 0;
+  const auto chunkGeometry = onegen::read_scan3d_geometry(chunkNodes, "Chunk", &baseline);
+  assert(chunkGeometry && chunkGeometry->scale[2] == 2 && chunkGeometry->offset[2] == 7);
+  assert(chunkGeometry->invalid_enabled[2] && chunkGeometry->invalid_value[2] == 0);
+  assert(chunkGeometry->distance_unit == "Millimeter" && chunkGeometry->output_mode == "CalibratedC");
+  auto stereoBaseline = *disparityGeometry;
+  const auto stereoChunk = onegen::read_scan3d_geometry(chunkNodes, "Chunk", &stereoBaseline);
+  assert(stereoChunk && stereoChunk->focal_length == 12 && stereoChunk->baseline == 80);
+  assert(stereoChunk->scale[2] == 2);
+  baseline.output_mode = "RectifiedC";
+  assert(!onegen::read_scan3d_geometry(chunkNodes, "Chunk", &baseline));
 
   std::cout << "test_node ok\n";
   return 0;

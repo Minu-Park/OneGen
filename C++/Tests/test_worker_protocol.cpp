@@ -2,6 +2,7 @@
 #include "../Internal/FramePayload.h"
 
 #include <cassert>
+#include <cmath>
 
 int main()
 {
@@ -30,6 +31,9 @@ int main()
   source.scan3d_geometry.emplace();
   source.scan3d_geometry->scale = {0.1, 0.2, 0.3};
   source.scan3d_geometry->invalid_enabled = {true, false, true};
+  source.scan3d_geometry->output_mode = "RectifiedC";
+  source.scan3d_geometry->coordinate_system = "Cartesian";
+  source.scan3d_geometry->calibrated_axes = {false, true, true};
 
   onegen::worker::Writer writer;
   onegen::worker::write(writer, source);
@@ -47,7 +51,24 @@ int main()
   assert(copy.buffer_info.size_filled == source.buffer_info.size_filled);
   assert(copy.scan3d_geometry);
   assert(copy.scan3d_geometry->scale == source.scan3d_geometry->scale);
+  assert(copy.scan3d_geometry->output_mode == "RectifiedC");
+  assert(copy.scan3d_geometry->coordinate_system == "Cartesian");
+  assert(copy.scan3d_geometry->calibrated_axes == source.scan3d_geometry->calibrated_axes);
   assert(copy.scan3d_geometry->invalid_enabled == source.scan3d_geometry->invalid_enabled);
+  assert(std::isnan(copy.scan3d_geometry->focal_length));
+  source.scan3d_geometry->focal_length = 12.5;
+  source.scan3d_geometry->baseline = 80;
+  source.scan3d_geometry->principal_u = 1;
+  source.scan3d_geometry->principal_v = 2;
+  onegen::worker::Writer stereo_writer;
+  onegen::worker::write(stereo_writer, source);
+  const auto stereo_bytes = stereo_writer.take();
+  onegen::worker::Reader stereo_reader(stereo_bytes);
+  const auto stereo_copy = onegen::worker::readFrame(stereo_reader);
+  assert(stereo_copy.scan3d_geometry->focal_length == 12.5);
+  assert(stereo_copy.scan3d_geometry->baseline == 80);
+  assert(stereo_copy.scan3d_geometry->principal_u == 1);
+  assert(stereo_copy.scan3d_geometry->principal_v == 2);
 
   const std::vector<std::uint8_t> transport{99, 98, 1, 2, 0, 0, 3, 4, 0, 0, 7, 8};
   onegen::Frame image;
@@ -89,6 +110,16 @@ int main()
   assert(jpeg.payload == image.payload);
   jpeg.chunks.clear();
   assert(rejected(jpeg, transport.size()));
+  onegen::Frame planarTransport;
+  planarTransport.payload_type = GenTL::PAYLOAD_TYPE_IMAGE;
+  planarTransport.pixel_format = 0x026000c1;
+  planarTransport.width = 2; planarTransport.height = 2; planarTransport.stride = 10;
+  planarTransport.buffer_info.image_offset = 2;
+  std::vector<std::uint8_t> planarBytes(66, 0x77);
+  planarBytes[2] = 1; planarBytes[61] = 2;
+  onegen::copy_single_payload(planarTransport, planarBytes.data(), planarBytes.size());
+  assert(planarTransport.payload.size() == 60 && planarTransport.payload.front() == 1 && planarTransport.payload.back() == 2);
+  assert(rejected(planarTransport, 12));
   auto chunk_only = image;
   chunk_only.payload_type = GenTL::PAYLOAD_TYPE_CHUNK_ONLY;
   chunk_only.buffer_info.image_present = false;
