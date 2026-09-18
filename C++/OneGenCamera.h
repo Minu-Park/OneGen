@@ -30,6 +30,7 @@ public:
 
   /** Reopens the selected GenTL stream and allocates buffers for the current feature state. */
   void prepare();
+  /** Acquires n frames. Control operations such as trigger remain available while waiting. */
   std::vector<Frame> single(std::size_t n);
   void live();
   void trigger();

@@ -3,12 +3,14 @@
 #include "Internal/Match.h"
 #include "Internal/NodeMap.h"
 #include "Internal/OneGenImpl.h"
+#include "Internal/StageLog.h"
 
 #include "OneGenError.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <string_view>
 
 namespace onegen {
 namespace {
@@ -69,6 +71,12 @@ void fill_ips_from_interface(Gentl& g, GenTL::IF_HANDLE hif, std::vector<FoundDe
   }
 }
 
+bool loopback_interface(std::string_view id)
+{
+  return id.find("127.0.0.1") != std::string_view::npos
+      || id.find("::1") != std::string_view::npos;
+}
+
 }  // namespace
 
 void close_interfaces(Producer& producer) {
@@ -95,24 +103,36 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
   for (auto& prod : producers) {
     auto& g = prod->api;
     bool8_t changed = 0;
+    stage_log("worker TLUpdateInterfaceList start timeout_ms=%llu cti=%s",
+              static_cast<unsigned long long>(timeout_ms), prod->path.string().c_str());
     g.check(g.TLUpdateInterfaceList(g.tl, &changed, timeout_ms), "TLUpdateInterfaceList");
     uint32_t nif = 0;
     g.check(g.TLGetNumInterfaces(g.tl, &nif), "TLGetNumInterfaces");
+    stage_log("worker TLUpdateInterfaceList ok interfaces=%u", nif);
     for (uint32_t i = 0; i < nif; ++i) {
       char ifid[512] = {};
       size_t ifn = sizeof(ifid);
       g.check(g.TLGetInterfaceID(g.tl, i, ifid, &ifn), "TLGetInterfaceID");
+      if (loopback_interface(ifid)) {
+        stage_log("worker skip loopback interface=%s", ifid);
+        continue;
+      }
       GenTL::IF_HANDLE hif = nullptr;
       if (const auto it = prod->interfaces.find(ifid); it != prod->interfaces.end()) {
         hif = it->second;
       } else {
+        stage_log("worker TLOpenInterface start interface=%s", ifid);
         g.check(g.TLOpenInterface(g.tl, ifid, &hif), "TLOpenInterface");
         prod->interfaces.emplace(ifid, hif);
+        stage_log("worker TLOpenInterface ok interface=%s", ifid);
       }
       bool8_t dch = 0;
+      stage_log("worker IFUpdateDeviceList start interface=%s timeout_ms=%llu",
+                ifid, static_cast<unsigned long long>(timeout_ms));
       g.check(g.IFUpdateDeviceList(hif, &dch, timeout_ms), "IFUpdateDeviceList");
       uint32_t nd = 0;
       g.check(g.IFGetNumDevices(hif, &nd), "IFGetNumDevices");
+      stage_log("worker IFUpdateDeviceList ok interface=%s devices=%u", ifid, nd);
       std::vector<FoundDevice> batch;
       for (uint32_t d = 0; d < nd; ++d) {
         char devid[512] = {};
@@ -138,7 +158,12 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
           fd.info.ip = *ip3;
         batch.push_back(std::move(fd));
       }
-      fill_ips_from_interface(g, hif, batch);
+      if (!batch.empty()) {
+        stage_log("worker fill interface IPs start interface=%s devices=%u",
+                  ifid, static_cast<unsigned>(batch.size()));
+        fill_ips_from_interface(g, hif, batch);
+        stage_log("worker fill interface IPs ok interface=%s", ifid);
+      }
       for (auto& fd : batch) out.push_back(std::move(fd));
     }
   }

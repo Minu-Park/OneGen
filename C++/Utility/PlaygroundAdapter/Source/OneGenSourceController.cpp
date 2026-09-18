@@ -5,6 +5,7 @@
 #include "SessionFrame.h"
 
 #include <QDebug>
+#include <QString>
 #include <exception>
 
 OneGenSourceController::OneGenSourceController(QObject* parent)
@@ -18,6 +19,7 @@ OneGenSourceController::~OneGenSourceController()
 
 void OneGenSourceController::setLease(onegen::worker::Lease* lease)
 {
+  std::lock_guard lock(mutex_);
   if (lease_ == lease) return;
   if (lease_) {
     lease_->set_frame_callback({});
@@ -46,31 +48,59 @@ void OneGenSourceController::bindLease()
 
 void OneGenSourceController::start()
 {
-  if (!lease_) return;
-  lease_->live();
-  grabbing_ = true;
+  onegen::worker::Lease* lease = nullptr;
+  {
+    std::lock_guard lock(mutex_);
+    lease = lease_;
+  }
+  if (!lease) return;
+  lease->live();
+  grabbing_.store(true, std::memory_order_relaxed);
 }
 
 void OneGenSourceController::stop()
 {
-  if (lease_) lease_->stop();
-  grabbing_ = false;
+  onegen::worker::Lease* lease = nullptr;
+  {
+    std::lock_guard lock(mutex_);
+    lease = lease_;
+    grabbing_.store(false, std::memory_order_relaxed);
+  }
+  if (!lease) return;
+  try {
+    lease->stop();
+  } catch (const std::exception& error) {
+    qWarning().noquote() << QStringLiteral("[GenICam] live stop failed: %1")
+                               .arg(QString::fromLocal8Bit(error.what()));
+  } catch (...) {
+    qWarning() << "[GenICam] live stop failed with an unknown exception.";
+  }
 }
 
 bool OneGenSourceController::isGrabbing() const { return grabbing_; }
 
 void OneGenSourceController::grabOne()
 {
-  if (!lease_) return;
-  const auto& info = lease_->info();
-  const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
-  lease_->grab_one(
+  onegen::worker::Lease* lease = nullptr;
+  std::string sourceName;
+  {
+    std::lock_guard lock(mutex_);
+    lease = lease_;
+    if (lease) {
+      const auto& info = lease->info();
+      sourceName = info.display_name.empty() ? info.id : info.display_name;
+    }
+  }
+  if (!lease) return;
+  lease->grab_one(
       [this, sourceName](const onegen::Frame& source) { deliver(source, sourceName); });
 }
 
 void OneGenSourceController::trigger()
 {
-  if (lease_) lease_->trigger();
+  onegen::worker::Lease* lease = nullptr;
+  { std::lock_guard lock(mutex_); lease = lease_; }
+  if (lease) lease->trigger();
 }
 
 void OneGenSourceController::deliver(const onegen::Frame& source, const std::string& sourceName)
@@ -112,7 +142,13 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     SessionFrame frame;
     frame.payload = std::move(*payload);
     frame.frameSeq = sequence;
-    consumer_(std::move(frame), source.stream_index);
+    FrameConsumer consumer;
+    {
+      std::lock_guard lock(mutex_);
+      consumer = consumer_;
+    }
+    if (!consumer) return;
+    consumer(std::move(frame), source.stream_index);
   } catch (const std::exception& error) {
     qWarning() << "[GenICam] frame delivery failed:" << error.what();
   } catch (...) {
@@ -122,5 +158,6 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
 
 void OneGenSourceController::setFrameConsumer(FrameConsumer consumer)
 {
+  std::lock_guard lock(mutex_);
   consumer_ = std::move(consumer);
 }

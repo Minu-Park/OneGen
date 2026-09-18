@@ -27,6 +27,8 @@ public:
   std::vector<std::byte> request(
       Operation operation, std::vector<std::byte> payload = {},
       std::chrono::milliseconds timeout = std::chrono::seconds{30});
+  /** True while the worker process is still accepting requests. */
+  bool alive() const;
   void set_frame_callback(FrameFn callback);
   void set_error_callback(ErrorFn callback);
   void set_invalidate_callback(InvalidateFn callback);

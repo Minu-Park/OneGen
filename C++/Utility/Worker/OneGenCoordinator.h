@@ -52,6 +52,8 @@ public:
   void set_frame_callback(FrameFn cb);
   void set_error_callback(ErrorFn cb);
   void set_invalidate_callback(InvalidateFn cb);
+  /** True while the isolated worker process is still accepting requests. */
+  bool alive() const;
   /** Advances GenApi polling and drains supported producer events. */
   void poll_features(std::uint32_t elapsed_ms);
   /** Reads an explicitly requested register from its owning module. */
@@ -75,8 +77,9 @@ public:
   /** Receives cumulative snapshots on completion or after five seconds without a completion. */
   using ProgressFn = std::function<void(const DiscoveryResult&)>;
   /**
-   * @param probe_timeout Wait passed to GenTL TLUpdateInterfaceList and
-   *        IFUpdateDeviceList. The host does not kill the worker on a second deadline.
+   * @param probe_timeout Wait passed to GenTL TLUpdateInterfaceList and each
+   *        IFUpdateDeviceList. The host Probe reply wait covers several sequential
+   *        interface updates plus loadCti slack and does not kill the worker.
    */
   Coordinator(std::filesystem::path worker_executable,
               std::filesystem::path cti_root = {},
@@ -95,7 +98,8 @@ private:
   friend class Lease;
   std::shared_ptr<Connection> connection(const std::string& cti, const std::string& device = {});
   /** Retains successfully closed workers for rediscovery-free reconnects. */
-  void release(const std::string& identity, const std::string& cti, bool reusable);
+  void release(const std::string& identity, const std::string& cti, bool reusable,
+               Connection* dying = nullptr);
 
   std::filesystem::path worker_executable_;
   std::filesystem::path cti_root_;

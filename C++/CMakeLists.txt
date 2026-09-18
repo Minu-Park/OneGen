@@ -115,7 +115,9 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
   if(ONEGEN_BUILD_TESTS)
     find_package(Qt6 QUIET COMPONENTS Widgets)
     if(TARGET Qt6::Widgets)
-      add_executable(test_numeric_editor Tests/test_numeric_editor.cpp)
+      add_executable(test_numeric_editor Tests/test_numeric_editor.cpp
+        Utility/Qt/NumericFeatureEditor.h)
+      set_target_properties(test_numeric_editor PROPERTIES AUTOMOC ON)
       target_link_libraries(test_numeric_editor PRIVATE onegen Qt6::Widgets)
       target_compile_options(test_numeric_editor PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
@@ -157,6 +159,7 @@ if(ONEGEN_BUILD_QT_WIDGET)
   add_library(OneGenQtWidget STATIC
     Utility/Qt/QOneGenWidget.cpp
     Utility/Qt/QOneGenWidget.h
+    Utility/Qt/NumericFeatureEditor.h
   )
   add_library(OneGen::QtWidget ALIAS OneGenQtWidget)
   set_target_properties(OneGenQtWidget PROPERTIES AUTOMOC ON)

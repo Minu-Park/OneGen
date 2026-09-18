@@ -1,4 +1,5 @@
 #include "Internal/Gentl.h"
+#include "Internal/StageLog.h"
 
 #include <sstream>
 #include <string>
@@ -66,7 +67,9 @@ void Gentl::check(GenTL::GC_ERROR err, const char* where) const {
 }
 
 void Gentl::load(const std::filesystem::path& cti) {
+  stage_log("worker LoadLibrary start cti=%s", cti.string().c_str());
   lib = load_lib(cti);
+  stage_log("worker LoadLibrary ok");
 #define OG_SYM(name)                                                \
   do {                                                              \
     name = reinterpret_cast<decltype(name)>(sym(lib, #name));       \
@@ -86,10 +89,14 @@ void Gentl::load(const std::filesystem::path& cti) {
   DSGetBufferChunkData = reinterpret_cast<decltype(DSGetBufferChunkData)>(
       sym(lib, "DSGetBufferChunkData"));
 
+  stage_log("worker GCInitLib start");
   check(GCInitLib(), "GCInitLib");
+  stage_log("worker GCInitLib ok");
   EventGetInfo = reinterpret_cast<decltype(EventGetInfo)>(sym(lib, "EventGetInfo"));
   EventGetDataInfo = reinterpret_cast<decltype(EventGetDataInfo)>(sym(lib, "EventGetDataInfo"));
+  stage_log("worker TLOpen start");
   check(TLOpen(&tl), "TLOpen");
+  stage_log("worker TLOpen ok");
 }
 
 void Gentl::close_tl() {

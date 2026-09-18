@@ -1,6 +1,20 @@
 # Release Notes
 
-## Unreleased
+## v0.1.1
+
+- Forward worker `[GenICam]` stage lines through the host log and record LoadLibrary, GCInitLib, TLOpen, and enumerate boundaries so a hung producer probe can be located.
+- Keep Probe replies long enough for sequential per-interface device lists, and skip loopback interfaces so a camera found on a later NIC is not discarded as a host timeout.
+- Ignore feature-editor writes while the tree is rebuilt so a checkbox write cannot be undone by destroyed line-edit `editingFinished` signals.
+- Refresh the feature tree in place after writes: update existing editors, add newly visible leaves, prune vanished rows, and keep the current item, focus, and top-visible viewport when only values change. Rebuild only when the camera root is missing or an editor cannot be reused.
+- Edit integer and floating GenApi features with spin boxes so range, increment, and committed values match Camera/Gocator controls instead of free-form `QLineEdit` text. Integers keep the full signed 64-bit range.
+- Run feature writes, post-write snapshots, and module restore on the worker pool so the GUI thread does not wait on NodeWrite or DescribeFeatures.
+- Keep a dead producer worker from poisoning later errors: process exit is a short `Worker process exited`/`crashed` cause plus an exit-code log, not the accumulated stage dump. Drop that camera lease so reconnect is not `already in use`.
+- Stop Live and session teardown must not throw into the host destructor; clear frame callbacks before joining the delivery thread so a closed session cannot force-crash the application.
+- Keep the feature tree usable during Single: do not disable editors while waiting for a frame, run acquisition off the control loop so TriggerSoftware and other writes still reach the camera, keep the connection open when a frame never arrives, and suspend synchronous invalidation draining until the post-Single snapshot replaces queued changes.
+- Keep Single and Live trigger-neutral: neither mode issues `TriggerSoftware` implicitly. Route an explicit Remote Device `TriggerSoftware` Execute action through the acquisition trigger operation without a post-command feature snapshot between trigger and buffer receive.
+- Hide the top-bar Data Stream selector when the connected device exposes only one stream; retain it for actual multi-stream selection and keep Data Stream diagnostics in the feature tree.
+- Accept a GenTL short port read on `GC_ERR_SUCCESS`: the port callback now treats a producer-reported partial transfer as valid for variable-length register regions, zero-filling the unread tail, and fails only on a producer error code or a zero-byte transfer. XML node-map body reads keep their exact-length check.
+- Keep GenApi invalidation callbacks exception-safe so a dead producer channel or failed host notification cannot escape the callback boundary and terminate the worker process.
 
 ## v0.1.0
 

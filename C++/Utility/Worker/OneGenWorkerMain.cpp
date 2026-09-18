@@ -2,9 +2,11 @@
 
 #include "OneGen.h"
 #include "Internal/ConnectTiming.h"
+#include "Internal/StageLog.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstdio>
 #include <filesystem>
@@ -12,6 +14,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -116,9 +119,23 @@ int main(int argc, char** argv)
 #endif
   if (!protocol_output) return 1;
   try {
+    const auto cti = ctiArgument(argc, argv);
+    onegen::stage_log("worker start cti=%s", cti.string().c_str());
     onegen::OneGen system;
-    system.loadCti(ctiArgument(argc, argv));
+    onegen::stage_log("worker loadCti start");
+    system.loadCti(cti);
+    onegen::stage_log("worker loadCti done");
+    onegen::stage_log("worker waiting for requests");
     onegen::Camera* camera = nullptr;
+    std::thread grab_thread;
+
+    const auto joinGrab = [&] {
+      if (grab_thread.joinable()) grab_thread.join();
+    };
+    const auto abortGrab = [&] {
+      if (camera) camera->stop();
+      joinGrab();
+    };
 
     const auto ensureCamera = [&]() -> onegen::Camera& {
       if (!camera) camera = &system.addCamera();
@@ -131,10 +148,15 @@ int main(int argc, char** argv)
                                 onegen::Camera::Module::Interface,
                                       onegen::Camera::Module::System}) {
         opened.features(module).set_invalidate_callback([index = moduleIndex(module)](std::string_view name) {
-          Writer out;
-          out.scalar(index);
-          out.string(name);
-          send({Operation::Invalidate, 0, true, {}, out.take()});
+          // Runs inside a GenApi/producer invalidate dispatch that must not see
+          // an exception. Drop the notification if the host pipe write fails.
+          try {
+            Writer out;
+            out.scalar(index);
+            out.string(name);
+            send({Operation::Invalidate, 0, true, {}, out.take()});
+          } catch (...) {
+          }
         });
       }
     };
@@ -155,10 +177,15 @@ int main(int argc, char** argv)
         switch (request.operation) {
           case Operation::Probe: {
             const auto timeout = std::clamp(input.scalar<std::uint32_t>(), 1U, 60000U);
-            writeVector(output, system.enumerate(std::chrono::milliseconds{timeout}));
+            onegen::stage_log("worker Probe start timeout_ms=%u", timeout);
+            auto devices = system.enumerate(std::chrono::milliseconds{timeout});
+            onegen::stage_log("worker Probe done cameras=%u",
+                              static_cast<unsigned>(devices.size()));
+            writeVector(output, devices);
             break;
           }
           case Operation::Open: {
+            abortGrab();
             onegen::ConnectTiming timing("worker-open");
             auto& opened = ensureCamera();
             if (opened.is_open()) opened.close();
@@ -189,7 +216,8 @@ int main(int argc, char** argv)
             break;
           }
           case Operation::Close:
-            if (camera) { camera->stop(); camera->close(); }
+            abortGrab();
+            if (camera) camera->close();
             break;
           case Operation::ListStreams:
             writeVector(output, ensureCamera().data_streams());
@@ -266,28 +294,48 @@ int main(int argc, char** argv)
             break;
           }
           case Operation::GrabOne: {
-            onegen::ConnectTiming timing("worker-single");
-            const auto frames = ensureCamera().single(1);
-            timing.mark("acquire-and-stop");
-            if (frames.empty()) throw std::runtime_error("Single acquisition returned no frame.");
-            onegen::worker::write(output, frames.front());
-            timing.mark("frame-serialization");
-            break;
+            abortGrab();
+            if (ensureCamera().is_live())
+              throw std::runtime_error("Stop Live before Single acquisition.");
+            const auto id = request.id;
+            grab_thread = std::thread([&, id] {
+              Message reply{Operation::GrabOne, id};
+              try {
+                onegen::ConnectTiming timing("worker-single");
+                const auto frames = ensureCamera().single(1);
+                timing.mark("acquire-and-stop");
+                if (frames.empty())
+                  throw std::runtime_error("Single acquisition returned no frame.");
+                Writer payload;
+                onegen::worker::write(payload, frames.front());
+                reply.payload = payload.take();
+                timing.mark("frame-serialization");
+              } catch (const std::exception& error) {
+                reply.success = false;
+                reply.error = error.what();
+              }
+              try {
+                send(std::move(reply));
+              } catch (...) {
+              }
+            });
+            continue;
           }
           case Operation::StartLive:
+            abortGrab();
             { std::lock_guard lock(ack_mutex); stopping = false; }
             ensureCamera().live();
             break;
           case Operation::StopLive:
             { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
-            ensureCamera().stop();
+            abortGrab();
             break;
           case Operation::Trigger:
             ensureCamera().trigger();
             break;
           case Operation::Shutdown:
             { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
-            if (camera) camera->stop();
+            abortGrab();
             shutdown = true;
             break;
           default:
@@ -302,7 +350,7 @@ int main(int argc, char** argv)
       if (shutdown) break;
     }
     { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
-    if (camera) camera->stop();
+    abortGrab();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

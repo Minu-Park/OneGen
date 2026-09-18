@@ -53,7 +53,7 @@ struct Connection::Impl {
   std::filesystem::path cti;
   std::thread io;
   std::thread delivery;
-  std::mutex mutex;
+  mutable std::mutex mutex;
   std::condition_variable cv;
   std::queue<Message> outgoing;
   std::queue<Frame> frames;
@@ -87,11 +87,12 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         frame = std::move(impl_->frames.front());
         impl_->frames.pop();
         callback = impl_->on_frame;
+        if (!impl_->running) callback = {};
       }
       if (callback) callback(frame);
       {
         std::lock_guard lock(impl_->mutex);
-        impl_->outgoing.push({Operation::FrameAck});
+        if (impl_->running) impl_->outgoing.push({Operation::FrameAck});
       }
     }
   });
@@ -116,6 +117,9 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         impl_->start_error = process.errorString().toStdString();
         impl_->running = false;
       } else {
+        qInfo().noquote() << QStringLiteral("[GenICam] worker process started: pid=%1 cti=%2")
+                               .arg(process.processId())
+                               .arg(QString::fromStdString(impl_->cti.string()));
 #ifdef _WIN32
         impl_->job = CreateJobObjectW(nullptr, nullptr);
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -161,7 +165,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         for (auto newline = timing_lines.indexOf('\n'); newline >= 0; newline = timing_lines.indexOf('\n')) {
           const auto line = timing_lines.left(newline).trimmed();
           timing_lines.remove(0, newline + 1);
-          if (line.startsWith("[GenICam] connect timing:"))
+          if (line.startsWith("[GenICam]"))
             qInfo().noquote() << QString::fromUtf8(line) << "cti=" << QString::fromStdString(impl_->cti.string());
         }
         if (timing_lines.size() > 65536) timing_lines.clear();
@@ -207,10 +211,29 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
       process.waitForFinished(5000);
     }
     {
-      std::lock_guard lock(impl_->mutex);
       diagnostic.append(process.readAllStandardError());
-      diagnostic = diagnostic.trimmed();
-      if (!diagnostic.isEmpty()) impl_->close_error = diagnostic.toStdString();
+      QString last_error;
+      auto remainder = QString::fromUtf8(diagnostic);
+      for (auto line : remainder.split('\n')) {
+        line = line.trimmed();
+        if (line.isEmpty() || line.startsWith(QLatin1String("[GenICam]"))) continue;
+        last_error = line;
+      }
+      const auto crashed = process.exitStatus() == QProcess::CrashExit;
+      qWarning().noquote()
+          << QStringLiteral("[GenICam] worker process exited: pid=%1 code=%2 crashed=%3 cti=%4")
+                 .arg(process.processId())
+                 .arg(process.exitCode())
+                 .arg(crashed ? QStringLiteral("yes") : QStringLiteral("no"))
+                 .arg(QString::fromStdString(impl_->cti.string()));
+      std::lock_guard lock(impl_->mutex);
+      if (impl_->close_error.empty()) {
+        impl_->close_error = crashed ? "Worker process crashed." : "Worker process exited.";
+        if (!last_error.isEmpty()) {
+          impl_->close_error += ' ';
+          impl_->close_error += last_error.toStdString();
+        }
+      }
       impl_->running = false;
       impl_->cv.notify_all();
     }
@@ -249,7 +272,11 @@ std::vector<std::byte> Connection::request(Operation operation, std::vector<std:
   std::uint32_t id;
   {
     std::lock_guard lock(impl_->mutex);
-    if (!impl_->running) throw std::runtime_error("Worker connection is closed.");
+    if (!impl_->running) {
+      throw std::runtime_error(impl_->close_error.empty()
+                                   ? "Worker connection is closed."
+                                   : impl_->close_error);
+    }
     id = impl_->next_id++;
     impl_->outgoing.push({operation, id, true, {}, std::move(payload)});
   }
@@ -266,6 +293,12 @@ std::vector<std::byte> Connection::request(Operation operation, std::vector<std:
   impl_->replies.erase(found);
   if (!reply.success) throw std::runtime_error(reply.error);
   return std::move(reply.payload);
+}
+
+bool Connection::alive() const
+{
+  std::lock_guard lock(impl_->mutex);
+  return impl_->running;
 }
 
 void Connection::set_frame_callback(FrameFn callback)

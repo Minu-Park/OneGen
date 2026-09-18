@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include "OneGenError.h"
+#include "Internal/StageLog.h"
 
 #include <GenApi/GenApi.h>
 #include <GenApi/NodeCallback.h>
@@ -11,7 +12,9 @@
 #include <GenApi/EventAdapterGeneric.h>
 
 #include <cctype>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <charconv>
 #include <cmath>
 #include <functional>
@@ -33,10 +36,28 @@ public:
   void Read(void* buffer, int64_t addr, int64_t length) override {
     if (addr < 0 || length < 0) throw GENERIC_EXCEPTION("IPort::Read: invalid range");
     if (!open || !g || !port) throw GENERIC_EXCEPTION("IPort::Read: closed");
-    auto size = static_cast<size_t>(length);
-    if (g->GCReadPort(port, static_cast<uint64_t>(addr), buffer, &size) != GenTL::GC_ERR_SUCCESS
-        || size != static_cast<size_t>(length))
+    const auto requested = static_cast<size_t>(length);
+    auto size = requested;
+    // GenTL treats piSize as in/out: a producer updates it with the number of
+    // bytes it actually transferred. The Diaphus/Heliotis producer legitimately
+    // returns fewer bytes than requested for variable-length register regions,
+    // so a short read on GC_ERR_SUCCESS is not an error. Only a producer failure
+    // code or a zero-byte transfer indicates a genuine read failure. Any bytes
+    // the producer did not fill are zeroed so GenApi parses a defined buffer.
+    const auto started = std::chrono::steady_clock::now();
+    const auto rc = g->GCReadPort(port, static_cast<uint64_t>(addr), buffer, &size);
+    if (rc != GenTL::GC_ERR_SUCCESS || size == 0) {
+      const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - started).count();
+      stage_log("worker CPort::Read failed rc=%d port=%p addr=%lld requested=%lld returned=%zu"
+                " elapsed_ms=%lld (genuine producer read failure or empty transfer)",
+                static_cast<int>(rc), static_cast<void*>(port),
+                static_cast<long long>(addr), static_cast<long long>(length), size,
+                static_cast<long long>(elapsed_ms));
       throw GENERIC_EXCEPTION("IPort::Read failed");
+    }
+    if (size < requested)
+      std::memset(static_cast<unsigned char*>(buffer) + size, 0, requested - size);
   }
   void Write(const void* buffer, int64_t addr, int64_t length) override {
     if (addr < 0 || length < 0) throw GENERIC_EXCEPTION("IPort::Write: invalid range");
@@ -350,15 +371,26 @@ void NodeMapAccess::load(NodeMap& map, Gentl& g, GenTL::PORT_HANDLE port) {
     for (size_t i = 0; i < nodes.size(); ++i) {
       GenApi::INode* node = nodes[i];
       if (!node) continue;
-      std::function<void(GenApi::INode*)> fn = [&map](GenApi::INode* n) {
-        if (!n) return;
-        const std::string name = n->GetName().c_str();
-        NodeMap::InvalidateFn cb;
-        {
-          std::lock_guard<std::recursive_mutex> lk(map.impl_->mu);
-          cb = map.impl_->on_invalidate;
+      // GenApi dispatches this callback from inside its own machinery (and the
+      // producer can dispatch it on its event thread). That dispatch frame is a
+      // de-facto noexcept/C boundary: any exception escaping here, including a
+      // GenApi GenericException from GetName() or a std::runtime_error from a
+      // failed host-pipe write inside the invalidate sink, crosses that frame
+      // with no handler and calls std::terminate. A node-invalidate notification
+      // must never propagate an exception back into GenApi, so swallow every failure.
+      std::function<void(GenApi::INode*)> fn = [&map](GenApi::INode* n) noexcept {
+        try {
+          if (!n) return;
+          const std::string name = n->GetName().c_str();
+          NodeMap::InvalidateFn cb;
+          {
+            std::lock_guard<std::recursive_mutex> lk(map.impl_->mu);
+            cb = map.impl_->on_invalidate;
+          }
+          if (cb) cb(name);
+        } catch (...) {
+          // A dropped invalidation on a dead channel is acceptable; a terminate is not.
         }
-        if (cb) cb(name);
       };
       map.impl_->cbs.push_back(GenApi::Register(node, fn, GenApi::cbPostOutsideLock));
     }

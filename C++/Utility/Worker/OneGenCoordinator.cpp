@@ -54,7 +54,7 @@ Lease::~Lease()
 {
   bool reusable = false;
   try {
-    if (connection_) {
+    if (connection_ && connection_->alive()) {
       connection_->request(Operation::Close, {}, std::chrono::seconds{2});
       reusable = true;
     }
@@ -62,8 +62,9 @@ Lease::~Lease()
   auto* owner = owner_;
   const auto key = identity_;
   const auto cti = device_.cti_path;
+  const auto dying = connection_;
   connection_.reset();
-  if (owner) owner->release(key, cti, reusable);
+  if (owner) owner->release(key, cti, reusable, dying.get());
 }
 
 std::vector<DataStreamInfo> Lease::data_streams() const
@@ -163,6 +164,7 @@ void Lease::set_frame_callback(FrameFn callback) { connection_->set_frame_callba
 void Lease::set_error_callback(ErrorFn callback) { connection_->set_error_callback(std::move(callback)); }
 void Lease::set_invalidate_callback(InvalidateFn callback)
 { connection_->set_invalidate_callback(std::move(callback)); }
+bool Lease::alive() const { return connection_ && connection_->alive(); }
 
 Coordinator::Coordinator(std::filesystem::path worker_executable,
                          std::filesystem::path cti_root,
@@ -191,7 +193,8 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
         out.scalar(static_cast<std::uint32_t>(probe_timeout_.count()));
         auto worker = connection(cti.string());
         item.devices = readVector<DeviceInfo>(
-            worker->request(Operation::Probe, out.take(), probe_timeout_ + std::chrono::seconds{20}),
+            worker->request(Operation::Probe, out.take(),
+                            probe_timeout_ * 4 + std::chrono::seconds{20}),
             readDeviceInfo);
         for (auto& device : item.devices)
           if (device.cti_path.empty()) device.cti_path = cti.string();
@@ -274,7 +277,27 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
     try {
       {
         std::lock_guard lock(mutex_);
-        if (leased_.count(key)) throw std::runtime_error("The camera is already in use.");
+        if (leased_.count(key)) {
+          bool live_holder = false;
+          for (const auto& held_cti : candidates) {
+            const auto found = device_connections_.find(held_cti + '\0' + key);
+            if (found != device_connections_.end() && found->second && found->second->alive()) {
+              live_holder = true;
+              break;
+            }
+          }
+          if (live_holder) throw std::runtime_error("The camera is already in use.");
+          leased_.erase(key);
+          for (const auto& held_cti : candidates) {
+            const auto found = device_connections_.find(held_cti + '\0' + key);
+            if (found == device_connections_.end()) continue;
+            if (found->second && found->second->alive()) continue;
+            if (const auto probe = connections_.find(held_cti);
+                probe != connections_.end() && probe->second == found->second)
+              connections_.erase(probe);
+            device_connections_.erase(found);
+          }
+        }
         leased_.insert(key);
         claimed = true;
       }
@@ -340,12 +363,14 @@ std::shared_ptr<Connection> Coordinator::connection(const std::string& cti, cons
   return stored;
 }
 
-void Coordinator::release(const std::string& identity, const std::string& cti, bool reusable)
+void Coordinator::release(const std::string& identity, const std::string& cti, bool reusable,
+                          Connection* dying)
 {
   std::lock_guard lock(mutex_);
   leased_.erase(identity);
   if (!reusable) {
     if (const auto found = device_connections_.find(cti + '\0' + identity); found != device_connections_.end()) {
+      if (dying && found->second.get() != dying) return;
       if (const auto probe = connections_.find(cti); probe != connections_.end() && probe->second == found->second)
         connections_.erase(probe);
       device_connections_.erase(found);

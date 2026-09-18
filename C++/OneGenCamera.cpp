@@ -352,7 +352,9 @@ void Camera::poll_features(std::int64_t elapsed_ms) {
                                   &datatype, name.data(), &name_size), "EventGetDataInfo(feature name)");
         if (datatype != GenTL::INFO_DATATYPE_STRING || name_size > 65536)
           throw Error("Feature invalidation event has an invalid identifier");
-        event.map->invalidate(name.data());
+        // A single dead-channel node must not abort the whole drain or unwind
+        // through the producer event frame; skip it and keep draining.
+        try { event.map->invalidate(name.data()); } catch (...) {}
       } else {
         std::uint64_t id = 0;
         std::size_t id_size = sizeof(id);
@@ -382,8 +384,10 @@ void Camera::poll_features(std::int64_t elapsed_ms) {
                                   &datatype, payload.data(), &payload_size), "EventGetDataInfo(event payload)");
         if (payload_size > capacity) throw Error("Generic feature event payload is too large");
         payload.resize(payload_size);
-        if (numeric_id) event.map->deliver_event(payload, id);
-        else event.map->deliver_event(payload, string_id);
+        try {
+          if (numeric_id) event.map->deliver_event(payload, id);
+          else event.map->deliver_event(payload, string_id);
+        } catch (...) {}
       }
     }
   }
@@ -510,7 +514,7 @@ void Camera::Impl::snapshot_scan3d_geometry() {
 void Camera::Impl::stop_acquisition() {
   ConnectTiming timing("acquisition-stop");
   stop_live = true;
-  if (live_thread.joinable() && g && hev) g->EventKill(hev);
+  if (g && hev) g->EventKill(hev);
   if (live_thread.joinable() && live_thread.get_id() != std::this_thread::get_id())
     live_thread.join();
   live = false;
@@ -903,24 +907,28 @@ std::vector<Frame> Camera::single(std::size_t n) {
   if (!impl_->opened) throw Error("single: not open");
   if (impl_->live.load()) throw Error("single: live in progress");
   if (n == 0) throw Error("single: n == 0");
-  std::lock_guard<std::mutex> lk(impl_->acq_mu);
+  {
+    std::lock_guard<std::mutex> lk(impl_->acq_mu);
+    impl_->start_stream(n);
+  }
+  timing.mark("stream-start");
   std::vector<Frame> out;
   out.reserve(n);
+  std::exception_ptr error;
   try {
-    impl_->start_stream(n);
-    timing.mark("stream-start");
     for (std::size_t i = 0; i < n; ++i) {
-      impl_->try_trigger();
-      timing.mark("software-trigger-if-enabled");
       out.push_back(impl_->grab_one(acquisition_timeout_ms));
       timing.mark("frame-received-and-copied");
     }
   } catch (...) {
-    impl_->stop_acquisition();
-    throw;
+    error = std::current_exception();
   }
-  impl_->stop_acquisition();
+  {
+    std::lock_guard<std::mutex> lk(impl_->acq_mu);
+    impl_->stop_acquisition();
+  }
   timing.mark("stop-before-return");
+  if (error) std::rethrow_exception(error);
   return out;
 }
 

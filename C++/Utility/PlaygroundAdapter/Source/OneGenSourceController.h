@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 namespace onegen {
@@ -32,6 +33,7 @@ public:
 private:
   void deliver(const onegen::Frame& source, const std::string& sourceName);
   void bindLease();
+  std::mutex mutex_;
   onegen::worker::Lease* lease_ = nullptr;
   FrameConsumer consumer_;
   std::atomic<bool> grabbing_{false};
