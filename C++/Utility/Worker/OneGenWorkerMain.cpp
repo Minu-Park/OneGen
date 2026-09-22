@@ -120,12 +120,8 @@ int main(int argc, char** argv)
   if (!protocol_output) return 1;
   try {
     const auto cti = ctiArgument(argc, argv);
-    onegen::stage_log("worker start cti=%s", cti.string().c_str());
     onegen::OneGen system;
-    onegen::stage_log("worker loadCti start");
     system.loadCti(cti);
-    onegen::stage_log("worker loadCti done");
-    onegen::stage_log("worker waiting for requests");
     onegen::Camera* camera = nullptr;
     std::thread grab_thread;
 
@@ -177,10 +173,7 @@ int main(int argc, char** argv)
         switch (request.operation) {
           case Operation::Probe: {
             const auto timeout = std::clamp(input.scalar<std::uint32_t>(), 1U, 60000U);
-            onegen::stage_log("worker Probe start timeout_ms=%u", timeout);
             auto devices = system.enumerate(std::chrono::milliseconds{timeout});
-            onegen::stage_log("worker Probe done cameras=%u",
-                              static_cast<unsigned>(devices.size()));
             writeVector(output, devices);
             break;
           }

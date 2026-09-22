@@ -483,45 +483,65 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
 
 void presentPointCloud(GraphicsFrame& frame, const onegen::Frame& source)
 {
-  if (!frame.rangeFrame || !source.scan3d_geometry
+  if (!source.scan3d_geometry
       || source.scan3d_geometry->output_mode != "CalibratedABC_PointCloud") return;
-  const auto& range = *frame.rangeFrame;
-  if (range.xyCoordinateMode != RangeFrameXYCoordinateMode::ExplicitXY
-      || range.xValues.size() != range.zValues.size() || range.yValues.size() != range.zValues.size())
-    return;
-  PointCloudData cloud;
-  cloud.coordinateUnit = range.lengthUnit;
-  ScalarField intensity, confidence;
-  intensity.name = range.intensityField.displayName;
-  intensity.descriptor = range.intensityField;
-  confidence.name = range.confidenceField.displayName;
-  confidence.descriptor = range.confidenceField;
-  intensity.descriptor.sampleKind = confidence.descriptor.sampleKind = MeasurementSampleKind::Point;
-  const auto unit = range.lengthUnit;
-  for (std::size_t i = 0; i < range.zValues.size(); ++i) {
-    if (!range.rangeSampleIsValid(i)) continue;
-    const int x = range.width > 0 ? static_cast<int>(i % static_cast<std::size_t>(range.width)) : 0;
-    const int y = range.width > 0 ? static_cast<int>(i / static_cast<std::size_t>(range.width)) : 0;
-    const auto wx = range.physicalXAt(i, x, unit);
-    const auto wy = range.physicalYAt(i, y, unit);
-    const auto wz = range.physicalZAt(i, unit);
-    if (!std::isfinite(wx) || !std::isfinite(wy) || !std::isfinite(wz)) continue;
-    cloud.xyz.insert(cloud.xyz.end(), {wx, wy, wz});
-    if (!range.intensity.empty()) intensity.values.push_back(range.intensitySampleIsValid(i)
-        ? range.intensity[i] : std::numeric_limits<float>::quiet_NaN());
-    if (!range.confidence.empty()) confidence.values.push_back(range.confidenceSampleIsValid(i)
-        ? range.confidence[i] : std::numeric_limits<float>::quiet_NaN());
+  std::vector<GraphicsRangeResource> retained;
+  for (auto& resource : frame.ranges) {
+    const auto& range = resource.payload;
+    if (range.xyCoordinateMode != RangeFrameXYCoordinateMode::ExplicitXY
+        || range.xValues.size() != range.zValues.size()
+        || range.yValues.size() != range.zValues.size()) {
+      retained.push_back(std::move(resource));
+      continue;
+    }
+    PointCloudData cloud;
+    cloud.coordinateUnit = range.lengthUnit;
+    ScalarField intensity, confidence;
+    intensity.name = range.intensityField.displayName;
+    intensity.descriptor = range.intensityField;
+    confidence.name = range.confidenceField.displayName;
+    confidence.descriptor = range.confidenceField;
+    intensity.descriptor.sampleKind = confidence.descriptor.sampleKind = MeasurementSampleKind::Point;
+    const auto unit = range.lengthUnit;
+    for (std::size_t i = 0; i < range.zValues.size(); ++i) {
+      if (!range.rangeSampleIsValid(i)) continue;
+      const int x = range.width > 0 ? static_cast<int>(i % static_cast<std::size_t>(range.width)) : 0;
+      const int y = range.width > 0 ? static_cast<int>(i / static_cast<std::size_t>(range.width)) : 0;
+      const auto wx = range.physicalXAt(i, x, unit);
+      const auto wy = range.physicalYAt(i, y, unit);
+      const auto wz = range.physicalZAt(i, unit);
+      if (!std::isfinite(wx) || !std::isfinite(wy) || !std::isfinite(wz)) continue;
+      cloud.xyz.insert(cloud.xyz.end(), {wx, wy, wz});
+      if (!range.intensity.empty()) intensity.values.push_back(range.intensitySampleIsValid(i)
+          ? range.intensity[i] : std::numeric_limits<float>::quiet_NaN());
+      if (!range.confidence.empty()) confidence.values.push_back(range.confidenceSampleIsValid(i)
+          ? range.confidence[i] : std::numeric_limits<float>::quiet_NaN());
+    }
+    if (!intensity.values.empty()) cloud.scalarFields.push_back(std::move(intensity));
+    if (!confidence.values.empty()) cloud.scalarFields.push_back(std::move(confidence));
+    if (cloud.isValid()) {
+      frame.addPointCloud(resource.descriptor.id + ".points", std::move(cloud),
+                          resource.descriptor.displayName, resource.descriptor.groupId,
+                          resource.initialView);
+    } else {
+      retained.push_back(std::move(resource));
+    }
   }
-  if (!intensity.values.empty()) cloud.scalarFields.push_back(std::move(intensity));
-  if (!confidence.values.empty()) cloud.scalarFields.push_back(std::move(confidence));
-  frame.rangeFrame.reset(); // Unorganized points must not acquire an invented grid surface.
-  if (cloud.isValid()) frame.pointCloud = std::move(cloud);
+  frame.ranges = std::move(retained);
 }
 
-std::optional<RangeFrame> planarPartsRange(
-    const onegen::Frame& source, const onegen::Frame::Part*& selected)
+struct PlanarRangeAssembly
 {
-  for (const auto& a : source.parts) {
+  RangeFrame range;
+  std::size_t selected_index = 0;
+  std::array<std::size_t, 3> consumed_indices{};
+};
+
+std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source)
+{
+  std::vector<PlanarRangeAssembly> assemblies;
+  for (std::size_t base_index = 0; base_index < source.parts.size(); ++base_index) {
+    const auto& a = source.parts[base_index];
     if (a.data_type != kPart3dImage) continue;
     std::array<std::uint64_t, 3> formats{};
     switch (a.data_format) {
@@ -534,8 +554,10 @@ std::optional<RangeFrame> planarPartsRange(
       default: continue;
     }
     std::array<const onegen::Frame::Part*, 3> planes{};
+    std::array<std::size_t, 3> plane_indices{};
     bool ambiguous = false;
-    for (const auto& part : source.parts) {
+    for (std::size_t part_index = 0; part_index < source.parts.size(); ++part_index) {
+      const auto& part = source.parts[part_index];
       if (part.data_type != kPart3dImage || part.source_id != a.source_id
           || part.region_id != a.region_id || part.format_namespace != a.format_namespace
           || part.width != a.width || part.height != a.height) continue;
@@ -544,6 +566,7 @@ std::optional<RangeFrame> planarPartsRange(
       if (axis < 0) continue;
       if (planes[axis]) ambiguous = true;
       planes[axis] = &part;
+      plane_indices[axis] = part_index;
     }
     if (ambiguous || !planes[0] || !planes[1] || !planes[2]) continue;
     const auto layout = onegen::coordinate_format(formats[2]);
@@ -556,6 +579,9 @@ std::optional<RangeFrame> planarPartsRange(
     joined.data_type = kPart3dImage;
     joined.stride = row_bytes;
     joined.data_format = formats[2];
+    joined.format_namespace = a.format_namespace;
+    joined.source_id = a.source_id;
+    joined.region_id = a.region_id;
     bool valid = true;
     for (const auto* plane : planes) {
       const auto stride = plane->stride ? plane->stride : row_bytes;
@@ -568,12 +594,12 @@ std::optional<RangeFrame> planarPartsRange(
         joined.payload.insert(joined.payload.end(), first, first + row_bytes);
       }
     }
-    if (valid) {
-      auto range = rangeFrame(joined, source);
-      if (range) { selected = &a; return range; }
+    if (!valid) continue;
+    if (auto range = rangeFrame(joined, source)) {
+      assemblies.push_back({std::move(*range), base_index, plane_indices});
     }
   }
-  return std::nullopt;
+  return assemblies;
 }
 
 } // namespace
@@ -588,31 +614,59 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   };
   if (!source.parts.empty()) {
     GraphicsFrame result;
-    const onegen::Frame::Part* selected = nullptr;
-    result.rangeFrame = planarPartsRange(source, selected);
-    for (const auto& part : source.parts) {
-      if (!result.rangeFrame) {
-        result.rangeFrame = rangeFrame(part, source);
-        if (result.rangeFrame) selected = &part;
+    std::vector<const onegen::Frame::Part*> selected_parts;
+    std::vector<bool> consumed_parts(source.parts.size(), false);
+    for (auto& assembly : planarPartsRanges(source)) {
+      const auto& selected = source.parts[assembly.selected_index];
+      const auto group = std::to_string(selected.source_id) + ":"
+          + std::to_string(selected.region_id);
+      result.addRange("range." + group + "." + std::to_string(assembly.selected_index),
+                      std::move(assembly.range), "Range", group);
+      selected_parts.push_back(&selected);
+      for (const std::size_t index : assembly.consumed_indices) consumed_parts[index] = true;
+    }
+    for (std::size_t index = 0; index < source.parts.size(); ++index) {
+      const auto& part = source.parts[index];
+      if (!consumed_parts[index]) {
+        if (auto range = rangeFrame(part, source)) {
+          const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
+          result.addRange("range." + group + "." + std::to_string(index),
+                          std::move(*range), "Range", group);
+          selected_parts.push_back(&part);
+        }
       }
-      if (!result.image && part.data_type == kPart2dImage) {
+      if (part.data_type == kPart2dImage) {
         auto imageFrame = oneGenGraphicsFrame(partFrame(part, source), sequence, rejection_reason);
-        if (imageFrame) result.image = std::move(imageFrame->image);
+        if (imageFrame && !imageFrame->images.empty()) {
+          auto image = std::move(imageFrame->images.front());
+          const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
+          image.descriptor.id = "image." + group + "." + std::to_string(index);
+          image.descriptor.displayName = "Image";
+          image.descriptor.groupId = group;
+          result.images.push_back(std::move(image));
+        }
       }
     }
-    if (result.rangeFrame) {
+    for (std::size_t index = 0; index < result.ranges.size(); ++index) {
+      const auto* selected = selected_parts[index];
       for (const auto& part : source.parts)
         if ((part.data_type == kPartConfidence || part.data_type == kPart2dImage)
-            && selected && part.source_id == selected->source_id && part.region_id == selected->region_id)
-          appendAuxiliary(part, *result.rangeFrame, source.pixel_endianness);
+            && part.source_id == selected->source_id && part.region_id == selected->region_id)
+          appendAuxiliary(part, result.ranges[index].payload, source.pixel_endianness);
     }
-    if (!result.rangeFrame && !result.image) {
-      for (const auto& part : source.parts) {
+    if (result.ranges.empty() && result.images.empty()) {
+      for (std::size_t index = 0; index < source.parts.size(); ++index) {
+        const auto& part = source.parts[index];
         if (part.data_format != kConfidence32f) continue;
         auto preview = oneGenGraphicsFrame(partFrame(part, source), sequence, rejection_reason);
-        if (preview) {
-          result.rangeFrame = std::move(preview->rangeFrame);
-          break;
+        if (preview && !preview->ranges.empty()) {
+          auto range = std::move(preview->ranges.front());
+          const auto group = std::to_string(part.source_id) + ":"
+              + std::to_string(part.region_id);
+          range.descriptor.id = "confidence." + group + "." + std::to_string(index);
+          range.descriptor.displayName = "Confidence";
+          range.descriptor.groupId = group;
+          result.ranges.push_back(std::move(range));
         }
       }
     }
@@ -631,7 +685,8 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   if (coordinateLayout.components || source.pixel_format == kConfidence32f) {
     const auto row_bytes = coordinateLayout.components
         ? onegen::coordinate_row_bytes(coordinateLayout, source.width)
-        : (source.width > (std::numeric_limits<std::size_t>::max)() / 4U
+        : (static_cast<std::uint64_t>(source.width)
+               > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)() / 4U)
             ? 0 : static_cast<std::size_t>(source.width) * 4U);
     if (!row_bytes)
       return reject("coordinate row size exceeds the supported integer range");
@@ -661,9 +716,9 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       preview.validMask.resize(preview.zValues.size());
       for (std::size_t i = 0; i < preview.zValues.size(); ++i)
         preview.validMask[i] = std::isfinite(preview.zValues[i]) ? 1U : 0U;
-      frame.rangeFrame = std::move(preview);
+      frame.addRange("confidence", std::move(preview), "Confidence");
     } else {
-      frame.rangeFrame = rangeFrame(part, source);
+      if (auto range = rangeFrame(part, source)) frame.addRange("range", std::move(*range), "Range");
     }
     frame.metadata.frameIndex = sequence;
     if (source.frame_id) frame.metadata.frameId = std::to_string(source.frame_id);
@@ -723,7 +778,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   if (!image.isValid()) return reject("invalid image layout or insufficient payload bytes");
 
   GraphicsFrame frame;
-  frame.setImage(std::move(image));
+  frame.addImage("image", std::move(image), "Image");
   frame.metadata.frameIndex = sequence;
   if (source.frame_id) frame.metadata.frameId = std::to_string(source.frame_id);
   return frame;

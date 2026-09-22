@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <chrono>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -67,9 +68,9 @@ void Gentl::check(GenTL::GC_ERROR err, const char* where) const {
 }
 
 void Gentl::load(const std::filesystem::path& cti) {
-  stage_log("worker LoadLibrary start cti=%s", cti.string().c_str());
+  const auto started = std::chrono::steady_clock::now();
   lib = load_lib(cti);
-  stage_log("worker LoadLibrary ok");
+  const auto loaded = std::chrono::steady_clock::now();
 #define OG_SYM(name)                                                \
   do {                                                              \
     name = reinterpret_cast<decltype(name)>(sym(lib, #name));       \
@@ -89,14 +90,20 @@ void Gentl::load(const std::filesystem::path& cti) {
   DSGetBufferChunkData = reinterpret_cast<decltype(DSGetBufferChunkData)>(
       sym(lib, "DSGetBufferChunkData"));
 
-  stage_log("worker GCInitLib start");
   check(GCInitLib(), "GCInitLib");
-  stage_log("worker GCInitLib ok");
+  const auto initialized = std::chrono::steady_clock::now();
   EventGetInfo = reinterpret_cast<decltype(EventGetInfo)>(sym(lib, "EventGetInfo"));
   EventGetDataInfo = reinterpret_cast<decltype(EventGetDataInfo)>(sym(lib, "EventGetDataInfo"));
-  stage_log("worker TLOpen start");
   check(TLOpen(&tl), "TLOpen");
-  stage_log("worker TLOpen ok");
+  const auto opened = std::chrono::steady_clock::now();
+  const auto ms = [](const auto begin, const auto end) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
+  };
+  stage_log("producer initialized: load_library_ms=%lld gc_init_ms=%lld tl_open_ms=%lld total_ms=%lld",
+            static_cast<long long>(ms(started, loaded)),
+            static_cast<long long>(ms(loaded, initialized)),
+            static_cast<long long>(ms(initialized, opened)),
+            static_cast<long long>(ms(started, opened)));
 }
 
 void Gentl::close_tl() {

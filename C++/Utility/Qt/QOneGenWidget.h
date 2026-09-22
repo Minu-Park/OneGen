@@ -59,6 +59,7 @@ private:
     QString writeOp;
     QString writeValue;
     int writeMap = 0;
+    qint64 elapsedMs = 0;
   };
   enum class Operation { None, Connect, Disconnect, GrabOne, Start, Stop, Write, Restore };
 

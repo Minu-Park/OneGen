@@ -32,6 +32,7 @@ int fakeWorker(const std::filesystem::path& cti)
 #endif
   std::array<std::byte, 4> header;
   std::string opened_device;
+  int probes = 0;
   while (std::cin.read(reinterpret_cast<char*>(header.data()), header.size())) {
     const auto size = frameSize(header);
     if (size > maximum_message_size) return 1;
@@ -49,6 +50,7 @@ int fakeWorker(const std::filesystem::path& cti)
       payload.string(opened_device);
     }
     if (request.operation == Operation::Probe) {
+      ++probes;
       const auto diagnostic = encode({Operation::Error, 0, false, "Interface XML test failure"});
       const auto diagnostic_header = frameSize(static_cast<std::uint32_t>(diagnostic.size()));
       std::cout.write(reinterpret_cast<const char*>(diagnostic_header.data()), diagnostic_header.size());
@@ -57,13 +59,17 @@ int fakeWorker(const std::filesystem::path& cti)
       const bool slow = cti.parent_path().filename() == "vendor-a";
       if (cti.stem() == "Heartbeat") std::this_thread::sleep_for(std::chrono::seconds{6});
       if (slow) std::this_thread::sleep_for(std::chrono::seconds{1});
-      onegen::DeviceInfo device;
-      device.id = slow ? "slow" : "fast";
-      device.serial = device.id;
-      device.tl_type = "TEST";
-      device.cti_path = cti.string();
-      payload.scalar(std::uint32_t{1});
-      write(payload, device);
+      if (cti.stem() == "Retry" && probes < 2) {
+        payload.scalar(std::uint32_t{0});
+      } else {
+        onegen::DeviceInfo device;
+        device.id = slow ? "slow" : "fast";
+        device.serial = device.id;
+        device.tl_type = "TEST";
+        device.cti_path = cti.string();
+        payload.scalar(std::uint32_t{1});
+        write(payload, device);
+      }
     }
     const auto body = encode({request.operation, request.id, true, {}, payload.take()});
     const auto response_header = frameSize(static_cast<std::uint32_t>(body.size()));
@@ -79,9 +85,12 @@ int main(int argc, char** argv)
 {
   QCoreApplication application(argc, argv);
   if (argc == 3 && std::string_view(argv[1]) == "--cti") return fakeWorker(argv[2]);
-  if (argc == 5 && (std::string_view(argv[1]) == "--profile-connect" || std::string_view(argv[1]) == "--profile-single")) {
+  if ((argc == 5 || argc == 6)
+      && (std::string_view(argv[1]) == "--profile-connect" || std::string_view(argv[1]) == "--profile-single")) {
     try {
-      onegen::worker::Coordinator coordinator(argv[2], argv[3], std::chrono::seconds{1});
+      const auto discovery_timeout = argc == 6
+          ? std::chrono::milliseconds{std::stoll(argv[5])} : std::chrono::seconds{1};
+      onegen::worker::Coordinator coordinator(argv[2], argv[3], discovery_timeout);
       const auto discovery = coordinator.discover();
       const auto selected = std::find_if(discovery.devices.begin(), discovery.devices.end(),
           [&](const auto& device) { return device.id == argv[4]; });
@@ -267,6 +276,18 @@ int main(int argc, char** argv)
     assert(first_camera->data_streams().front().id == "fast");
   }
   progressive.shutdown();
+
+  // Empty short probes retry within the overall budget and return as soon as a camera appears.
+  const auto retry_root = root / "retry";
+  std::filesystem::create_directories(retry_root);
+  std::ofstream(retry_root / "Retry.cti").put('\0');
+  onegen::worker::Coordinator retrying(argv[0], retry_root, 5s);
+  const auto retry_started = std::chrono::steady_clock::now();
+  const auto retry_result = retrying.discover();
+  const auto retry_elapsed = std::chrono::steady_clock::now() - retry_started;
+  assert(retry_result.devices.size() == 1);
+  assert(retry_elapsed >= 1s && retry_elapsed < 2s);
+  retrying.shutdown();
 
   // Long scans still publish progress before any producer has completed.
   const auto heartbeat_root = root / "heartbeat";

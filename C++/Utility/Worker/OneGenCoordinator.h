@@ -77,9 +77,8 @@ public:
   /** Receives cumulative snapshots on completion or after five seconds without a completion. */
   using ProgressFn = std::function<void(const DiscoveryResult&)>;
   /**
-   * @param probe_timeout Wait passed to GenTL TLUpdateInterfaceList and each
-   *        IFUpdateDeviceList. The host Probe reply wait covers several sequential
-   *        interface updates plus loadCti slack and does not kill the worker.
+   * @param probe_timeout Total initial-discovery budget. GenTL updates run in
+   *        one-second slices so the first camera can complete startup early.
    */
   Coordinator(std::filesystem::path worker_executable,
               std::filesystem::path cti_root = {},

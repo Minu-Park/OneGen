@@ -19,9 +19,9 @@ int main()
 
   const auto frame = oneGenGraphicsFrame(source, 7);
   assert(frame && frame->hasImage());
-  assert(frame->image->pixelFormat == GraphicsImagePixelFormat::Mono8);
-  assert(frame->image->stride == 4);
-  assert(frame->image->frameSequence == 7);
+  assert(frame->images.front().payload.pixelFormat == GraphicsImagePixelFormat::Mono8);
+  assert(frame->images.front().payload.stride == 4);
+  assert(frame->images.front().payload.frameSequence == 7);
 
   source.width = 4;
   source.height = 1;
@@ -30,28 +30,28 @@ int main()
   source.pixel_format = 0x0110000d;
   source.payload.resize(8);
   const auto bayer = oneGenGraphicsFrame(source, 8);
-  assert(bayer && bayer->image->pixelFormat == GraphicsImagePixelFormat::BayerRG10);
+  assert(bayer && bayer->images.front().payload.pixelFormat == GraphicsImagePixelFormat::BayerRG10);
   assert(bayer->metadata.frameId == "42");
 
   source.stride = 5;
   source.pixel_format = 0x010a0046;
   source.payload.resize(5);
   const auto packed = oneGenGraphicsFrame(source, 9);
-  assert(packed && packed->image->pixelFormat == GraphicsImagePixelFormat::Mono10Packed);
+  assert(packed && packed->images.front().payload.pixelFormat == GraphicsImagePixelFormat::Mono10Packed);
 
   source.width = 2;
   source.stride = 12;
   source.pixel_format = 0x02300018;
   source.payload.resize(12);
   const auto rgb10 = oneGenGraphicsFrame(source, 10);
-  assert(rgb10 && rgb10->image->pixelFormat == GraphicsImagePixelFormat::RGB10Packed);
-  assert(rgb10->image->bitAlignment == GraphicsImageBitAlignment::LeastSignificant);
+  assert(rgb10 && rgb10->images.front().payload.pixelFormat == GraphicsImagePixelFormat::RGB10Packed);
+  assert(rgb10->images.front().payload.bitAlignment == GraphicsImageBitAlignment::LeastSignificant);
 
   source.width = 4;
   source.stride = 8;
   source.pixel_format = 0x02100032;
   source.payload.resize(8);
-  assert(oneGenGraphicsFrame(source, 11)->image->pixelFormat
+  assert(oneGenGraphicsFrame(source, 11)->images.front().payload.pixelFormat
          == GraphicsImagePixelFormat::YCbCr422_8);
 
   source.pixel_format = 0x010c0004;
@@ -64,7 +64,7 @@ int main()
   source.width = 640;
   source.height = 480;
   source.stride = source.payload.size();
-  assert(oneGenGraphicsFrame(source, 13)->image->pixelFormat == GraphicsImagePixelFormat::Jpeg);
+  assert(oneGenGraphicsFrame(source, 13)->images.front().payload.pixelFormat == GraphicsImagePixelFormat::Jpeg);
   source.payload_type = 0;
 
   source.pixel_format = 0x01100007;
@@ -75,7 +75,7 @@ int main()
   source.pixel_endianness = 2;
   const auto swapped = oneGenGraphicsFrame(source, 13);
   assert(swapped && swapped->hasImage());
-  const auto* bytes = swapped->image->storage.get();
+  const auto* bytes = swapped->images.front().payload.storage.get();
   if (std::endian::native == std::endian::little)
     assert(bytes[0] == 2 && bytes[1] == 1 && bytes[2] == 4 && bytes[3] == 3);
   else
@@ -121,9 +121,9 @@ int main()
 
   const auto scene = oneGenGraphicsFrame(multipart, 14);
   assert(scene && scene->hasRangeFrame());
-  assert(scene->rangeFrame->xyCoordinateMode == RangeFrameXYCoordinateMode::ExplicitXY);
-  assert(scene->rangeFrame->zValues[0] == 2.0F);
-  assert(scene->rangeFrame->confidence == std::vector<float>({10.0F, 20.0F}));
+  assert(scene->ranges.front().payload.xyCoordinateMode == RangeFrameXYCoordinateMode::ExplicitXY);
+  assert(scene->ranges.front().payload.zValues[0] == 2.0F);
+  assert(scene->ranges.front().payload.confidence == std::vector<float>({10.0F, 20.0F}));
   assert(scene->metadata.frameId == "77");
 
   onegen::Frame c16Frame;
@@ -140,10 +140,10 @@ int main()
   c16Frame.parts.push_back(c16);
   const auto c16Scene = oneGenGraphicsFrame(c16Frame, 15);
   assert(c16Scene && c16Scene->hasRangeFrame());
-  assert(c16Scene->rangeFrame->xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
-  assert(!std::isfinite(c16Scene->rangeFrame->xScale));
-  assert(c16Scene->rangeFrame->physicalZAt(0) == 2.0);
-  assert(c16Scene->rangeFrame->validMask == std::vector<std::uint8_t>({1, 0}));
+  assert(c16Scene->ranges.front().payload.xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
+  assert(!std::isfinite(c16Scene->ranges.front().payload.xScale));
+  assert(c16Scene->ranges.front().payload.physicalZAt(0) == 2.0);
+  assert(c16Scene->ranges.front().payload.validMask == std::vector<std::uint8_t>({1, 0}));
 
   onegen::Frame floating;
   floating.scan3d_geometry = multipart.scan3d_geometry;
@@ -162,7 +162,7 @@ int main()
   floating.parts.push_back(scalarPart(0x012000c8, 9, {0.25F, 0.75F, nan, 2}));
   const auto floatScene = oneGenGraphicsFrame(floating, 17);
   assert(floatScene && floatScene->hasRangeFrame());
-  const auto& range = *floatScene->rangeFrame;
+  const auto& range = floatScene->ranges.front().payload;
   assert(range.xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
   assert(!std::isfinite(range.xScale) && !std::isfinite(range.yScale));
   assert(range.physicalZAt(0) == -1 && range.physicalZAt(1) == -2 && range.physicalZAt(3) == 2);
@@ -178,19 +178,19 @@ int main()
   single.payload = floating.parts[0].payload;
   single.scan3d_geometry = floating.scan3d_geometry;
   const auto singleRange = oneGenGraphicsFrame(single, 23);
-  assert(singleRange && singleRange->rangeFrame->physicalZAt(3) == 2);
+  assert(singleRange && singleRange->ranges.front().payload.physicalZAt(3) == 2);
   single.scan3d_geometry.reset();
   assert(!oneGenGraphicsFrame(single, 24));
   single.pixel_format = 0x012000c8;
   single.payload = floating.parts[1].payload;
   const auto confidencePreview = oneGenGraphicsFrame(single, 25);
   assert(confidencePreview && confidencePreview->hasRangeFrame());
-  assert(confidencePreview->rangeFrame->rangeField.domain == MeasurementValueDomain::Native);
-  assert(confidencePreview->rangeFrame->zValues[3] == 2);
-  assert(!std::isfinite(confidencePreview->rangeFrame->xScale));
-  assert(confidencePreview->rangeFrame->validMask == std::vector<std::uint8_t>({1, 1, 0, 1}));
+  assert(confidencePreview->ranges.front().payload.rangeField.domain == MeasurementValueDomain::Native);
+  assert(confidencePreview->ranges.front().payload.zValues[3] == 2);
+  assert(!std::isfinite(confidencePreview->ranges.front().payload.xScale));
+  assert(confidencePreview->ranges.front().payload.validMask == std::vector<std::uint8_t>({1, 1, 0, 1}));
   single.parts = {floating.parts[1]};
-  assert(oneGenGraphicsFrame(single, 26)->rangeFrame->rangeField.displayName == "Confidence");
+  assert(oneGenGraphicsFrame(single, 26)->ranges.front().payload.rangeField.displayName == "Confidence");
   single.pixel_endianness = 3;
   assert(!oneGenGraphicsFrame(single, 27));
   // The complete vendor PixelFormat enumeration, including padded monochrome rows.
@@ -208,14 +208,29 @@ int main()
     mono.parts.insert(mono.parts.begin(), floating.parts[0]);
     const auto paired = oneGenGraphicsFrame(mono, 30);
     assert(paired && paired->hasImage() && paired->hasRangeFrame());
-    assert(paired->rangeFrame->intensity == std::vector<float>({0, 0, 0, 0}));
-    assert(paired->rangeFrame->intensityField.bitsPerSample == (format == 0x01080001U ? 8 : 16));
+    assert(paired->images.front().descriptor.groupId == "0:0");
+    assert(paired->ranges.front().descriptor.groupId == "0:0");
+    assert(paired->ranges.front().payload.intensity == std::vector<float>({0, 0, 0, 0}));
+    assert(paired->ranges.front().payload.intensityField.bitsPerSample == (format == 0x01080001U ? 8 : 16));
+
+    auto secondRangePart = floating.parts[0];
+    secondRangePart.region_id = 1;
+    auto secondImagePart = imagePart;
+    secondImagePart.region_id = 1;
+    mono.parts.push_back(std::move(secondRangePart));
+    mono.parts.push_back(std::move(secondImagePart));
+    const auto multiple = oneGenGraphicsFrame(mono, 31);
+    assert(multiple && multiple->ranges.size() == 2 && multiple->images.size() == 2);
+    assert(multiple->ranges[0].descriptor.id != multiple->ranges[1].descriptor.id);
+    assert(multiple->images[0].descriptor.id != multiple->images[1].descriptor.id);
+    assert(multiple->ranges[1].descriptor.groupId == "0:1");
+    assert(multiple->images[1].descriptor.groupId == "0:1");
   }
   floating.scan3d_geometry->invalid_enabled[2] = true;
   floating.scan3d_geometry->invalid_value[2] = -2;
-  assert(oneGenGraphicsFrame(floating, 18)->rangeFrame->validMask[1] == 0);
+  assert(oneGenGraphicsFrame(floating, 18)->ranges.front().payload.validMask[1] == 0);
   floating.parts[1].payload.pop_back();
-  assert(oneGenGraphicsFrame(floating, 19)->rangeFrame->confidence.empty());
+  assert(oneGenGraphicsFrame(floating, 19)->ranges.front().payload.confidence.empty());
   floating.pixel_endianness = 3;
   assert(!oneGenGraphicsFrame(floating, 20));
   floating.pixel_endianness = 0;
@@ -262,7 +277,7 @@ int main()
     }
     const auto converted = oneGenGraphicsFrame(coordinates, 31);
     assert(converted && converted->hasRangeFrame());
-    const auto& decoded = *converted->rangeFrame;
+    const auto& decoded = converted->ranges.front().payload;
     assert(decoded.physicalZAt(0) == 9.5 && decoded.physicalZAt(1) == -1);
     assert(decoded.validMask == std::vector<std::uint8_t>({1, 1, 1, 1})); // Zero is valid unless declared invalid.
     if (layout.components > 1) {
@@ -274,7 +289,7 @@ int main()
     coordinatePart.width = 2; coordinatePart.height = 2; coordinatePart.stride = coordinates.stride;
     coordinatePart.data_type = 5; coordinatePart.data_format = layout.format; coordinatePart.payload = coordinates.payload;
     coordinates.parts = {coordinatePart};
-    assert(oneGenGraphicsFrame(coordinates, 32)->rangeFrame->physicalZAt(0) == 9.5);
+    assert(oneGenGraphicsFrame(coordinates, 32)->ranges.front().payload.physicalZAt(0) == 9.5);
     if (layout.components == 3 && layout.planar) {
       const std::array<std::uint64_t, 3> planeFormats = layout.bytes == 1
           ? std::array<std::uint64_t, 3>{0x010800af, 0x010800b0, 0x010800b1}
@@ -289,7 +304,17 @@ int main()
         coordinates.parts.push_back(std::move(plane));
       }
       const auto separated = oneGenGraphicsFrame(coordinates, 42);
-      assert(separated && separated->rangeFrame->xValues[0] == 12 && separated->rangeFrame->physicalZAt(0) == 9.5);
+      assert(separated && separated->ranges.front().payload.xValues[0] == 12 && separated->ranges.front().payload.physicalZAt(0) == 9.5);
+      const auto firstPlanarGroup = coordinates.parts;
+      for (auto plane : firstPlanarGroup) {
+        plane.region_id = 1;
+        coordinates.parts.push_back(std::move(plane));
+      }
+      const auto multiplePlanar = oneGenGraphicsFrame(coordinates, 68);
+      assert(multiplePlanar && multiplePlanar->ranges.size() == 2);
+      assert(multiplePlanar->ranges[0].descriptor.groupId == "0:0");
+      assert(multiplePlanar->ranges[1].descriptor.groupId == "0:1");
+      coordinates.parts.resize(firstPlanarGroup.size());
       coordinates.parts[1].source_id = 9;
       assert(!oneGenGraphicsFrame(coordinates, 43));
       coordinates.parts[1].source_id = 0;
@@ -305,18 +330,18 @@ int main()
           std::reverse(bytes.begin() + row * 12 + col * 4, bytes.begin() + row * 12 + col * 4 + 4);
       }
       coordinates.parts.back().source_id = 1;
-      assert(oneGenGraphicsFrame(coordinates, 45)->rangeFrame->confidence.empty());
+      assert(oneGenGraphicsFrame(coordinates, 45)->ranges.front().payload.confidence.empty());
       coordinates.parts.back().source_id = 0;
-      assert(oneGenGraphicsFrame(coordinates, 46)->rangeFrame->confidence[0] == 0.25F);
+      assert(oneGenGraphicsFrame(coordinates, 46)->ranges.front().payload.confidence[0] == 0.25F);
       geometry.output_mode = "CalibratedABC_PointCloud";
       const auto cloud = oneGenGraphicsFrame(coordinates, 47);
       assert(cloud && cloud->hasPointCloud() && !cloud->hasRangeFrame() && !cloud->hasSurfaceMesh());
-      assert(cloud->pointCloud->xyz.size() == 12 && cloud->pointCloud->xyz[0] == 12 && cloud->pointCloud->xyz[2] == 9.5);
-      assert(cloud->pointCloud->scalarFields.size() == 1 && cloud->pointCloud->scalarFields[0].values[0] == 0.25F);
+      assert(cloud->pointClouds.front().payload.xyz.size() == 12 && cloud->pointClouds.front().payload.xyz[0] == 12 && cloud->pointClouds.front().payload.xyz[2] == 9.5);
+      assert(cloud->pointClouds.front().payload.scalarFields.size() == 1 && cloud->pointClouds.front().payload.scalarFields[0].values[0] == 0.25F);
       geometry.invalid_enabled[2] = true;
       const auto filteredCloud = oneGenGraphicsFrame(coordinates, 48);
-      assert(filteredCloud && filteredCloud->pointCloud->xyz.size() == 9);
-      assert(filteredCloud->pointCloud->scalarFields[0].values.size() == 3);
+      assert(filteredCloud && filteredCloud->pointClouds.front().payload.xyz.size() == 9);
+      assert(filteredCloud->pointClouds.front().payload.scalarFields[0].values.size() == 3);
       geometry.invalid_enabled[2] = false;
       coordinates.parts.clear();
       assert(oneGenGraphicsFrame(coordinates, 49)->hasPointCloud());
@@ -324,7 +349,7 @@ int main()
     }
     coordinates.parts.clear();
     geometry.invalid_enabled[2] = true; geometry.invalid_value[2] = 0;
-    assert(oneGenGraphicsFrame(coordinates, 33)->rangeFrame->validMask[1] == 0);
+    assert(oneGenGraphicsFrame(coordinates, 33)->ranges.front().payload.validMask[1] == 0);
     coordinates.payload.pop_back();
     assert(!oneGenGraphicsFrame(coordinates, 34));
   }
@@ -336,9 +361,9 @@ int main()
   rectifiedFrame.scan3d_geometry->offset = {10, 20, -1};
   rectifiedFrame.parts = {scalarPart(0x012000bf, 5, {0, 1, 2, 3})};
   auto rectifiedScene = oneGenGraphicsFrame(rectifiedFrame, 35);
-  assert(rectifiedScene && rectifiedScene->rangeFrame->xyCoordinateMode == RangeFrameXYCoordinateMode::UniformPhysical);
-  assert(rectifiedScene->rangeFrame->xScale == 2 && rectifiedScene->rangeFrame->yScale == -3);
-  assert(rectifiedScene->rangeFrame->xOffset == 10 && rectifiedScene->rangeFrame->yOffset == 20);
+  assert(rectifiedScene && rectifiedScene->ranges.front().payload.xyCoordinateMode == RangeFrameXYCoordinateMode::UniformPhysical);
+  assert(rectifiedScene->ranges.front().payload.xScale == 2 && rectifiedScene->ranges.front().payload.yScale == -3);
+  assert(rectifiedScene->ranges.front().payload.xOffset == 10 && rectifiedScene->ranges.front().payload.yOffset == 20);
   rectifiedFrame.scan3d_geometry->calibrated_axes[0] = false;
   assert(!oneGenGraphicsFrame(rectifiedFrame, 36));
   rectifiedFrame.scan3d_geometry->output_mode = "CalibratedC";
@@ -353,20 +378,20 @@ int main()
   rectifiedFrame.scan3d_geometry->output_mode = "UncalibratedC";
   rectifiedFrame.scan3d_geometry->distance_unit.clear();
   const auto rawScene = oneGenGraphicsFrame(rectifiedFrame, 41);
-  assert(rawScene && rawScene->rangeFrame->rangeField.domain == MeasurementValueDomain::Native);
-  assert(rawScene->rangeFrame->zValues[3] == 3 && !std::isfinite(rawScene->rangeFrame->xScale));
+  assert(rawScene && rawScene->ranges.front().payload.rangeField.domain == MeasurementValueDomain::Native);
+  assert(rawScene->ranges.front().payload.zValues[3] == 3 && !std::isfinite(rawScene->ranges.front().payload.xScale));
 
   rectifiedFrame.scan3d_geometry->output_mode = "CalibratedC";
   rectifiedFrame.scan3d_geometry->distance_unit = "Millimeter";
   rectifiedFrame.scan3d_geometry->scale[2] = 1e100;
   const auto overflowScene = oneGenGraphicsFrame(rectifiedFrame, 50);
-  assert(overflowScene && overflowScene->rangeFrame->validMask == std::vector<std::uint8_t>({1, 0, 0, 0}));
+  assert(overflowScene && overflowScene->ranges.front().payload.validMask == std::vector<std::uint8_t>({1, 0, 0, 0}));
 
   rectifiedFrame.scan3d_geometry->output_mode = "CalibratedABC_PointCloud";
   rectifiedFrame.parts = {scalarPart(0x012000c8, 9, {0.25F, 0.75F, nan, 2})};
   const auto confidenceOnly = oneGenGraphicsFrame(rectifiedFrame, 51);
   assert(confidenceOnly && confidenceOnly->hasRangeFrame() && !confidenceOnly->hasPointCloud());
-  assert(confidenceOnly->rangeFrame->rangeField.domain == MeasurementValueDomain::Native);
+  assert(confidenceOnly->ranges.front().payload.rangeField.domain == MeasurementValueDomain::Native);
 
   onegen::Frame packedC;
   packedC.width = 2; packedC.height = 1; packedC.pixel_format = 0x010a00d7;
@@ -380,7 +405,7 @@ int main()
   packedC.scan3d_geometry->scale = {1, 1, 1};
   packedC.scan3d_geometry->offset = {0, 0, -1};
   const auto packedScene = oneGenGraphicsFrame(packedC, 52);
-  assert(packedScene && packedScene->rangeFrame->physicalZAt(0) == 0 && packedScene->rangeFrame->physicalZAt(1) == 1);
+  assert(packedScene && packedScene->ranges.front().payload.physicalZAt(0) == 0 && packedScene->ranges.front().payload.physicalZAt(1) == 1);
 
   onegen::Frame f64;
   f64.width = 2; f64.height = 1; f64.pixel_format = 0x01400128;
@@ -393,22 +418,22 @@ int main()
   f64.payload.resize(16);
   std::memcpy(f64.payload.data(), f64Samples, sizeof(f64Samples));
   const auto f64Scene = oneGenGraphicsFrame(f64, 53);
-  assert(f64Scene && f64Scene->rangeFrame->physicalZAt(0) == 1 && f64Scene->rangeFrame->physicalZAt(1) == 5);
+  assert(f64Scene && f64Scene->ranges.front().payload.physicalZAt(0) == 1 && f64Scene->ranges.front().payload.physicalZAt(1) == 5);
   auto be64 = f64;
   be64.pixel_endianness = 2;
   if (std::endian::native == std::endian::little)
     for (std::size_t i = 0; i + 8 <= be64.payload.size(); i += 8)
       std::reverse(be64.payload.begin() + i, be64.payload.begin() + i + 8);
-  assert(oneGenGraphicsFrame(be64, 67)->rangeFrame->physicalZAt(0) == 1);
+  assert(oneGenGraphicsFrame(be64, 67)->ranges.front().payload.physicalZAt(0) == 1);
   f64.scan3d_geometry->distance_unit = "Meter";
   f64.scan3d_geometry->scale[2] = 1;
   f64.scan3d_geometry->offset[2] = 0;
   const auto meterScene = oneGenGraphicsFrame(f64, 54);
-  assert(meterScene && meterScene->rangeFrame->physicalZAt(0) == 1000);
-  assert(meterScene->rangeFrame->xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
-  assert(!std::isfinite(meterScene->rangeFrame->xScale));
+  assert(meterScene && meterScene->ranges.front().payload.physicalZAt(0) == 1000);
+  assert(meterScene->ranges.front().payload.xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
+  assert(!std::isfinite(meterScene->ranges.front().payload.xScale));
   f64.scan3d_geometry->distance_unit = "Inch";
-  assert(oneGenGraphicsFrame(f64, 60)->rangeFrame->physicalZAt(0) == 25.4F);
+  assert(oneGenGraphicsFrame(f64, 60)->ranges.front().payload.physicalZAt(0) == 25.4F);
 
   onegen::Frame disparity;
   disparity.parts = {scalarPart(0x012000bf, 5, {2, 4, 2, 4})};
@@ -419,13 +444,13 @@ int main()
   disparity.scan3d_geometry->focal_length = 10;
   disparity.scan3d_geometry->baseline = 5;
   const auto disparityScene = oneGenGraphicsFrame(disparity, 55);
-  assert(disparityScene && disparityScene->rangeFrame->physicalZAt(0) == 25);
-  assert(disparityScene->rangeFrame->physicalZAt(1) == 12.5F);
+  assert(disparityScene && disparityScene->ranges.front().payload.physicalZAt(0) == 25);
+  assert(disparityScene->ranges.front().payload.physicalZAt(1) == 12.5F);
   disparity.scan3d_geometry->principal_u = 0;
   disparity.scan3d_geometry->principal_v = 0;
   const auto projected = oneGenGraphicsFrame(disparity, 56);
-  assert(projected && projected->rangeFrame->xyCoordinateMode == RangeFrameXYCoordinateMode::ExplicitXY);
-  assert(projected->rangeFrame->xValues[1] == 1.25F);
+  assert(projected && projected->ranges.front().payload.xyCoordinateMode == RangeFrameXYCoordinateMode::ExplicitXY);
+  assert(projected->ranges.front().payload.xValues[1] == 1.25F);
 
   onegen::Frame spherical;
   spherical.scan3d_geometry.emplace();
@@ -439,16 +464,16 @@ int main()
   std::memcpy(abc.payload.data(), polar, sizeof(polar));
   spherical.parts = {abc};
   const auto sphere = oneGenGraphicsFrame(spherical, 57);
-  assert(sphere && sphere->rangeFrame->xValues[0] == 0 && sphere->rangeFrame->yValues[0] == 0);
-  assert(sphere->rangeFrame->zValues[0] == 2);
+  assert(sphere && sphere->ranges.front().payload.xValues[0] == 0 && sphere->ranges.front().payload.yValues[0] == 0);
+  assert(sphere->ranges.front().payload.zValues[0] == 2);
 
   onegen::Frame cylindrical = spherical;
   cylindrical.scan3d_geometry->coordinate_system = "Cylindrical";
   const float cyl[] = {0.F, 3.F, 2.F};
   std::memcpy(cylindrical.parts[0].payload.data(), cyl, sizeof(cyl));
   const auto cylinder = oneGenGraphicsFrame(cylindrical, 58);
-  assert(cylinder && cylinder->rangeFrame->xValues[0] == 2 && cylinder->rangeFrame->yValues[0] == 3);
-  assert(cylinder->rangeFrame->zValues[0] == 0);
+  assert(cylinder && cylinder->ranges.front().payload.xValues[0] == 2 && cylinder->ranges.front().payload.yValues[0] == 3);
+  assert(cylinder->ranges.front().payload.zValues[0] == 0);
 
   onegen::Frame meterCloud = spherical;
   meterCloud.scan3d_geometry->output_mode = "CalibratedABC_PointCloud";
@@ -457,10 +482,10 @@ int main()
   const float meterAbc[] = {1.F, 2.F, 3.F};
   std::memcpy(meterCloud.parts[0].payload.data(), meterAbc, sizeof(meterAbc));
   const auto meterPoints = oneGenGraphicsFrame(meterCloud, 66);
-  assert(meterPoints && meterPoints->hasPointCloud() && meterPoints->pointCloud->xyz.size() == 3);
-  assert(meterPoints->pointCloud->coordinateUnit == GraphicsLengthUnit::Millimeter);
-  assert(meterPoints->pointCloud->xyz[0] == 1000 && meterPoints->pointCloud->xyz[1] == 2000);
-  assert(meterPoints->pointCloud->xyz[2] == 3000);
+  assert(meterPoints && meterPoints->hasPointCloud() && meterPoints->pointClouds.front().payload.xyz.size() == 3);
+  assert(meterPoints->pointClouds.front().payload.coordinateUnit == GraphicsLengthUnit::Millimeter);
+  assert(meterPoints->pointClouds.front().payload.xyz[0] == 1000 && meterPoints->pointClouds.front().payload.xyz[1] == 2000);
+  assert(meterPoints->pointClouds.front().payload.xyz[2] == 3000);
 
   onegen::Frame confidenceBits;
   confidenceBits.parts = {scalarPart(0x012000bf, 5, {0, 1, 2, 3}), {}};
@@ -474,14 +499,14 @@ int main()
   confidenceBits.scan3d_geometry->scale = {1, 1, 0.5};
   confidenceBits.scan3d_geometry->offset = {0, 0, -1};
   const auto bitConfidence = oneGenGraphicsFrame(confidenceBits, 59);
-  assert(bitConfidence && bitConfidence->rangeFrame->confidence == std::vector<float>({1, 0, 1, 0}));
-  assert(bitConfidence->rangeFrame->confidenceBits == 1);
+  assert(bitConfidence && bitConfidence->ranges.front().payload.confidence == std::vector<float>({1, 0, 1, 0}));
+  assert(bitConfidence->ranges.front().payload.confidenceBits == 1);
   confidenceBits.parts[1].data_format = 0x010100c5;
   confidenceBits.parts[1].stride = 1;
   confidenceBits.parts[1].payload = {0x05, 0x05};
   const auto packedConfidence = oneGenGraphicsFrame(confidenceBits, 61);
-  assert(packedConfidence && packedConfidence->rangeFrame->confidence == std::vector<float>({1, 0, 1, 0}));
-  assert(packedConfidence->rangeFrame->confidenceBits == 1);
+  assert(packedConfidence && packedConfidence->ranges.front().payload.confidence == std::vector<float>({1, 0, 1, 0}));
+  assert(packedConfidence->ranges.front().payload.confidenceBits == 1);
 
   onegen::Frame packedAc;
   packedAc.parts.resize(1);
@@ -494,10 +519,10 @@ int main()
   packedAc.scan3d_geometry->scale = {1, 1, 1};
   packedAc.scan3d_geometry->offset = {0, 5, 0};
   const auto rectifiedAc = oneGenGraphicsFrame(packedAc, 62);
-  assert(rectifiedAc && rectifiedAc->rangeFrame->xValues[0] == 1);
-  assert(rectifiedAc->rangeFrame->yValues[0] == 5 && rectifiedAc->rangeFrame->zValues[0] == 2);
+  assert(rectifiedAc && rectifiedAc->ranges.front().payload.xValues[0] == 1);
+  assert(rectifiedAc->ranges.front().payload.yValues[0] == 5 && rectifiedAc->ranges.front().payload.zValues[0] == 2);
   packedAc.scan3d_geometry->output_mode = "CalibratedAC";
-  assert(oneGenGraphicsFrame(packedAc, 63)->rangeFrame->zValues[0] == 2);
+  assert(oneGenGraphicsFrame(packedAc, 63)->ranges.front().payload.zValues[0] == 2);
 
   onegen::Frame planar64;
   planar64.scan3d_geometry.emplace();
@@ -514,8 +539,8 @@ int main()
     planar64.parts.push_back(std::move(plane));
   }
   const auto assembled64 = oneGenGraphicsFrame(planar64, 64);
-  assert(assembled64 && assembled64->rangeFrame->xValues[0] == 1);
-  assert(assembled64->rangeFrame->yValues[0] == 2 && assembled64->rangeFrame->zValues[0] == 3);
+  assert(assembled64 && assembled64->ranges.front().payload.xValues[0] == 1);
+  assert(assembled64->ranges.front().payload.yValues[0] == 2 && assembled64->ranges.front().payload.zValues[0] == 3);
 
   onegen::Frame sphereRectified;
   sphereRectified.parts = {scalarPart(0x012000bf, 5, {2, 2, 2, 2})};
@@ -526,8 +551,8 @@ int main()
   sphereRectified.scan3d_geometry->scale = {1, 1, 1};
   sphereRectified.scan3d_geometry->offset = {0, 0, 0};
   const auto sphereGrid = oneGenGraphicsFrame(sphereRectified, 65);
-  assert(sphereGrid && sphereGrid->rangeFrame->xValues[0] == 0);
-  assert(sphereGrid->rangeFrame->yValues[0] == 0 && sphereGrid->rangeFrame->zValues[0] == 2);
+  assert(sphereGrid && sphereGrid->ranges.front().payload.xValues[0] == 0);
+  assert(sphereGrid->ranges.front().payload.yValues[0] == 0 && sphereGrid->ranges.front().payload.zValues[0] == 2);
 
   multipart.scan3d_geometry->distance_unit.clear();
   assert(!oneGenGraphicsFrame(multipart, 16));

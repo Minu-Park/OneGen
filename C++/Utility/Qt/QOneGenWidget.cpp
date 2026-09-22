@@ -375,6 +375,8 @@ bool QOneGenWidget::run(Operation operation, std::function<AsyncResult()> work)
   operation_ = operation;
   setOperationActive(true);
   operation_watcher_.setFuture(QtConcurrent::run([this, operation, work = std::move(work)] {
+    QElapsedTimer timing;
+    timing.start();
     AsyncResult result;
     try {
       result = work();
@@ -391,6 +393,7 @@ bool QOneGenWidget::run(Operation operation, std::function<AsyncResult()> work)
                                    .arg(text);
       }
     }
+    result.elapsedMs = timing.elapsed();
     return result;
   }));
   return true;
@@ -465,7 +468,8 @@ void QOneGenWidget::finishOperation()
     lease_->set_invalidate_callback([this](const int module, const std::string_view name) {
       invalidateFeature(module, name);
     });
-    qInfo().noquote() << QStringLiteral("[GenICam] connected: %1").arg(result.title);
+    qInfo().noquote() << QStringLiteral("[GenICam] connected: camera=%1 elapsed_ms=%2")
+        .arg(result.title).arg(result.elapsedMs + tree_timing.elapsed());
     if (title_callback_) title_callback_(result.title);
   } else if (operation == Operation::Disconnect) {
     dropLease();
@@ -473,9 +477,10 @@ void QOneGenWidget::finishOperation()
   } else if (operation == Operation::Start || operation == Operation::Stop) {
     setFeatureGrabbing(operation == Operation::Start);
     if (!result.features.empty()) setFeatureSnapshot(result.features);
-    qInfo().noquote() << QStringLiteral("[GenICam] live %1: camera=%2 serial=%3 stream=%4")
+    qInfo().noquote() << QStringLiteral("[GenICam] live %1: camera=%2 serial=%3 stream=%4 elapsed_ms=%5")
         .arg(operation == Operation::Start ? QStringLiteral("started") : QStringLiteral("stopped"),
-             QString::fromStdString(lease_->info().model), QString::fromStdString(lease_->info().serial), streams_box_->currentText());
+             QString::fromStdString(lease_->info().model), QString::fromStdString(lease_->info().serial), streams_box_->currentText())
+        .arg(result.elapsedMs);
   } else if (operation == Operation::Write) {
     if (!result.features.empty()) setFeatureSnapshot(result.features);
     if (!result.writeNode.isEmpty())
@@ -517,6 +522,8 @@ void QOneGenWidget::startGrabOne()
   setFeatureGrabbing(true);
   grab_one_button_->setEnabled(false);
   grab_watcher_.setFuture(QtConcurrent::run([this] {
+    QElapsedTimer timing;
+    timing.start();
     AsyncResult result;
     try {
       controller_->grabOne();
@@ -531,6 +538,7 @@ void QOneGenWidget::startGrabOne()
                                    .arg(QString::fromLocal8Bit(error.what()));
       }
     }
+    result.elapsedMs = timing.elapsed();
     return result;
   }));
 }
@@ -546,8 +554,9 @@ void QOneGenWidget::finishGrabOne()
   } else if (lease_) {
     // The complete snapshot supersedes every invalidation queued during Single.
     if (!result.features.empty()) setFeatureSnapshot(result.features);
-    qInfo().noquote() << QStringLiteral("[GenICam] single acquisition completed: camera=%1 serial=%2")
-        .arg(QString::fromStdString(lease_->info().model), QString::fromStdString(lease_->info().serial));
+    qInfo().noquote() << QStringLiteral("[GenICam] single acquisition completed: camera=%1 serial=%2 elapsed_ms=%3")
+        .arg(QString::fromStdString(lease_->info().model), QString::fromStdString(lease_->info().serial))
+        .arg(result.elapsedMs);
   }
   setFeatureGrabbing(false);
   setOperationActive(operation_watcher_.isRunning());

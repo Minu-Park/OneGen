@@ -101,14 +101,13 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
                                       uint64_t timeout_ms) {
   std::vector<FoundDevice> out;
   for (auto& prod : producers) {
+    const auto first_device = out.size();
     auto& g = prod->api;
     bool8_t changed = 0;
-    stage_log("worker TLUpdateInterfaceList start timeout_ms=%llu cti=%s",
-              static_cast<unsigned long long>(timeout_ms), prod->path.string().c_str());
+    const auto transport_started = std::chrono::steady_clock::now();
     g.check(g.TLUpdateInterfaceList(g.tl, &changed, timeout_ms), "TLUpdateInterfaceList");
     uint32_t nif = 0;
     g.check(g.TLGetNumInterfaces(g.tl, &nif), "TLGetNumInterfaces");
-    stage_log("worker TLUpdateInterfaceList ok interfaces=%u", nif);
     for (uint32_t i = 0; i < nif; ++i) {
       char ifid[512] = {};
       size_t ifn = sizeof(ifid);
@@ -121,18 +120,15 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
       if (const auto it = prod->interfaces.find(ifid); it != prod->interfaces.end()) {
         hif = it->second;
       } else {
-        stage_log("worker TLOpenInterface start interface=%s", ifid);
         g.check(g.TLOpenInterface(g.tl, ifid, &hif), "TLOpenInterface");
         prod->interfaces.emplace(ifid, hif);
-        stage_log("worker TLOpenInterface ok interface=%s", ifid);
       }
       bool8_t dch = 0;
-      stage_log("worker IFUpdateDeviceList start interface=%s timeout_ms=%llu",
-                ifid, static_cast<unsigned long long>(timeout_ms));
+      const auto update_started = std::chrono::steady_clock::now();
       g.check(g.IFUpdateDeviceList(hif, &dch, timeout_ms), "IFUpdateDeviceList");
+      const auto update_finished = std::chrono::steady_clock::now();
       uint32_t nd = 0;
       g.check(g.IFGetNumDevices(hif, &nd), "IFGetNumDevices");
-      stage_log("worker IFUpdateDeviceList ok interface=%s devices=%u", ifid, nd);
       std::vector<FoundDevice> batch;
       for (uint32_t d = 0; d < nd; ++d) {
         char devid[512] = {};
@@ -159,13 +155,23 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
         batch.push_back(std::move(fd));
       }
       if (!batch.empty()) {
-        stage_log("worker fill interface IPs start interface=%s devices=%u",
-                  ifid, static_cast<unsigned>(batch.size()));
         fill_ips_from_interface(g, hif, batch);
-        stage_log("worker fill interface IPs ok interface=%s", ifid);
       }
+      if (nd > 0)
+        stage_log("interface scan completed: interface=%s cameras=%u update_ms=%lld total_ms=%lld",
+                  ifid, nd,
+                  static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                      update_finished - update_started).count()),
+                  static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - update_started).count()));
       for (auto& fd : batch) out.push_back(std::move(fd));
     }
+    if (out.size() > first_device)
+      stage_log("producer scan completed: interfaces=%u cameras=%u timeout_ms=%llu elapsed_ms=%lld",
+                nif, static_cast<unsigned>(out.size() - first_device),
+                static_cast<unsigned long long>(timeout_ms),
+                static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - transport_started).count()));
   }
   return out;
 }

@@ -2,6 +2,11 @@
 
 ## v0.1.1
 
+- Preserve every supported GenTL multipart image and range as an independently identified resource grouped by standard source and region metadata.
+- Collapse calibrated point-cloud output into the corresponding resource group and retain confidence-only identities.
+
+- Collapse verbose producer stage boundaries into CTI initialization and interface-scan summaries with per-stage elapsed milliseconds.
+- Keep the ten-second no-camera startup budget while probing every GenTL producer in one-second slices, returning as soon as that producer reports a camera.
 - Forward worker `[GenICam]` stage lines through the host log and record LoadLibrary, GCInitLib, TLOpen, and enumerate boundaries so a hung producer probe can be located.
 - Keep Probe replies long enough for sequential per-interface device lists, and skip loopback interfaces so a camera found on a later NIC is not discarded as a host timeout.
 - Ignore feature-editor writes while the tree is rebuilt so a checkbox write cannot be undone by destroyed line-edit `editingFinished` signals.

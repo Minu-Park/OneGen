@@ -9,6 +9,7 @@
 #include <map>
 #include <queue>
 #include <stdexcept>
+#include <thread>
 #include <tuple>
 #include <QDebug>
 
@@ -189,13 +190,21 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
     probes.push_back(std::async(std::launch::async, [&, cti] {
       Item item{cti};
       try {
-        Writer out;
-        out.scalar(static_cast<std::uint32_t>(probe_timeout_.count()));
         auto worker = connection(cti.string());
-        item.devices = readVector<DeviceInfo>(
-            worker->request(Operation::Probe, out.take(),
-                            probe_timeout_ * 4 + std::chrono::seconds{20}),
-            readDeviceInfo);
+        const auto deadline = std::chrono::steady_clock::now() + probe_timeout_;
+        do {
+          const auto attempt_started = std::chrono::steady_clock::now();
+          const auto remaining = std::max(std::chrono::milliseconds{1},
+              std::chrono::duration_cast<std::chrono::milliseconds>(deadline - attempt_started));
+          const auto slice = std::min(std::chrono::milliseconds{1000}, remaining);
+          Writer out;
+          out.scalar(static_cast<std::uint32_t>(slice.count()));
+          item.devices = readVector<DeviceInfo>(
+              worker->request(Operation::Probe, out.take(), slice * 4 + std::chrono::seconds{5}),
+              readDeviceInfo);
+          if (!item.devices.empty() || std::chrono::steady_clock::now() >= deadline) break;
+          std::this_thread::sleep_until(std::min(deadline, attempt_started + slice));
+        } while (std::chrono::steady_clock::now() < deadline);
         for (auto& device : item.devices)
           if (device.cti_path.empty()) device.cti_path = cti.string();
       } catch (const std::exception& exception) { item.error = exception.what(); }
