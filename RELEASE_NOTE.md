@@ -2,6 +2,7 @@
 
 ## v0.1.1
 
+- Read GenTL interface IDs, device IDs, and optional device strings with bounded retry when the producer reports a larger buffer; keep malformed optional metadata from hiding a discovered device.
 - Preserve every supported GenTL multipart image and range as an independently identified resource grouped by standard source and region metadata.
 - Collapse calibrated point-cloud output into the corresponding resource group and retain confidence-only identities.
 

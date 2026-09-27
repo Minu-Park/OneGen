@@ -8,6 +8,7 @@
 #include "OneGenError.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <string_view>
@@ -77,6 +78,37 @@ bool loopback_interface(std::string_view id)
       || id.find("::1") != std::string_view::npos;
 }
 
+template <std::size_t InitialSize = 512, typename Read>
+std::string read_gentl_string(Gentl& g, const char* where, Read read, bool optional = false) {
+  std::array<char, InitialSize> local{};
+  std::size_t size = local.size();
+  auto result = read(local.data(), &size);
+  if (result == GenTL::GC_ERR_BUFFER_TOO_SMALL) {
+    if (size <= local.size() || size > 1024 * 1024) {
+      if (optional) return {};
+      throw Error(std::string(where) + ": invalid string size");
+    }
+    std::string value(size, '\0');
+    const auto capacity = size;
+    result = read(value.data(), &size);
+    if (result == GenTL::GC_ERR_SUCCESS) {
+      if (size == 0 || size > capacity || value[size - 1] != '\0') {
+        if (optional) return {};
+        throw Error(std::string(where) + ": invalid string response");
+      }
+      value.resize(size - 1);
+      return value;
+    }
+  }
+  if (optional && result != GenTL::GC_ERR_SUCCESS) return {};
+  g.check(result, where);
+  if (size == 0 || size > local.size() || local[size - 1] != '\0') {
+    if (optional) return {};
+    throw Error(std::string(where) + ": invalid string response");
+  }
+  return {local.data(), size - 1};
+}
+
 }  // namespace
 
 void close_interfaces(Producer& producer) {
@@ -89,12 +121,11 @@ void close_interfaces(Producer& producer) {
 
 std::string gentl_string(Gentl& g, GenTL::IF_HANDLE hif, const char* devid,
                          GenTL::DEVICE_INFO_CMD cmd) {
-  char buf[1024] = {};
-  size_t n = sizeof(buf);
   GenTL::INFO_DATATYPE type = GenTL::INFO_DATATYPE_UNKNOWN;
-  if (g.IFGetDeviceInfo(hif, devid, cmd, &type, buf, &n) != GenTL::GC_ERR_SUCCESS) return {};
-  if (type != GenTL::INFO_DATATYPE_STRING) return {};
-  return buf;
+  auto value = read_gentl_string<1024>(g, "IFGetDeviceInfo", [&](char* buffer, size_t* size) {
+    return g.IFGetDeviceInfo(hif, devid, cmd, &type, buffer, size);
+  }, true);
+  return type == GenTL::INFO_DATATYPE_STRING ? value : std::string{};
 }
 
 std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& producers,
@@ -109,18 +140,18 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
     uint32_t nif = 0;
     g.check(g.TLGetNumInterfaces(g.tl, &nif), "TLGetNumInterfaces");
     for (uint32_t i = 0; i < nif; ++i) {
-      char ifid[512] = {};
-      size_t ifn = sizeof(ifid);
-      g.check(g.TLGetInterfaceID(g.tl, i, ifid, &ifn), "TLGetInterfaceID");
+      const auto ifid = read_gentl_string(g, "TLGetInterfaceID", [&](char* buffer, size_t* size) {
+        return g.TLGetInterfaceID(g.tl, i, buffer, size);
+      });
       if (loopback_interface(ifid)) {
-        stage_log("worker skip loopback interface=%s", ifid);
+        stage_log("worker skip loopback interface=%s", ifid.c_str());
         continue;
       }
       GenTL::IF_HANDLE hif = nullptr;
       if (const auto it = prod->interfaces.find(ifid); it != prod->interfaces.end()) {
         hif = it->second;
       } else {
-        g.check(g.TLOpenInterface(g.tl, ifid, &hif), "TLOpenInterface");
+        g.check(g.TLOpenInterface(g.tl, ifid.c_str(), &hif), "TLOpenInterface");
         prod->interfaces.emplace(ifid, hif);
       }
       bool8_t dch = 0;
@@ -131,20 +162,20 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
       g.check(g.IFGetNumDevices(hif, &nd), "IFGetNumDevices");
       std::vector<FoundDevice> batch;
       for (uint32_t d = 0; d < nd; ++d) {
-        char devid[512] = {};
-        size_t dn = sizeof(devid);
-        g.check(g.IFGetDeviceID(hif, d, devid, &dn), "IFGetDeviceID");
+        const auto devid = read_gentl_string(g, "IFGetDeviceID", [&](char* buffer, size_t* size) {
+          return g.IFGetDeviceID(hif, d, buffer, size);
+        });
         FoundDevice fd;
         fd.producer = prod.get();
         fd.if_id = ifid;
         fd.info.id = devid;
-        fd.info.vendor = gentl_string(g, hif, devid, GenTL::DEVICE_INFO_VENDOR);
-        fd.info.model = gentl_string(g, hif, devid, GenTL::DEVICE_INFO_MODEL);
-        fd.info.serial = gentl_string(g, hif, devid, GenTL::DEVICE_INFO_SERIAL_NUMBER);
+        fd.info.vendor = gentl_string(g, hif, devid.c_str(), GenTL::DEVICE_INFO_VENDOR);
+        fd.info.model = gentl_string(g, hif, devid.c_str(), GenTL::DEVICE_INFO_MODEL);
+        fd.info.serial = gentl_string(g, hif, devid.c_str(), GenTL::DEVICE_INFO_SERIAL_NUMBER);
         fd.info.user_defined_name =
-            gentl_string(g, hif, devid, GenTL::DEVICE_INFO_USER_DEFINED_NAME);
-        fd.info.display_name = gentl_string(g, hif, devid, GenTL::DEVICE_INFO_DISPLAYNAME);
-        fd.info.tl_type = gentl_string(g, hif, devid, GenTL::DEVICE_INFO_TLTYPE);
+            gentl_string(g, hif, devid.c_str(), GenTL::DEVICE_INFO_USER_DEFINED_NAME);
+        fd.info.display_name = gentl_string(g, hif, devid.c_str(), GenTL::DEVICE_INFO_DISPLAYNAME);
+        fd.info.tl_type = gentl_string(g, hif, devid.c_str(), GenTL::DEVICE_INFO_TLTYPE);
         fd.info.cti_path = prod->path.string();
         if (auto ip = extract_ipv4(fd.info.id))
           fd.info.ip = *ip;
@@ -159,7 +190,7 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
       }
       if (nd > 0)
         stage_log("interface scan completed: interface=%s cameras=%u update_ms=%lld total_ms=%lld",
-                  ifid, nd,
+                  ifid.c_str(), nd,
                   static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
                       update_finished - update_started).count()),
                   static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(

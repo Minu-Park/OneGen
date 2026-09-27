@@ -1,14 +1,74 @@
 #include "Internal/Match.h"
+#include "Internal/OneGenImpl.h"
 #include "OneGenError.h"
 #include "OneGen.h"
 
-#include <cassert>
 #include <algorithm>
+#include <cassert>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+
+namespace {
+
+const std::string interface_id(600, 'I');
+const std::string device_id = std::string(600, 'D') + "192.168.0.7";
+const std::string device_vendor(1500, 'V');
+
+GenTL::GC_ERROR copy_string(const std::string& value, char* buffer, size_t* size) {
+  const auto required = value.size() + 1;
+  if (*size < required) { *size = required; return GenTL::GC_ERR_BUFFER_TOO_SMALL; }
+  std::memcpy(buffer, value.c_str(), required);
+  *size = required;
+  return GenTL::GC_ERR_SUCCESS;
+}
+
+GenTL::GC_ERROR GC_CALLTYPE interface_count(GenTL::TL_HANDLE, uint32_t* count) {
+  *count = 1;
+  return GenTL::GC_ERR_SUCCESS;
+}
+GenTL::GC_ERROR GC_CALLTYPE device_count(GenTL::IF_HANDLE, uint32_t* count) {
+  *count = 1;
+  return GenTL::GC_ERR_SUCCESS;
+}
+GenTL::GC_ERROR GC_CALLTYPE update_interfaces(GenTL::TL_HANDLE, bool8_t* changed, uint64_t) {
+  *changed = 0;
+  return GenTL::GC_ERR_SUCCESS;
+}
+GenTL::GC_ERROR GC_CALLTYPE update_devices(GenTL::IF_HANDLE, bool8_t* changed, uint64_t) {
+  *changed = 0;
+  return GenTL::GC_ERR_SUCCESS;
+}
+GenTL::GC_ERROR GC_CALLTYPE get_interface_id(GenTL::TL_HANDLE, uint32_t, char* buffer, size_t* size) {
+  return copy_string(interface_id, buffer, size);
+}
+GenTL::GC_ERROR GC_CALLTYPE open_interface(GenTL::TL_HANDLE, const char* id, GenTL::IF_HANDLE* handle) {
+  assert(id == interface_id);
+  *handle = reinterpret_cast<GenTL::IF_HANDLE>(1);
+  return GenTL::GC_ERR_SUCCESS;
+}
+GenTL::GC_ERROR GC_CALLTYPE get_device_id(GenTL::IF_HANDLE, uint32_t, char* buffer, size_t* size) {
+  return copy_string(device_id, buffer, size);
+}
+GenTL::GC_ERROR GC_CALLTYPE get_device_info(GenTL::IF_HANDLE, const char* id,
+    GenTL::DEVICE_INFO_CMD command, GenTL::INFO_DATATYPE* type, void* buffer, size_t* size) {
+  assert(id == device_id);
+  if (command == GenTL::DEVICE_INFO_DISPLAYNAME) {
+    *type = GenTL::INFO_DATATYPE_UINT32;
+    if (*size < sizeof(uint32_t)) return GenTL::GC_ERR_BUFFER_TOO_SMALL;
+    std::memset(buffer, 0xff, sizeof(uint32_t));
+    *size = sizeof(uint32_t);
+    return GenTL::GC_ERR_SUCCESS;
+  }
+  *type = GenTL::INFO_DATATYPE_STRING;
+  return copy_string(command == GenTL::DEVICE_INFO_VENDOR ? device_vendor : interface_id,
+                     static_cast<char*>(buffer), size);
+}
+
+}  // namespace
 
 int main() {
   using onegen::DeviceInfo;
@@ -20,6 +80,24 @@ int main() {
   const auto producer_ctis = onegen::defaults::producerCtis();
   assert(std::is_sorted(producer_ctis.begin(), producer_ctis.end()));
   assert(std::adjacent_find(producer_ctis.begin(), producer_ctis.end()) == producer_ctis.end());
+
+  auto producer = std::make_unique<onegen::Producer>();
+  producer->api.TLUpdateInterfaceList = update_interfaces;
+  producer->api.TLGetNumInterfaces = interface_count;
+  producer->api.TLGetInterfaceID = get_interface_id;
+  producer->api.TLOpenInterface = open_interface;
+  producer->api.IFUpdateDeviceList = update_devices;
+  producer->api.IFGetNumDevices = device_count;
+  producer->api.IFGetDeviceID = get_device_id;
+  producer->api.IFGetDeviceInfo = get_device_info;
+  std::vector<std::unique_ptr<onegen::Producer>> fake_producers;
+  fake_producers.push_back(std::move(producer));
+  const auto found = onegen::scan_devices(fake_producers, 0);
+  assert(found.size() == 1);
+  assert(found.front().if_id == interface_id);
+  assert(found.front().info.id == device_id);
+  assert(found.front().info.vendor == device_vendor);
+  assert(found.front().info.display_name.empty());
 
   const auto temp = std::filesystem::temp_directory_path()
       / ("onegen-cti-test-" + std::to_string(reinterpret_cast<std::uintptr_t>(&system)));
