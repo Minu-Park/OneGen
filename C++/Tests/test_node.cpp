@@ -13,6 +13,12 @@
 #include <filesystem>
 #include <fstream>
 #include <chrono>
+#include <cstdio>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 static const char kXml[] = R"XML(<?xml version="1.0" encoding="utf-8"?>
 <RegisterDescription
@@ -253,6 +259,8 @@ int main(int argc, char** argv) try {
 
   // The second, variable-length XML URL succeeds after the first URL fails.
   struct Port {
+    bool fail_read = false;
+    bool empty_read = false;
     bool short_read = false;
     std::uint8_t raw[4]{1, 2, 3, 4};
     std::string first = "invalid:unavailable";
@@ -284,6 +292,20 @@ int main(int argc, char** argv) try {
     *size = 7;
     return GenTL::GC_ERR_SUCCESS;
   };
+  static unsigned last_error_calls = 0;
+  producer.GCGetLastError = [](GenTL::GC_ERROR* code, char* text,
+      std::size_t* size) -> GenTL::GC_ERROR {
+    constexpr char message[] = "synthetic invalid handle";
+    ++last_error_calls;
+    *code = static_cast<GenTL::GC_ERROR>(GenTL::GC_ERR_INVALID_HANDLE);
+    if (*size < sizeof(message)) {
+      *size = sizeof(message);
+      return GenTL::GC_ERR_BUFFER_TOO_SMALL;
+    }
+    std::memcpy(text, message, sizeof(message));
+    *size = sizeof(message);
+    return GenTL::GC_ERR_SUCCESS;
+  };
   producer.GCReadPort = [](GenTL::PORT_HANDLE handle, std::uint64_t address,
       void* bytes, std::size_t* size) -> GenTL::GC_ERROR {
     auto& port = *static_cast<Port*>(handle);
@@ -293,6 +315,8 @@ int main(int argc, char** argv) try {
       return GenTL::GC_ERR_SUCCESS;
     }
     if (address != 4096 || *size != 4) return GenTL::GC_ERR_INVALID_PARAMETER;
+    if (port.fail_read) return GenTL::GC_ERR_INVALID_HANDLE;
+    if (port.empty_read) { *size = 0; return GenTL::GC_ERR_SUCCESS; }
     std::memcpy(bytes, port.raw, 4);
     return GenTL::GC_ERR_SUCCESS;
   };
@@ -307,6 +331,50 @@ int main(int argc, char** argv) try {
   auto raw = connected.find("Raw");
   assert(raw.kind() == onegen::NodeKind::Register);
   assert((raw.read_register() == std::vector<std::uint8_t>{1, 2, 3, 4}));
+  // Capture the real diagnostic and restore stderr before checking its contents.
+#ifdef _WIN32
+  const auto stderr_fd = _fileno(stderr);
+  const auto saved_stderr = _dup(stderr_fd);
+#else
+  const auto stderr_fd = fileno(stderr);
+  const auto saved_stderr = dup(stderr_fd);
+#endif
+  auto* diagnostic_file = std::tmpfile();
+  assert(saved_stderr >= 0 && diagnostic_file);
+  std::fflush(stderr);
+#ifdef _WIN32
+  assert(_dup2(_fileno(diagnostic_file), stderr_fd) == 0);
+#else
+  assert(dup2(fileno(diagnostic_file), stderr_fd) >= 0);
+#endif
+  port.fail_read = true;
+  connected.invalidate("Raw");
+  assert(throws([&] { raw.read_register(); }));
+  assert(last_error_calls == 1);
+  port.fail_read = false;
+  port.empty_read = true;
+  connected.invalidate("Raw");
+  assert(throws([&] { raw.read_register(); }));
+  assert(last_error_calls == 1);
+  port.empty_read = false;
+  std::fflush(stderr);
+#ifdef _WIN32
+  assert(_dup2(saved_stderr, stderr_fd) == 0);
+  _close(saved_stderr);
+#else
+  assert(dup2(saved_stderr, stderr_fd) >= 0);
+  close(saved_stderr);
+#endif
+  std::rewind(diagnostic_file);
+  std::string log;
+  char chunk[1024];
+  while (const auto count = std::fread(chunk, 1, sizeof(chunk), diagnostic_file))
+    log.append(chunk, count);
+  std::fclose(diagnostic_file);
+  assert(log.find("read_seq=2 since_last_success_ms=") != std::string::npos);
+  assert(log.find("producer_error=\"synthetic invalid handle\"") != std::string::npos);
+  assert(log.find("read_seq=3 since_last_success_ms=") != std::string::npos);
+  assert(log.find("producer_error=\"\"") != std::string::npos);
   assert(throws([&] { raw.write_register({1, 2}); }));
   raw.write_register({5, 6, 7, 8});
   assert((raw.read_register() == std::vector<std::uint8_t>{5, 6, 7, 8}));

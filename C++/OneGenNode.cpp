@@ -12,6 +12,7 @@
 #include <GenApi/EventAdapterGeneric.h>
 
 #include <cctype>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -32,12 +33,15 @@ public:
   Gentl* g = nullptr;
   GenTL::PORT_HANDLE port = nullptr;
   bool open = true;
+  std::atomic<std::uint64_t> read_sequence{0};
+  std::atomic<std::int64_t> last_success_ns{0};
 
   void Read(void* buffer, int64_t addr, int64_t length) override {
     if (addr < 0 || length < 0) throw GENERIC_EXCEPTION("IPort::Read: invalid range");
     if (!open || !g || !port) throw GENERIC_EXCEPTION("IPort::Read: closed");
     const auto requested = static_cast<size_t>(length);
     auto size = requested;
+    const auto sequence = read_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
     // GenTL treats piSize as in/out: a producer updates it with the number of
     // bytes it actually transferred. The Diaphus/Heliotis producer legitimately
     // returns fewer bytes than requested for variable-length register regions,
@@ -47,17 +51,36 @@ public:
     const auto started = std::chrono::steady_clock::now();
     const auto rc = g->GCReadPort(port, static_cast<uint64_t>(addr), buffer, &size);
     if (rc != GenTL::GC_ERR_SUCCESS || size == 0) {
+      const auto started_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          started.time_since_epoch()).count();
+      const auto last_ns = last_success_ns.load(std::memory_order_relaxed);
+      const auto since_last_success_ms = last_ns == 0 ? -1
+          : started_ns >= last_ns ? (started_ns - last_ns) / 1000000 : 0;
       const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - started).count();
+      char producer_error[1024]{};
+      auto producer_error_size = sizeof(producer_error) - 1;
+      GenTL::GC_ERROR producer_error_code = static_cast<GenTL::GC_ERROR>(GenTL::GC_ERR_ERROR);
+      GenTL::GC_ERROR last_error_rc = static_cast<GenTL::GC_ERROR>(GenTL::GC_ERR_ERROR);
+      if (rc != GenTL::GC_ERR_SUCCESS && g->GCGetLastError)
+        last_error_rc = g->GCGetLastError(
+            &producer_error_code, producer_error, &producer_error_size);
       stage_log("worker CPort::Read failed rc=%d port=%p addr=%lld requested=%lld returned=%zu"
-                " elapsed_ms=%lld (genuine producer read failure or empty transfer)",
+                " elapsed_ms=%lld read_seq=%llu since_last_success_ms=%lld"
+                " last_error_rc=%d producer_error_code=%d producer_error=\"%s\""
+                " (genuine producer read failure or empty transfer)",
                 static_cast<int>(rc), static_cast<void*>(port),
                 static_cast<long long>(addr), static_cast<long long>(length), size,
-                static_cast<long long>(elapsed_ms));
+                static_cast<long long>(elapsed_ms), static_cast<unsigned long long>(sequence),
+                static_cast<long long>(since_last_success_ms), static_cast<int>(last_error_rc),
+                static_cast<int>(producer_error_code), producer_error);
       throw GENERIC_EXCEPTION("IPort::Read failed");
     }
     if (size < requested)
       std::memset(static_cast<unsigned char*>(buffer) + size, 0, requested - size);
+    last_success_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count(),
+        std::memory_order_relaxed);
   }
   void Write(const void* buffer, int64_t addr, int64_t length) override {
     if (addr < 0 || length < 0) throw GENERIC_EXCEPTION("IPort::Write: invalid range");
