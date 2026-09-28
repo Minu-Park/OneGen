@@ -6,6 +6,28 @@
 
 int main()
 {
+  onegen::worker::Message message{onegen::worker::Operation::Frame};
+  message.session = 42;
+  assert(onegen::worker::decode(onegen::worker::encode(message)).session == 42);
+  onegen::InterfaceInfo iface{"id", "producer", "display", "vendor", "CXP"};
+  onegen::worker::Writer interface_writer;
+  onegen::worker::write(interface_writer, iface);
+  auto interface_bytes = interface_writer.take();
+  onegen::worker::Reader interface_reader(interface_bytes);
+  const auto iface_copy = onegen::worker::readInterfaceInfo(interface_reader);
+  assert(iface_copy.id == iface.id && iface_copy.vendor == iface.vendor && iface_copy.tl_type == iface.tl_type);
+  assert(interface_reader.empty());
+  onegen::DeviceInfo device;
+  device.id = "preferred"; device.interface_id = "board";
+  device.cti_candidates = {"a", "b"}; device.cti_candidate_ids = {"preferred", "alternate"};
+  device.cti_candidate_interfaces = {"board", "alternate-board"};
+  onegen::worker::Writer device_writer; onegen::worker::write(device_writer, device);
+  auto device_bytes = device_writer.take();
+  onegen::worker::Reader device_reader(device_bytes);
+  const auto device_copy = onegen::worker::readDeviceInfo(device_reader);
+  assert(device_copy.interface_id == "board" && device_copy.cti_candidate_ids[1] == "alternate");
+  assert(device_copy.cti_candidate_interfaces[1] == "alternate-board");
+  assert(device_reader.empty());
   onegen::FeatureNode feature;
   feature.kind = onegen::NodeKind::Register;
   feature.unit = "mm";

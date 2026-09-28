@@ -15,16 +15,77 @@ OneGenSourceController::~OneGenSourceController()
 {
   stop();
   setLease(nullptr);
+  for (auto& [id, child] : children_) child.controller->setLease(nullptr);
+}
+
+OneGenSourceController* OneGenSourceController::cameraController(const std::string& id, const std::string& label)
+{
+  OneGenSourceController* result;
+  {
+    std::lock_guard lock(mutex_);
+    if (const auto found = children_.find(id); found != children_.end()) return found->second.controller.get();
+    const auto index = next_source_index_++;
+    auto child = std::make_unique<OneGenSourceController>();
+    child->setFrameConsumer([this, index](SessionFrame&& frame, unsigned int) {
+      FrameConsumer consumer;
+      { std::lock_guard lock(mutex_); consumer = consumer_; }
+      if (consumer) consumer(std::move(frame), index);
+    });
+    result = child.get();
+    children_.emplace(id, Child{index, label, std::move(child)});
+  }
+  publishSourceDescriptors();
+  return result;
+}
+
+void OneGenSourceController::removeCameraController(const std::string& id)
+{
+  std::unique_ptr<OneGenSourceController> removed;
+  {
+    std::lock_guard lock(mutex_);
+    const auto found = children_.find(id);
+    if (found == children_.end()) return;
+    removed = std::move(found->second.controller);
+    children_.erase(found);
+    if (children_.empty()) next_source_index_ = 0;
+  }
+  removed.reset();
+  publishSourceDescriptors();
+}
+
+void OneGenSourceController::clearCameraControllers()
+{
+  std::map<std::string, Child> removed;
+  {
+    std::lock_guard lock(mutex_);
+    removed.swap(children_);
+    next_source_index_ = 0;
+  }
+  removed.clear();
+  publishSourceDescriptors();
+}
+
+std::vector<GraphicsSourceDescriptor> OneGenSourceController::sourceDescriptors() const
+{
+  std::lock_guard lock(mutex_);
+  std::vector<GraphicsSourceDescriptor> result;
+  for (const auto& [id, child] : children_) result.push_back({child.index, id, child.label});
+  return result;
 }
 
 void OneGenSourceController::setLease(onegen::worker::Lease* lease)
 {
-  std::lock_guard lock(mutex_);
+  std::unique_lock lock(mutex_);
   if (lease_ == lease) return;
+  auto old_gate = std::move(callback_gate_);
+  if (old_gate) old_gate->beginShutdown();
   if (lease_) {
     lease_->set_frame_callback({});
     lease_->set_error_callback({});
   }
+  lock.unlock();
+  if (old_gate) old_gate->waitForDrain();
+  lock.lock();
   lease_ = lease;
   rejected_frames_.store(0, std::memory_order_relaxed);
   incomplete_frames_.store(0, std::memory_order_relaxed);
@@ -34,10 +95,15 @@ void OneGenSourceController::setLease(onegen::worker::Lease* lease)
 void OneGenSourceController::bindLease()
 {
   if (!lease_) return;
+  callback_gate_ = std::make_unique<GraphicsFrameCallbackGate>();
+  const auto token = callback_gate_->token();
   const auto& info = lease_->info();
   const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
   lease_->set_frame_callback(
-      [this, sourceName](const onegen::Frame& source) { deliver(source, sourceName); });
+      [this, sourceName, token](const onegen::Frame& source) {
+        GraphicsFrameCallbackGate::Lease callback(token);
+        if (callback) deliver(source, sourceName);
+      });
   lease_->set_error_callback([model = info.model, serial = info.serial](const std::string_view error) {
     qWarning().noquote()
         << QStringLiteral("[GenICam] camera=%1 serial=%2; cause=%3")
@@ -48,6 +114,9 @@ void OneGenSourceController::bindLease()
 
 void OneGenSourceController::start()
 {
+  std::vector<OneGenSourceController*> children;
+  { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
+  for (auto* child : children) child->start();
   onegen::worker::Lease* lease = nullptr;
   {
     std::lock_guard lock(mutex_);
@@ -60,6 +129,9 @@ void OneGenSourceController::start()
 
 void OneGenSourceController::stop()
 {
+  std::vector<OneGenSourceController*> children;
+  { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
+  for (auto* child : children) child->stop();
   onegen::worker::Lease* lease = nullptr;
   {
     std::lock_guard lock(mutex_);
@@ -77,7 +149,11 @@ void OneGenSourceController::stop()
   }
 }
 
-bool OneGenSourceController::isGrabbing() const { return grabbing_; }
+bool OneGenSourceController::isGrabbing() const {
+  std::lock_guard lock(mutex_);
+  for (const auto& [id, child] : children_) if (child.controller->isGrabbing()) return true;
+  return grabbing_;
+}
 
 void OneGenSourceController::grabOne()
 {
@@ -137,7 +213,6 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
       }
       return;
     }
-    if (!consumer_) return;
     payload->metadata.sourceName = sourceName;
     SessionFrame frame;
     frame.payload = std::move(*payload);

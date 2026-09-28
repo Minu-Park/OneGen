@@ -1,5 +1,20 @@
 # Release Notes
 
+## Unreleased
+
+- Retain the current feature panel across discovery updates with the same producer-scoped target identity, including reordered lists and updated labels.
+- Show target names without role prefixes or icons; distinguish Devices and Interfaces with full-name tooltips and accessible role labels.
+- Preserve the empty feature tree for disconnected Interfaces and move the same panel beneath tabs only after connection succeeds.
+- Keep camera and Interface selectors sized by their available layout width; long discovery labels no longer inflate their size hints or popup width.
+- List all producer-scoped Interfaces and Devices explicitly; expose Interface settings and independent Device tabs without inferring hardware types or changing connections on tab selection.
+- Share the board Interface in one producer worker, route camera sessions with protocol v9, and preserve sibling acquisition when a camera closes.
+- Allow camera-less Interface settings/rescan, release temporary discovery handles, guard shared reconfiguration, and preserve producer-specific device IDs during fallback.
+- Preserve the original single-camera control row and one status bar for direct cameras; show tabs only after an Interface connects and remove drained camera presentation sources when changing targets.
+- Scope device identity to Producer/Interface/Device, preserve candidate InterfaceIDs, continue discovery after an individual Interface failure, and retire failed idle producer workers after an unsuccessful Interface open.
+- Remove manufacturer-specific CTI discovery, the pylon-only defaults API, physical-board alias inference, and adapter requirements for Interface connection; defer physical resource arbitration to the Producer/SDK.
+- Preserve opaque InterfaceIDs, including address-like strings; compare DeviceIDs exactly and obtain IP metadata only from verified GenTL SFNC selector features.
+- Reuse shared device control sizing, selector grouping, and flat tab panes; preserve the common rounded feature-tree frame, direct-camera layout, and board header background.
+
 ## v0.1.1
 
 - Read GenTL interface IDs, device IDs, and optional device strings with bounded retry when the producer reports a larger buffer; keep malformed optional metadata from hiding a discovered device.

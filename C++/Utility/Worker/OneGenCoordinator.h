@@ -18,6 +18,7 @@ namespace onegen::worker {
 
 struct DiscoveryResult {
   std::vector<DeviceInfo> devices;
+  std::vector<InterfaceInfo> interfaces;
   std::vector<std::string> failures;
   bool completed = false;
   std::size_t finished_producers = 0;
@@ -33,7 +34,7 @@ public:
   using InvalidateFn = std::function<void(int, std::string_view)>;
 
   Lease(std::shared_ptr<Connection> connection, DeviceInfo device, std::string identity,
-        Coordinator* owner);
+        Coordinator* owner, std::uint32_t session = 0);
   ~Lease();
   Lease(const Lease&) = delete;
   Lease& operator=(const Lease&) = delete;
@@ -70,6 +71,7 @@ private:
   DeviceInfo device_;
   std::string identity_;
   Coordinator* owner_ = nullptr;
+  std::uint32_t session_ = 0;
 };
 
 class Coordinator {
@@ -82,13 +84,29 @@ public:
    */
   Coordinator(std::filesystem::path worker_executable,
               std::filesystem::path cti_root = {},
-              std::chrono::milliseconds probe_timeout = std::chrono::milliseconds{10000});
+              std::chrono::milliseconds probe_timeout = std::chrono::milliseconds{10000},
+              Connection::ClaimFn claim = {});
   ~Coordinator();
 
-  /** Probe GenTL producers concurrently in isolation and merge duplicate physical devices. */
+  /** Probes producers in isolation and merges only identical scoped Device identities. */
   /** Report cumulative results on the calling thread as each producer finishes. */
   DiscoveryResult discover(ProgressFn progress = {});
-  /** Merge records by transport plus serial, IP, or stable GenTL device ID. */
+  /** Pins one producer-scoped Interface without requiring a device or vendor adapter. */
+  void open_interface(const InterfaceInfo& info);
+  /** Releases one producer-scoped Interface after its Device leases are closed. */
+  void close_interface(const InterfaceInfo& info);
+  /** Rescans the selected Interface while preserving existing Device sessions. */
+  std::vector<DeviceInfo> rescan_interface(const InterfaceInfo& info);
+  /** Lists interfaces without requiring a camera lease. */
+  std::vector<InterfaceInfo> interfaces();
+  /** Reads an interface's complete feature tree with no device open. */
+  FeatureNode interface_features(const InterfaceInfo& info);
+  /** Reads a selected interface feature. */
+  FeatureNode read_interface(const InterfaceInfo& info, std::string_view name);
+  /** Writes while the selected Interface has no active or opening Device leases. */
+  FeatureNode write_interface(const InterfaceInfo& info, std::string_view name,
+                              std::string_view operation, std::string_view value);
+  /** Deduplicates only identical producer/interface/device identities. */
   static std::vector<DeviceInfo> merge(std::vector<DeviceInfo> devices);
   std::unique_ptr<Lease> open(const DeviceInfo& device);
   void shutdown();
@@ -98,16 +116,22 @@ private:
   std::shared_ptr<Connection> connection(const std::string& cti, const std::string& device = {});
   /** Retains successfully closed workers for rediscovery-free reconnects. */
   void release(const std::string& identity, const std::string& cti, bool reusable,
-               Connection* dying = nullptr);
+               Connection* dying = nullptr, std::uint32_t session = 0);
 
   std::filesystem::path worker_executable_;
   std::filesystem::path cti_root_;
   std::chrono::milliseconds probe_timeout_;
+  Connection::ClaimFn claim_;
+  std::unordered_map<std::string, InterfaceInfo> interface_sessions_;
+  std::uint32_t next_session_ = 1;
+  std::unordered_map<std::string, std::uint32_t> session_channels_;
+  std::unordered_map<std::string, std::vector<InterfaceInfo>> interface_inventory_;
   std::mutex mutex_;
   std::mutex discovery_mutex_;
   std::unordered_map<std::string, std::shared_ptr<Connection>> connections_;
   std::unordered_map<std::string, std::shared_ptr<Connection>> device_connections_;
   std::unordered_set<std::string> leased_;
+  std::unordered_map<std::string, std::string> leased_interfaces_;
 };
 
 } // namespace onegen::worker

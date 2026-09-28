@@ -1,6 +1,6 @@
 #include "DevicePluginTemplate.h"
 
-#include "Utility/Qt/QOneGenWidget.h"
+#include "Utility/Qt/QOneGenDeviceWidget.h"
 #include "OneGenCoordinator.h"
 #include "OneGenSourceController.h"
 #include "OneGen.h"
@@ -22,8 +22,12 @@ QVariantList toDiscoveryData(const std::vector<onegen::DeviceInfo>& devices)
   QVariantList values;
   for (const auto& device : devices) {
     QStringList candidates;
+    QStringList candidate_ids;
+    QStringList candidate_interfaces;
     for (const auto& cti : device.cti_candidates)
       candidates.append(QString::fromStdString(cti));
+    for (const auto& id : device.cti_candidate_ids) candidate_ids.append(QString::fromStdString(id));
+    for (const auto& id : device.cti_candidate_interfaces) candidate_interfaces.append(QString::fromStdString(id));
     values.append(QVariantMap{
         {QStringLiteral("id"), QString::fromStdString(device.id)},
         {QStringLiteral("displayName"), QString::fromStdString(device.display_name)},
@@ -32,7 +36,10 @@ QVariantList toDiscoveryData(const std::vector<onegen::DeviceInfo>& devices)
         {QStringLiteral("ip"), QString::fromStdString(device.ip)},
         {QStringLiteral("tlType"), QString::fromStdString(device.tl_type)},
         {QStringLiteral("ctiPath"), QString::fromStdString(device.cti_path)},
-        {QStringLiteral("ctiCandidates"), candidates}});
+        {QStringLiteral("ctiCandidates"), candidates},
+        {QStringLiteral("ctiCandidateIds"), candidate_ids},
+        {QStringLiteral("ctiCandidateInterfaces"), candidate_interfaces},
+        {QStringLiteral("interfaceId"), QString::fromStdString(device.interface_id)}});
   }
   return values;
 }
@@ -52,6 +59,11 @@ std::vector<onegen::DeviceInfo> fromDiscoveryData(const QVariantList& values)
     device.cti_path = item.value(QStringLiteral("ctiPath")).toString().toStdString();
     for (const auto& candidate : item.value(QStringLiteral("ctiCandidates")).toStringList())
       device.cti_candidates.push_back(candidate.toStdString());
+    for (const auto& id : item.value(QStringLiteral("ctiCandidateIds")).toStringList())
+      device.cti_candidate_ids.push_back(id.toStdString());
+    for (const auto& id : item.value(QStringLiteral("ctiCandidateInterfaces")).toStringList())
+      device.cti_candidate_interfaces.push_back(id.toStdString());
+    device.interface_id = item.value(QStringLiteral("interfaceId")).toString().toStdString();
     devices.push_back(std::move(device));
   }
   return devices;
@@ -132,7 +144,7 @@ public:
   std::vector<DevicePluginDock> createDockWidgets(QWidget* parent) override
   {
     if (!widget_) {
-      widget_ = new QOneGenWidget(
+      widget_ = new QOneGenDeviceWidget(
           coordinator_, controller_.get(), devices_,
           [coordinator = coordinator_, startup =
               std::make_shared<std::shared_ptr<onegen::worker::StartupDiscovery>>(std::move(startup_))]
@@ -163,7 +175,7 @@ private:
   std::vector<onegen::DeviceInfo> devices_;
   std::shared_ptr<onegen::worker::StartupDiscovery> startup_;
   std::unique_ptr<OneGenSourceController> controller_;
-  QPointer<QOneGenWidget> widget_;
+  QPointer<QOneGenDeviceWidget> widget_;
   QString title_ = QStringLiteral("GenICam Session");
   std::function<void(const QString&)> title_changed_;
 };
@@ -239,6 +251,7 @@ private:
       if (!std::filesystem::is_regular_file(worker))
         throw std::runtime_error("OneGenWorker is missing from the GenICam package.");
       coordinator_ = std::make_shared<onegen::worker::Coordinator>(worker);
+
     }
     return coordinator_;
   }

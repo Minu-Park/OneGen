@@ -1,4 +1,5 @@
 #include "OneGenCoordinator.h"
+#include "FakeWorker.h"
 #include "OneGenWorkerClient.h"
 #include "OneGenWorkerMessages.h"
 #include "Utility/PlaygroundAdapter/Plugin/StartupDiscovery.h"
@@ -13,6 +14,7 @@
 #include <iostream>
 #include <thread>
 #include <set>
+#include <map>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -22,69 +24,36 @@
 // One executable also acts as a hardware-free protocol peer for completion-order checks.
 std::atomic<int> startup_diagnostics{0};
 
-int fakeWorker(const std::filesystem::path& cti)
-{
-  std::ofstream(cti.string() + ".starts", std::ios::app) << "start\n";
-  using namespace onegen::worker;
-#ifdef _WIN32
-  _setmode(_fileno(stdin), _O_BINARY);
-  _setmode(_fileno(stdout), _O_BINARY);
-#endif
-  std::array<std::byte, 4> header;
-  std::string opened_device;
-  int probes = 0;
-  while (std::cin.read(reinterpret_cast<char*>(header.data()), header.size())) {
-    const auto size = frameSize(header);
-    if (size > maximum_message_size) return 1;
-    std::vector<std::byte> bytes(size);
-    if (!std::cin.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) return 1;
-    const auto request = decode(bytes);
-    Writer payload;
-    if (request.operation == Operation::Open) {
-      Reader input(request.payload);
-      opened_device = input.string();
-    } else if (request.operation == Operation::Close) opened_device.clear();
-    else if (request.operation == Operation::ListStreams) {
-      payload.scalar(std::uint32_t{1});
-      payload.scalar(std::uint32_t{0});
-      payload.string(opened_device);
-    }
-    if (request.operation == Operation::Probe) {
-      ++probes;
-      const auto diagnostic = encode({Operation::Error, 0, false, "Interface XML test failure"});
-      const auto diagnostic_header = frameSize(static_cast<std::uint32_t>(diagnostic.size()));
-      std::cout.write(reinterpret_cast<const char*>(diagnostic_header.data()), diagnostic_header.size());
-      std::cout.write(reinterpret_cast<const char*>(diagnostic.data()), diagnostic.size());
-      std::cout.flush();
-      const bool slow = cti.parent_path().filename() == "vendor-a";
-      if (cti.stem() == "Heartbeat") std::this_thread::sleep_for(std::chrono::seconds{6});
-      if (slow) std::this_thread::sleep_for(std::chrono::seconds{1});
-      if (cti.stem() == "Retry" && probes < 2) {
-        payload.scalar(std::uint32_t{0});
-      } else {
-        onegen::DeviceInfo device;
-        device.id = slow ? "slow" : "fast";
-        device.serial = device.id;
-        device.tl_type = "TEST";
-        device.cti_path = cti.string();
-        payload.scalar(std::uint32_t{1});
-        write(payload, device);
-      }
-    }
-    const auto body = encode({request.operation, request.id, true, {}, payload.take()});
-    const auto response_header = frameSize(static_cast<std::uint32_t>(body.size()));
-    std::cout.write(reinterpret_cast<const char*>(response_header.data()), response_header.size());
-    std::cout.write(reinterpret_cast<const char*>(body.data()), body.size());
-    std::cout.flush();
-    if (request.operation == Operation::Shutdown) return 0;
-  }
-  return 0;
-}
 
 int main(int argc, char** argv)
 {
   QCoreApplication application(argc, argv);
   if (argc == 3 && std::string_view(argv[1]) == "--cti") return fakeWorker(argv[2]);
+  if (argc == 6 && std::string_view(argv[1]) == "--profile-interface") {
+    try {
+      const std::string id = argv[5];
+      onegen::worker::Coordinator coordinator(argv[2], {}, std::chrono::seconds{1});
+      bool connected = false;
+      for (int candidate = 3; candidate <= 4; ++candidate) {
+        const onegen::InterfaceInfo info{id, std::filesystem::weakly_canonical(argv[candidate]).string()};
+        try {
+          coordinator.open_interface(info);
+          std::cout << "Interface candidate opened: " << info.cti_path << '\n';
+          std::cout << "Feature root: " << coordinator.interface_features(info).name
+                    << ", cameras: " << coordinator.rescan_interface(info).size() << '\n';
+          coordinator.close_interface(info);
+          coordinator.open_interface(info); coordinator.close_interface(info);
+          connected = true; break;
+        } catch (const std::exception& error) {
+          std::cout << "Interface candidate rejected: " << error.what() << '\n';
+        }
+      }
+      coordinator.shutdown();
+      if (!connected) throw std::runtime_error("No interface candidate connected.");
+      std::cout << "Producer fallback, settings/rescan, close and reconnect passed.\n";
+      return 0;
+    } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+  }
   if ((argc == 5 || argc == 6)
       && (std::string_view(argv[1]) == "--profile-connect" || std::string_view(argv[1]) == "--profile-single")) {
     try {
@@ -198,9 +167,13 @@ int main(int argc, char** argv)
   second.id = "second";
   second.serial = "456";
   const auto merged = onegen::worker::Coordinator::merge({first, preferred, second});
-  assert(merged.size() == 2);
+  assert(merged.size() == 3);
   assert(merged.front().id == "preferred");
-  assert(merged.front().cti_candidates.size() == 2);
+  assert(merged.front().cti_candidates.size() == 1);
+  auto scoped = first;
+  scoped.interface_id = "another-board";
+  assert(onegen::worker::Coordinator::merge({first, scoped}).size() == 2);
+  assert(onegen::worker::Coordinator::merge({first, first}).size() == 1);
 
   const auto root = std::filesystem::temp_directory_path() /
       ("onegen-worker-ctis-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -263,6 +236,7 @@ int main(int argc, char** argv)
     auto other = *fast;
     other.id = "fast-secondary";
     other.serial = other.id;
+    other.cti_candidate_ids = {other.id};
     auto second_camera = progressive.open(other);
     assert(first_camera->data_streams().front().id == "fast");
     assert(second_camera->data_streams().front().id == "fast-secondary");
@@ -316,6 +290,90 @@ int main(int argc, char** argv)
     attached.set_error_callback({});
   }
 
+  // A shared board worker keeps each camera's requests and callbacks independent.
+  {
+    const auto boards = root / "shared-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "Board.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator shared(argv[0], boards, 100ms);
+    const auto scan = shared.discover();
+    assert(scan.interfaces.size() == 1);
+    const auto board = scan.interfaces.front();
+    shared.open_interface(board);
+    bool duplicate_rejected = false;
+    try { shared.open_interface(board); } catch (...) { duplicate_rejected = true; }
+    assert(duplicate_rejected);
+    const auto cameras = shared.rescan_interface(board);
+    assert(cameras.size() == 2);
+    auto first = shared.open(cameras[0]);
+    auto second = shared.open(cameras[1]);
+    assert(first->data_streams()[0].id == "channel-a");
+    assert(second->data_streams()[0].id == "channel-b");
+    std::atomic<int> a{0}, b{0};
+    first->set_frame_callback([&](const auto&) { ++a; });
+    second->set_frame_callback([&](const auto&) { ++b; });
+    first->live(); second->live(); first->trigger(); second->trigger();
+    const auto wait_frames = [&](int expected_a, int expected_b) {
+      const auto deadline = std::chrono::steady_clock::now() + 2s;
+      while ((a != expected_a || b != expected_b) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(1ms);
+      assert(a == expected_a && b == expected_b);
+    };
+    wait_frames(1, 1);
+    bool write_rejected = false, release_rejected = false;
+    try { shared.write_interface(board, "Feature", "set", "1"); } catch (...) { write_rejected = true; }
+    try { shared.close_interface(board); } catch (...) { release_rejected = true; }
+    assert(write_rejected && release_rejected);
+    first.reset();
+    assert(second->data_streams()[0].id == "channel-b");
+    second->trigger(); wait_frames(1, 2);
+    assert(shared.rescan_interface(board).size() == 2);
+    second->trigger(); wait_frames(1, 3);
+    second.reset();
+    shared.write_interface(board, "Feature", "set", "1");
+    shared.close_interface(board);
+    shared.open_interface(board); shared.close_interface(board);
+    std::ifstream starts(cti.string() + ".starts");
+    std::size_t count = 0; std::string line;
+    while (std::getline(starts, line)) ++count;
+    assert(count == 1); // Both cameras used the original board worker.
+    shared.shutdown();
+  }
+  // Empty interfaces remain selectable and configurable without a camera lease.
+  {
+    const auto boards = root / "empty-board";
+    std::filesystem::create_directories(boards);
+    std::ofstream(boards / "EmptyBoard.cti").put('\0');
+    onegen::worker::Coordinator empty_board(argv[0], boards, 100ms);
+    const auto scan = empty_board.discover();
+    assert(scan.devices.empty() && scan.failures.empty() && scan.interfaces.size() == 1);
+    empty_board.open_interface(scan.interfaces[0]);
+    assert(empty_board.rescan_interface(scan.interfaces[0]).empty());
+    assert(empty_board.interface_features(scan.interfaces[0]).name == "Root");
+    empty_board.write_interface(scan.interfaces[0], "Feature", "set", "1");
+    empty_board.close_interface(scan.interfaces[0]);
+    empty_board.shutdown();
+  }
+  // A failed native open must release its idle worker before another producer is tried.
+  {
+    const auto boards = root / "failed-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "FailBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator failed(argv[0], boards, 100ms);
+    const auto board = failed.discover().interfaces.front();
+    for (int retry = 0; retry < 2; ++retry) {
+      bool rejected = false;
+      try { failed.open_interface(board); } catch (const std::exception&) { rejected = true; }
+      assert(rejected);
+    }
+    std::ifstream starts(cti.string() + ".starts");
+    std::size_t count = 0; std::string line;
+    while (std::getline(starts, line)) ++count;
+    assert(count == 2);
+    failed.shutdown();
+  }
   std::filesystem::remove_all(root);
   std::cout << "test_worker ok\n";
 }

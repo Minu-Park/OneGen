@@ -21,6 +21,8 @@ public:
   ~Camera();
 
   void open(std::string_view query);
+  /** Opens an enumerated device using its complete GenTL hierarchy identity. */
+  void open(const DeviceInfo& device);
   void close();
   bool is_open() const;
 
@@ -50,6 +52,7 @@ public:
   void poll_features(std::int64_t elapsed_ms);
 
 private:
+  void open_impl(std::string_view query, std::string_view producer, std::string_view interface_id);
   friend class OneGen;
   explicit Camera(OneGen* owner);
   struct Impl;

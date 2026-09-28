@@ -54,45 +54,50 @@ struct Connection::Impl {
   std::thread io;
   std::thread delivery;
   mutable std::mutex mutex;
+  std::mutex close_mutex;
   std::condition_variable cv;
   std::queue<Message> outgoing;
-  std::queue<Frame> frames;
+  std::queue<std::pair<std::uint32_t, Frame>> frames;
   std::map<std::uint32_t, Message> replies;
   std::uint32_t next_id = 1;
   bool running = true;
   bool started = false;
   std::string start_error;
   std::string close_error;
-  FrameFn on_frame;
-  ErrorFn on_error;
-  InvalidateFn on_invalidate;
+  struct Callbacks { FrameFn frame; ErrorFn error; InvalidateFn invalidate; };
+  std::map<std::uint32_t, Callbacks> callbacks;
+  ClaimFn claim;
+  std::map<std::string, std::shared_ptr<void>> interface_claims;
 #ifdef _WIN32
   HANDLE job = nullptr;
 #endif
 };
 
-Connection::Connection(std::filesystem::path worker_executable, std::filesystem::path cti)
+Connection::Connection(std::filesystem::path worker_executable, std::filesystem::path cti, ClaimFn claim)
     : impl_(std::make_unique<Impl>())
 {
   impl_->executable = std::move(worker_executable);
   impl_->cti = std::move(cti);
+  impl_->claim = std::move(claim);
   impl_->delivery = std::thread([this] {
     while (true) {
       Frame frame;
+      std::uint32_t session = 0;
       FrameFn callback;
       {
         std::unique_lock lock(impl_->mutex);
         impl_->cv.wait(lock, [&] { return !impl_->running || !impl_->frames.empty(); });
         if (!impl_->running && impl_->frames.empty()) return;
-        frame = std::move(impl_->frames.front());
+        session = impl_->frames.front().first;
+        frame = std::move(impl_->frames.front().second);
         impl_->frames.pop();
-        callback = impl_->on_frame;
+        callback = impl_->callbacks[session].frame;
         if (!impl_->running) callback = {};
       }
-      if (callback) callback(frame);
+      try { if (callback) callback(frame); } catch (...) { qWarning() << "[GenICam] frame consumer failed"; }
       {
         std::lock_guard lock(impl_->mutex);
-        if (impl_->running) impl_->outgoing.push({Operation::FrameAck});
+        if (impl_->running) { Message ack{Operation::FrameAck}; ack.session = session; impl_->outgoing.push(std::move(ack)); }
       }
     }
   });
@@ -108,8 +113,9 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
                        worker_runtime + separator + producer_runtime + separator
                            + environment.value(QStringLiteral("PATH")));
     process.setProcessEnvironment(environment);
-    process.start(QString::fromStdString(impl_->executable.string()),
-                  {QStringLiteral("--cti"), QString::fromStdString(impl_->cti.string())});
+    QStringList arguments{QStringLiteral("--cti"), QString::fromStdString(impl_->cti.string())};
+    if (impl_->claim) arguments.append(QStringLiteral("--resource-claims"));
+    process.start(QString::fromStdString(impl_->executable.string()), arguments);
     {
       std::lock_guard lock(impl_->mutex);
       impl_->started = true;
@@ -172,14 +178,26 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         if (diagnostic.size() > 65536) diagnostic.remove(0, diagnostic.size() - 65536);
         Message message;
         while (takeMessage(buffer, message)) {
-          if (message.operation == Operation::Frame) {
+          if (message.operation == Operation::ClaimInterface) {
+            Reader reader(message.payload);
+            const auto info = readInterfaceInfo(reader);
+            const auto& id = info.id;
+            Message reply{Operation::ClaimInterface};
+            try { impl_->interface_claims[id] = impl_->claim ? impl_->claim(info) : std::shared_ptr<void>{}; }
+            catch (const std::exception& error) { reply.success = false; reply.error = std::string("Interface resource busy: ") + error.what(); }
+            catch (...) { reply.success = false; reply.error = "Interface resource claim failed."; }
+            process.write(framed(std::move(reply)));
+          } else if (message.operation == Operation::ReleaseInterfaceClaim) {
+            Reader reader(message.payload);
+            impl_->interface_claims.erase(reader.string());
+          } else if (message.operation == Operation::Frame) {
             Reader reader(message.payload);
             std::lock_guard lock(impl_->mutex);
-            impl_->frames.push(readFrame(reader));
+            impl_->frames.emplace(message.session, readFrame(reader));
             impl_->cv.notify_all();
           } else if (message.operation == Operation::Error) {
             ErrorFn callback;
-            { std::lock_guard lock(impl_->mutex); callback = impl_->on_error; }
+            { std::lock_guard lock(impl_->mutex); callback = impl_->callbacks[message.session].error; }
             if (callback) callback(message.error);
             else qWarning().noquote() << "[GenICam]" << QString::fromStdString(message.error);
           } else if (message.operation == Operation::Invalidate) {
@@ -187,7 +205,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
             const auto module = reader.scalar<std::int32_t>();
             const auto name = reader.string();
             InvalidateFn callback;
-            { std::lock_guard lock(impl_->mutex); callback = impl_->on_invalidate; }
+            { std::lock_guard lock(impl_->mutex); callback = impl_->callbacks[message.session].invalidate; }
             if (callback) callback(module, name);
           } else {
             std::lock_guard lock(impl_->mutex);
@@ -210,6 +228,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
       process.kill();
       process.waitForFinished(5000);
     }
+    impl_->interface_claims.clear();
     {
       diagnostic.append(process.readAllStandardError());
       QString last_error;
@@ -251,6 +270,12 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
 
 Connection::~Connection()
 {
+  close();
+}
+
+void Connection::close()
+{
+  std::lock_guard closing(impl_->close_mutex);
 #ifndef _WIN32
   try { request(Operation::Shutdown, {}, std::chrono::milliseconds{500}); } catch (...) {}
 #else
@@ -267,7 +292,7 @@ Connection::~Connection()
 }
 
 std::vector<std::byte> Connection::request(Operation operation, std::vector<std::byte> payload,
-                                            const std::chrono::milliseconds timeout)
+                                            const std::chrono::milliseconds timeout, std::uint32_t session)
 {
   std::uint32_t id;
   {
@@ -278,7 +303,7 @@ std::vector<std::byte> Connection::request(Operation operation, std::vector<std:
                                    : impl_->close_error);
     }
     id = impl_->next_id++;
-    impl_->outgoing.push({operation, id, true, {}, std::move(payload)});
+    impl_->outgoing.push({operation, id, true, {}, std::move(payload), session});
   }
   std::unique_lock lock(impl_->mutex);
   if (!impl_->cv.wait_for(lock, timeout, [&] { return impl_->replies.count(id) || !impl_->running; }))
@@ -301,11 +326,11 @@ bool Connection::alive() const
   return impl_->running;
 }
 
-void Connection::set_frame_callback(FrameFn callback)
-{ std::lock_guard lock(impl_->mutex); impl_->on_frame = std::move(callback); }
-void Connection::set_error_callback(ErrorFn callback)
-{ std::lock_guard lock(impl_->mutex); impl_->on_error = std::move(callback); }
-void Connection::set_invalidate_callback(InvalidateFn callback)
-{ std::lock_guard lock(impl_->mutex); impl_->on_invalidate = std::move(callback); }
+void Connection::set_frame_callback(FrameFn callback, std::uint32_t session)
+{ std::lock_guard lock(impl_->mutex); impl_->callbacks[session].frame = std::move(callback); }
+void Connection::set_error_callback(ErrorFn callback, std::uint32_t session)
+{ std::lock_guard lock(impl_->mutex); impl_->callbacks[session].error = std::move(callback); }
+void Connection::set_invalidate_callback(InvalidateFn callback, std::uint32_t session)
+{ std::lock_guard lock(impl_->mutex); impl_->callbacks[session].invalidate = std::move(callback); }
 
 } // namespace onegen::worker

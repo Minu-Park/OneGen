@@ -157,6 +157,8 @@ if(ONEGEN_BUILD_QT_WIDGET)
     message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires Playground::DevicePlugin.")
   endif()
   add_library(OneGenQtWidget STATIC
+    Utility/Qt/QOneGenDeviceWidget.cpp
+    Utility/Qt/QOneGenDeviceWidget.h
     Utility/Qt/QOneGenWidget.cpp
     Utility/Qt/QOneGenWidget.h
     Utility/Qt/NumericFeatureEditor.h

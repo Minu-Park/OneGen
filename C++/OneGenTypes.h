@@ -21,6 +21,20 @@ struct DeviceInfo {
   std::string tl_type;
   std::string cti_path;
   std::vector<std::string> cti_candidates;
+  /** Producer-specific IDs aligned with cti_candidates. */
+  std::vector<std::string> cti_candidate_ids;
+  /** Producer-specific InterfaceIDs aligned with cti_candidates. */
+  std::vector<std::string> cti_candidate_interfaces;
+  std::string interface_id;
+};
+
+/** Producer-reported interface identity, independent of device presence. */
+struct InterfaceInfo {
+  std::string id;
+  std::string cti_path;
+  std::string display_name;
+  std::string vendor;
+  std::string tl_type;
 };
 
 struct DataStreamInfo {

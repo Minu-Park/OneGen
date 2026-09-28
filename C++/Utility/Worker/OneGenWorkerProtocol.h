@@ -12,13 +12,15 @@
 
 namespace onegen::worker {
 
-inline constexpr std::uint32_t protocol_version = 6;
+inline constexpr std::uint32_t protocol_version = 9;
 inline constexpr std::uint32_t maximum_message_size = 256U * 1024U * 1024U;
 
 enum class Operation : std::uint8_t {
   Probe, Open, Close, ListStreams, SelectStream, DescribeFeatures, NodeRead, NodeWrite,
   GrabOne, StartLive, StopLive, Trigger, Shutdown, Frame, Error, Invalidate, FrameAck,
   PollFeatures, RegisterRead, RegisterWrite, SaveFeatures, LoadFeatures,
+  ListInterfaces, InterfaceFeatures, InterfaceRead, InterfaceWrite, ReleaseInterfaces,
+  ClaimInterface, ReleaseInterfaceClaim, OpenInterface, ProbeInterface, CloseInterface,
 };
 
 struct Message {
@@ -27,6 +29,7 @@ struct Message {
   bool success = true;
   std::string error;
   std::vector<std::byte> payload;
+  std::uint32_t session = 0;
 };
 
 class Writer {
@@ -115,6 +118,7 @@ inline std::vector<std::byte> encode(Message message)
   out.scalar(message.id);
   out.scalar(message.success);
   out.string(message.error);
+  out.scalar(message.session);
   out.bytes(message.payload.data(), message.payload.size());
   return out.take();
 }
@@ -129,6 +133,7 @@ inline Message decode(const std::vector<std::byte>& bytes)
   message.id = in.scalar<std::uint32_t>();
   message.success = in.scalar<bool>();
   message.error = in.string();
+  message.session = in.scalar<std::uint32_t>();
   message.payload = in.remaining();
   return message;
 }

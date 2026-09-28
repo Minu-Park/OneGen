@@ -10,8 +10,11 @@
 #include <condition_variable>
 #include <cstdio>
 #include <filesystem>
+#include <exception>
 #include <iostream>
 #include <mutex>
+#include <queue>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -32,11 +35,8 @@ using onegen::worker::Reader;
 using onegen::worker::Writer;
 
 std::mutex output_mutex;
-std::mutex ack_mutex;
-std::condition_variable ack_ready;
-bool frame_acked = false;
-bool stopping = false;
 std::FILE* protocol_output = nullptr;
+std::queue<Message> deferred_requests;
 
 bool readExact(void* destination, std::size_t size)
 {
@@ -66,6 +66,29 @@ void send(Message message)
       || std::fwrite(body.data(), 1, body.size(), protocol_output) != body.size()
       || std::fflush(protocol_output) != 0)
     throw std::runtime_error("Could not write OneGen worker response.");
+}
+
+/** Camera acquisition state scoped to a channel in the shared producer worker. */
+struct CameraSession {
+  onegen::Camera* camera = nullptr;
+  std::thread grab;
+  std::mutex ack_mutex;
+  std::condition_variable ack_ready;
+  bool frame_acked = false;
+  bool stopping = false;
+  void stop() {
+    { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
+    std::exception_ptr error;
+    try { if (camera) camera->stop(); } catch (...) { error = std::current_exception(); }
+    if (grab.joinable()) grab.join();
+    if (error) std::rethrow_exception(error);
+  }
+  ~CameraSession() { try { stop(); if (camera) camera->close(); } catch (...) {} }
+};
+
+void sendFor(std::uint32_t session, Message message) {
+  message.session = session;
+  send(std::move(message));
 }
 
 int moduleIndex(onegen::Camera::Module module)
@@ -122,43 +145,73 @@ int main(int argc, char** argv)
     const auto cti = ctiArgument(argc, argv);
     onegen::OneGen system;
     system.loadCti(cti);
-    onegen::Camera* camera = nullptr;
-    std::thread grab_thread;
-
-    const auto joinGrab = [&] {
-      if (grab_thread.joinable()) grab_thread.join();
-    };
-    const auto abortGrab = [&] {
-      if (camera) camera->stop();
-      joinGrab();
-    };
-
-    const auto ensureCamera = [&]() -> onegen::Camera& {
-      if (!camera) camera = &system.addCamera();
-      return *camera;
-    };
-    const auto wireInvalidates = [&](onegen::Camera& opened) {
-      for (const auto module : {onegen::Camera::Module::RemoteDevice,
-                                onegen::Camera::Module::DataStream,
-                                onegen::Camera::Module::Device,
-                                onegen::Camera::Module::Interface,
-                                      onegen::Camera::Module::System}) {
-        opened.features(module).set_invalidate_callback([index = moduleIndex(module)](std::string_view name) {
-          // Runs inside a GenApi/producer invalidate dispatch that must not see
-          // an exception. Drop the notification if the host pipe write fails.
-          try {
-            Writer out;
-            out.scalar(index);
-            out.string(name);
-            send({Operation::Invalidate, 0, true, {}, out.take()});
-          } catch (...) {
+    if (std::any_of(argv + 1, argv + argc, [](const char* arg) {
+          return std::string_view(arg) == "--resource-claims";
+        })) {
+      system.set_interface_claim_callback([](const onegen::InterfaceInfo& info) -> std::shared_ptr<void> {
+        Writer out;
+        onegen::worker::write(out, info);
+        send({Operation::ClaimInterface, 0, true, {}, out.take()});
+        Message reply;
+        while (readMessage(reply)) {
+          if (reply.operation != Operation::ClaimInterface) {
+            deferred_requests.push(std::move(reply));
+            continue;
           }
-        });
-      }
-    };
-
+          if (!reply.success) throw std::runtime_error(reply.error);
+          return std::shared_ptr<void>(new std::string(info.id), [](void* value) {
+            std::unique_ptr<std::string> id(static_cast<std::string*>(value));
+            try {
+              Writer out;
+              out.string(*id);
+              send({Operation::ReleaseInterfaceClaim, 0, true, {}, out.take()});
+            } catch (...) {}
+          });
+        }
+        throw std::runtime_error("Consumer disconnected during interface claim.");
+      });
+    }
+    std::map<std::uint32_t, std::unique_ptr<CameraSession>> sessions;
     Message request;
-    while (readMessage(request)) {
+    while (!deferred_requests.empty() || readMessage(request)) {
+      if (!deferred_requests.empty()) {
+        request = std::move(deferred_requests.front());
+        deferred_requests.pop();
+      }
+      auto& session_ptr = sessions[request.session];
+      if (!session_ptr) session_ptr = std::make_unique<CameraSession>();
+      auto& channel = *session_ptr;
+      auto& camera = channel.camera;
+      auto& grab_thread = channel.grab;
+      auto& ack_mutex = channel.ack_mutex;
+      auto& ack_ready = channel.ack_ready;
+      auto& frame_acked = channel.frame_acked;
+      auto& stopping = channel.stopping;
+      const auto abortGrab = [&channel] { channel.stop(); };
+      const auto ensureCamera = [&]() -> onegen::Camera& {
+        if (!camera) camera = &system.addCamera();
+        return *camera;
+      };
+      const auto wireInvalidates = [&](onegen::Camera& opened) {
+        for (const auto module : {onegen::Camera::Module::RemoteDevice,
+                                  onegen::Camera::Module::DataStream,
+                                  onegen::Camera::Module::Device,
+                                  onegen::Camera::Module::Interface,
+                                        onegen::Camera::Module::System}) {
+          opened.features(module).set_invalidate_callback([session = request.session, index = moduleIndex(module)](std::string_view name) {
+            // Runs inside a GenApi/producer invalidate dispatch that must not see
+            // an exception. Drop the notification if the host pipe write fails.
+            try {
+              Writer out;
+              out.scalar(index);
+              out.string(name);
+              sendFor(session, {Operation::Invalidate, 0, true, {}, out.take()});
+            } catch (...) {
+            }
+          });
+        }
+      };
+
       if (request.operation == Operation::FrameAck) {
         std::lock_guard lock(ack_mutex);
         frame_acked = true;
@@ -166,15 +219,57 @@ int main(int argc, char** argv)
         continue;
       }
       Message response{request.operation, request.id};
+      response.session = request.session;
       bool shutdown = false;
       try {
         Reader input(request.payload);
         Writer output;
         switch (request.operation) {
+          case Operation::OpenInterface:
+            system.open_interface(onegen::InterfaceInfo{input.string(), cti.string()});
+            break;
+          case Operation::ProbeInterface: {
+            const auto id = input.string();
+            writeVector(output, system.enumerate_interface(onegen::InterfaceInfo{id, cti.string()}));
+            break;
+          }
+          case Operation::CloseInterface:
+            system.release_interface(onegen::InterfaceInfo{input.string(), cti.string()});
+            break;
+          case Operation::ListInterfaces:
+            writeVector(output, system.interfaces());
+            break;
+          case Operation::InterfaceFeatures:
+            onegen::worker::write(output, onegen::snapshot(system.interface_features(onegen::InterfaceInfo{input.string(), cti.string()}).root()));
+            break;
+          case Operation::InterfaceRead: {
+            auto& map = system.interface_features(onegen::InterfaceInfo{input.string(), cti.string()});
+            onegen::worker::write(output, onegen::snapshot(map.find(input.string())));
+            break;
+          }
+          case Operation::InterfaceWrite: {
+            const auto id = input.string();
+            for (const auto& [key, item] : sessions)
+              if (item->camera && item->camera->is_open() && item->camera->info().interface_id == id)
+                throw std::runtime_error("Disconnect this interface's cameras before reconfiguration.");
+            auto& map = system.interface_features(onegen::InterfaceInfo{id, cti.string()});
+            auto node = map.find(input.string());
+            const auto operation = input.string();
+            const auto value = input.string();
+            onegen::apply_feature(node, operation, value);
+            onegen::worker::write(output, onegen::snapshot(map.root()));
+            break;
+          }
+          case Operation::ReleaseInterfaces:
+            system.release_interfaces();
+            break;
           case Operation::Probe: {
             const auto timeout = std::clamp(input.scalar<std::uint32_t>(), 1U, 60000U);
-            auto devices = system.enumerate(std::chrono::milliseconds{timeout});
-            writeVector(output, devices);
+            try {
+              auto devices = system.enumerate(std::chrono::milliseconds{timeout});
+              system.release_idle_interfaces();
+              writeVector(output, devices);
+            } catch (...) { system.release_idle_interfaces(); throw; }
             break;
           }
           case Operation::Open: {
@@ -182,28 +277,32 @@ int main(int argc, char** argv)
             onegen::ConnectTiming timing("worker-open");
             auto& opened = ensureCamera();
             if (opened.is_open()) opened.close();
-            opened.set_error_callback([](std::string_view error) {
-              send({Operation::Error, 0, false, std::string(error)});
+            opened.set_error_callback([session = request.session](std::string_view error) {
+              sendFor(session, {Operation::Error, 0, false, std::string(error)});
             });
-            opened.open(input.string());
+            onegen::DeviceInfo selected;
+            selected.id = input.string();
+            selected.interface_id = input.string();
+            selected.cti_path = std::filesystem::weakly_canonical(cti).string();
+            opened.open(selected);
             timing.mark("camera-open");
             opened.prepare();
             timing.mark("camera-prepare");
             wireInvalidates(opened);
             try { opened.poll_features(0); }
             catch (const std::exception& error) {
-              send({Operation::Error, 0, false, std::string("Feature event setup failed: ") + error.what()});
+              sendFor(request.session, {Operation::Error, 0, false, std::string("Feature event setup failed: ") + error.what()});
             }
-            opened.set_frame_callback([](const onegen::Frame& frame) {
+            opened.set_frame_callback([&channel, session = request.session](const onegen::Frame& frame) {
               Writer out;
               onegen::worker::write(out, frame);
               {
-                std::lock_guard lock(ack_mutex);
-                frame_acked = false;
+                std::lock_guard lock(channel.ack_mutex);
+                channel.frame_acked = false;
               }
-              send({Operation::Frame, 0, true, {}, out.take()});
-              std::unique_lock lock(ack_mutex);
-              ack_ready.wait(lock, [] { return frame_acked || stopping; });
+              sendFor(session, {Operation::Frame, 0, true, {}, out.take()});
+              std::unique_lock lock(channel.ack_mutex);
+              channel.ack_ready.wait(lock, [&channel] { return channel.frame_acked || channel.stopping; });
             });
             timing.mark("callbacks-and-event-setup");
             break;
@@ -211,6 +310,7 @@ int main(int argc, char** argv)
           case Operation::Close:
             abortGrab();
             if (camera) camera->close();
+            system.release_idle_interfaces();
             break;
           case Operation::ListStreams:
             writeVector(output, ensureCamera().data_streams());
@@ -247,6 +347,8 @@ int main(int argc, char** argv)
             const auto operation = input.string();
             const auto value = input.string();
             auto& opened = ensureCamera();
+            if (request.session && (module == onegen::Camera::Module::Interface || module == onegen::Camera::Module::System))
+              throw std::runtime_error("Use the interface settings tab for shared configuration.");
             auto node = opened.features(module).find(name);
             onegen::apply_feature(node, operation, value);
             auto changed = onegen::snapshot(node);
@@ -267,6 +369,8 @@ int main(int argc, char** argv)
           }
           case Operation::RegisterWrite: {
             const auto module = moduleFromIndex(input.scalar<std::int32_t>());
+            if (request.session && (module == onegen::Camera::Module::Interface || module == onegen::Camera::Module::System))
+              throw std::runtime_error("Use the interface settings tab for shared configuration.");
             const auto name = input.string();
             const auto bytes = onegen::worker::readBytes(input);
             if (ensureCamera().is_live()) throw std::runtime_error("Stop Live before raw register writes.");
@@ -281,6 +385,8 @@ int main(int argc, char** argv)
           }
           case Operation::LoadFeatures: {
             const auto module = moduleFromIndex(input.scalar<std::int32_t>());
+            if (request.session && (module == onegen::Camera::Module::Interface || module == onegen::Camera::Module::System))
+              throw std::runtime_error("Use the interface settings tab for shared configuration.");
             if (ensureCamera().is_live()) throw std::runtime_error("Stop Live before restoring features.");
             ensureCamera().features(module).load_features(input.string());
             ensureCamera().prepare();
@@ -291,11 +397,14 @@ int main(int argc, char** argv)
             if (ensureCamera().is_live())
               throw std::runtime_error("Stop Live before Single acquisition.");
             const auto id = request.id;
-            grab_thread = std::thread([&, id] {
+            auto* target = &ensureCamera();
+            const auto session = request.session;
+            grab_thread = std::thread([target, id, session] {
               Message reply{Operation::GrabOne, id};
+              reply.session = session;
               try {
                 onegen::ConnectTiming timing("worker-single");
-                const auto frames = ensureCamera().single(1);
+                const auto frames = target->single(1);
                 timing.mark("acquire-and-stop");
                 if (frames.empty())
                   throw std::runtime_error("Single acquisition returned no frame.");
@@ -327,8 +436,7 @@ int main(int argc, char** argv)
             ensureCamera().trigger();
             break;
           case Operation::Shutdown:
-            { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
-            abortGrab();
+            for (auto& [key, item] : sessions) item->stop();
             shutdown = true;
             break;
           default:
@@ -342,8 +450,7 @@ int main(int argc, char** argv)
       send(std::move(response));
       if (shutdown) break;
     }
-    { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
-    abortGrab();
+    sessions.clear();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

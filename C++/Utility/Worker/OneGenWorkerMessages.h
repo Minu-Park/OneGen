@@ -36,6 +36,9 @@ inline void write(Writer& out, const DeviceInfo& value)
   out.string(value.tl_type);
   out.string(value.cti_path);
   writeStrings(out, value.cti_candidates);
+  writeStrings(out, value.cti_candidate_ids);
+  writeStrings(out, value.cti_candidate_interfaces);
+  out.string(value.interface_id);
 }
 
 inline DeviceInfo readDeviceInfo(Reader& in)
@@ -51,7 +54,22 @@ inline DeviceInfo readDeviceInfo(Reader& in)
   value.tl_type = in.string();
   value.cti_path = in.string();
   value.cti_candidates = readStrings(in);
+  value.cti_candidate_ids = readStrings(in);
+  value.cti_candidate_interfaces = readStrings(in);
+  value.interface_id = in.string();
   return value;
+}
+
+inline void write(Writer& out, const InterfaceInfo& value) {
+  out.string(value.id);
+  out.string(value.cti_path);
+  out.string(value.display_name);
+  out.string(value.vendor);
+  out.string(value.tl_type);
+}
+
+inline InterfaceInfo readInterfaceInfo(Reader& in) {
+  return {in.string(), in.string(), in.string(), in.string(), in.string()};
 }
 
 inline void write(Writer& out, const DataStreamInfo& value)

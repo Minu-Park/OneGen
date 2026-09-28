@@ -10,6 +10,7 @@
 namespace onegen {
 
 #define OG_GENTL_SYMS(X)                     \
+  X(GCGetInfo)                               \
   X(GCGetLastError)                          \
   X(GCInitLib)                               \
   X(GCCloseLib)                              \
@@ -23,6 +24,7 @@ namespace onegen {
   X(TLOpen)                                  \
   X(TLClose)                                 \
   X(TLGetNumInterfaces)                      \
+  X(TLGetInterfaceInfo)                      \
   X(TLGetInterfaceID)                        \
   X(TLOpenInterface)                         \
   X(TLUpdateInterfaceList)                   \

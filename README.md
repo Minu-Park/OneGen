@@ -22,13 +22,20 @@ Pass a vendor CTI file to `OneGen::loadCti()`, then enumerate devices or open a
 camera by ID, user-defined name, IP address, serial number, display name, or
 model. Loading a CTI executes vendor code, so only use trusted producers.
 The Playground plugin discovers `.cti` entries from `GENICAM_GENTL64_PATH` or
-`GENICAM_GENTL32_PATH` and documented vendor locations. Discovery starts one
+`GENICAM_GENTL32_PATH`, without vendor-specific paths or filenames. Discovery starts one
 `OneGenWorker` process per CTI; the first camera adopts that worker, and additional
 cameras use separate workers so Open cannot close another camera. Successfully
 closed camera workers retain their discovery caches for reconnect. Each worker preserves the producer install directory for
 relative dependencies while isolating incompatible vendor runtimes. The worker
 uses a versioned binary stdin/stdout protocol and has no Qt dependency. Do not
 copy a CTI without its producer tree.
+
+The selector explicitly distinguishes every enumerated Interface from Device entries.
+InterfaceIDs are opaque and producer-scoped; DeviceIDs are Interface-scoped.
+Opening an Interface requires no manufacturer adapter or attached Device. Connected
+Interfaces share one worker with their independent Device/DataStream sessions.
+Physical-board equivalence across producers or SDKs is not inferred; native
+Producer/SDK resource arbitration determines whether a connection is available.
 
 GenTL 1.5 multipart buffers are retained without a vendor SDK. The Playground
 adapter assembles standard PFNC `Coord3D_ABC32f` and `Coord3D_C16` range data

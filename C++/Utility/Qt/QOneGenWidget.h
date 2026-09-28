@@ -3,6 +3,7 @@
 #include "OneGenNode.h"
 #include "OneGenTypes.h"
 #include "OneGenCoordinator.h"
+#include "engine/GraphicsFrameAdapter.h"
 
 #include <QFutureWatcher>
 #include <QList>
@@ -11,6 +12,7 @@
 #include <QWidget>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -40,8 +42,26 @@ public:
                 DiscoverFn discover,
                 QWidget* parent = nullptr);
   ~QOneGenWidget() override;
+  /** Restricts the reusable camera panel to its assigned device. */
+  void setFixedCamera();
+  /** Uses the consumer theme's existing tabbed-tree spacing for a board child panel. */
+  void setTabbedCamera();
+  /** Reuses the original single-row controls with a consumer-owned device selector. */
+  void setExternalSelector(QComboBox* selector, QToolButton* refresh);
+  /** Keeps the feature tree and status bar while hiding camera-specific controls. */
+  void setFeaturePanelOnly();
+  /** Installs the interface-only settings panel without a camera connection. */
+  void setInterface(const onegen::InterfaceInfo& info, onegen::FeatureNode snapshot);
+  /** Reports a camera connection or operation that blocks board reconfiguration. */
+  bool cameraInUse() const;
+  /** Reports the completed camera connection independently of pending operations. */
+  bool cameraConnected() const { return static_cast<bool>(lease_); }
   void setTitleCallback(std::function<void(const QString&)> callback);
   void prepareForShutdown();
+
+signals:
+  /** Announces connection or operation changes without changing tab selection. */
+  void stateChanged();
 
 private:
   using FeatureRead = std::function<onegen::FeatureNode(int, std::string_view)>;
@@ -72,6 +92,8 @@ private:
   void startGrabOne();
   void finishGrabOne();
   void dropLease();
+  /** Drains copied producer notifications before the feature panel is destroyed. */
+  void clearFeatureCallback();
   void setOperationActive(bool active);
   /** Refresh only connection/acquisition state; operation details belong in logs. */
   void updateStatus();
@@ -129,6 +151,8 @@ private:
 
   std::shared_ptr<onegen::worker::Coordinator> coordinator_;
   std::shared_ptr<onegen::worker::Lease> lease_;
+  std::optional<onegen::InterfaceInfo> interface_;
+  std::unique_ptr<GraphicsFrameCallbackGate> invalidation_gate_;
   OneGenSourceController* controller_ = nullptr;
   std::vector<onegen::DeviceInfo> devices_;
   DiscoverFn discover_;

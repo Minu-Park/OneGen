@@ -1,10 +1,13 @@
 #pragma once
 
 #include "AbstractSourceController.h"
+#include "engine/GraphicsFrameAdapter.h"
 
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <memory>
+#include <map>
 #include <string>
 
 namespace onegen {
@@ -21,6 +24,14 @@ public:
   explicit OneGenSourceController(QObject* parent = nullptr);
   ~OneGenSourceController() override;
 
+  /** Returns a stable camera controller whose frames share the consumer's source topology. */
+  OneGenSourceController* cameraController(const std::string& id, const std::string& label);
+  /** Removes a child after its camera panel has drained acquisition and callbacks. */
+  void removeCameraController(const std::string& id);
+  /** Resets presentation sources after all child panels have drained. */
+  void clearCameraControllers();
+  /** Reports one stable presentation source per child camera. */
+  std::vector<GraphicsSourceDescriptor> sourceDescriptors() const override;
   void setLease(onegen::worker::Lease* lease);
   void start() override;
   void stop() override;
@@ -33,8 +44,12 @@ public:
 private:
   void deliver(const onegen::Frame& source, const std::string& sourceName);
   void bindLease();
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
+  struct Child { unsigned int index; std::string label; std::unique_ptr<OneGenSourceController> controller; };
+  std::map<std::string, Child> children_;
+  unsigned int next_source_index_ = 0;
   onegen::worker::Lease* lease_ = nullptr;
+  std::unique_ptr<GraphicsFrameCallbackGate> callback_gate_;
   FrameConsumer consumer_;
   std::atomic<bool> grabbing_{false};
   std::atomic<std::uint64_t> sequence_{0};

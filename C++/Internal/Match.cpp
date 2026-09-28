@@ -65,14 +65,11 @@ const DeviceInfo& match_device(const std::vector<DeviceInfo>& devices,
   };
 
   std::vector<Tier> tiers = {
-      {"id", collect([&](const DeviceInfo& d) { return nonempty_eq(d.id, query); })},
+      {"id", collect([&](const DeviceInfo& d) { return d.id == query; })},
       {"user_defined_name",
        collect([&](const DeviceInfo& d) { return nonempty_eq(d.user_defined_name, query); })},
       {"ip", collect([&](const DeviceInfo& d) {
          if (qip && !d.ip.empty() && d.ip == *qip) return true;
-         if (qip && extract_ipv4(d.id) == qip) return true;
-         if (qip && extract_ipv4(d.display_name) == qip) return true;
-         if (qip && extract_ipv4(d.user_defined_name) == qip) return true;
          return nonempty_eq(d.ip, query);
        })},
       {"serial", collect([&](const DeviceInfo& d) { return nonempty_eq(d.serial, query); })},

@@ -60,14 +60,12 @@ QOneGenWidget::QOneGenWidget(
       devices_(std::move(devices)), discover_(std::move(discover))
 {
   setMinimumSize(300, 350);
-  setStyleSheet(QStringLiteral(
-      "QOneGenWidget QToolButton { min-width: 20px; min-height: 20px; "
-      "max-width: 20px; max-height: 20px; padding: 0; border-radius: 8px; }"));
   auto* layout = new QVBoxLayout(this);
   layout->setObjectName(QStringLiteral("DeviceRootLayout"));
 
   devices_box_ = new QComboBox;
   devices_box_->setMinimumWidth(120);
+  devices_box_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
   devices_box_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
   streams_box_ = new QComboBox;
   streams_box_->setToolTip(QStringLiteral("Data Stream"));
@@ -230,6 +228,62 @@ QOneGenWidget::QOneGenWidget(
   if (discover_) QTimer::singleShot(0, this, &QOneGenWidget::refresh);
 }
 
+void QOneGenWidget::setFixedCamera()
+{
+  devices_box_->hide();
+  refresh_button_->hide();
+}
+
+void QOneGenWidget::setExternalSelector(QComboBox* selector, QToolButton* refresh)
+{
+  setFixedCamera();
+  auto* row = findChild<QHBoxLayout*>(QStringLiteral("DeviceSelectorLayout"));
+  row->insertWidget(0, selector);
+  row->addWidget(refresh);
+  selector->show();
+  refresh->show();
+}
+
+void QOneGenWidget::setTabbedCamera()
+{
+  setFixedCamera();
+  if (auto* panel = findChild<QVBoxLayout*>(QStringLiteral("DeviceTreePanelLayout")))
+    panel->setObjectName(QStringLiteral("DeviceTabbedTreePanelLayout"));
+}
+
+bool QOneGenWidget::cameraInUse() const
+{
+  return lease_ || operation_ != Operation::None || operation_watcher_.isRunning() || grab_watcher_.isRunning();
+}
+
+void QOneGenWidget::setFeaturePanelOnly()
+{
+  setFixedCamera();
+  connect_button_->hide();
+  grab_one_button_->hide();
+  grab_live_button_->hide();
+  streams_box_->hide();
+  if (auto* top = findChild<QHBoxLayout*>(QStringLiteral("DeviceTopBarLayout"))) {
+    layout()->removeItem(top);
+    delete top;
+  }
+}
+
+void QOneGenWidget::setInterface(const onegen::InterfaceInfo& info, onegen::FeatureNode snapshot)
+{
+  interface_ = info;
+  setFeaturePanelOnly();
+  setTabbedCamera();
+  std::vector<std::pair<std::string, onegen::FeatureNode>> modules(4);
+  modules[3] = {"Interface", std::move(snapshot)};
+  setFeatureModules(std::move(modules),
+      [this, info](int, std::string_view name) { return coordinator_->read_interface(info, name); },
+      [this, info](int, std::string_view name, std::string_view op, std::string_view value) {
+        return coordinator_->write_interface(info, name, op, value);
+      }, info.display_name.empty() ? info.id : info.display_name);
+  setOperationActive(false);
+}
+
 void QOneGenWidget::setTitleCallback(std::function<void(const QString&)> callback)
 {
   title_callback_ = std::move(callback);
@@ -246,10 +300,10 @@ void QOneGenWidget::prepareForShutdown()
   title_callback_ = {};
   shutting_down_ = true;
   if (feature_drain_timer_) feature_drain_timer_->stop();
-  if (lease_) lease_->set_invalidate_callback({});
-  if (controller_) controller_->setLease(nullptr);
+  clearFeatureCallback();
   discovery_watcher_.waitForFinished();
   operation_watcher_.waitForFinished();
+  if (controller_) controller_->stop();
   grab_watcher_.waitForFinished();
   const QSignalBlocker blocker(connect_button_);
   connect_button_->setChecked(false);
@@ -465,8 +519,10 @@ void QOneGenWidget::finishOperation()
     if (qEnvironmentVariableIntValue("ONEGEN_TRACE_CONNECT") == 1)
       qInfo().noquote() << QStringLiteral("[GenICam] connect timing: scope=host stage=feature-tree-build duration=%1 ms camera=%2")
           .arg(tree_timing.elapsed()).arg(result.title);
-    lease_->set_invalidate_callback([this](const int module, const std::string_view name) {
-      invalidateFeature(module, name);
+    invalidation_gate_ = std::make_unique<GraphicsFrameCallbackGate>();
+    lease_->set_invalidate_callback([this, token = invalidation_gate_->token()](const int module, const std::string_view name) {
+      GraphicsFrameCallbackGate::Lease callback(token);
+      if (callback) invalidateFeature(module, name);
     });
     qInfo().noquote() << QStringLiteral("[GenICam] connected: camera=%1 elapsed_ms=%2")
         .arg(result.title).arg(result.elapsedMs + tree_timing.elapsed());
@@ -495,7 +551,7 @@ void QOneGenWidget::finishOperation()
 
 void QOneGenWidget::dropLease()
 {
-  if (lease_) lease_->set_invalidate_callback({});
+  clearFeatureCallback();
   if (controller_) controller_->setLease(nullptr);
   setFeatureModules({}, {}, {}, {});
   streams_box_->clear();
@@ -510,6 +566,14 @@ void QOneGenWidget::dropLease()
     connect_button_->setChecked(false);
   }
   updateDiscoveryDevices(devices_);
+}
+
+void QOneGenWidget::clearFeatureCallback()
+{
+  if (invalidation_gate_) invalidation_gate_->beginShutdown();
+  if (lease_) lease_->set_invalidate_callback({});
+  if (invalidation_gate_) invalidation_gate_->waitForDrain();
+  invalidation_gate_.reset();
 }
 
 void QOneGenWidget::startGrabOne()
@@ -580,13 +644,14 @@ void QOneGenWidget::setOperationActive(bool active)
   connect_button_->setEnabled(!blocking && (connected || devices_box_->count() > 0));
   grab_one_button_->setEnabled(!active && connected && !grabbing);
   grab_live_button_->setEnabled(!blocking && connected);
-  features_->setEnabled(connected);
+  features_->setEnabled(connected || interface_.has_value());
   updateStatus();
+  emit stateChanged();
 }
 
 void QOneGenWidget::updateStatus()
 {
-  const bool connected = static_cast<bool>(lease_);
+  const bool connected = lease_ || interface_.has_value();
   const bool live = connected && controller_ && controller_->isGrabbing();
   status_->setText(live ? QStringLiteral("Live") : connected ? QStringLiteral("Connected")
       : QStringLiteral("Idle"));
@@ -697,7 +762,7 @@ void QOneGenWidget::rebuildFeatures()
     for (std::size_t index = 0; index < feature_modules_.size(); ++index) {
       const auto& entry = feature_modules_[index];
       auto* parent = cam;
-      if (!entry.first.empty() && entry.first != "Remote Device") {
+      if (!interface_ && !entry.first.empty() && entry.first != "Remote Device") {
         parent = new QTreeWidgetItem(cam, QStringList(QString::fromStdString(entry.first)));
         parent->setData(0, Qt::UserRole, QStringLiteral("__module_%1__").arg(index));
         parent->setData(0, Qt::UserRole + 1, static_cast<int>(index));
@@ -1179,7 +1244,7 @@ bool QOneGenWidget::applyFeatureNodeToEditor(QWidget* editor, const onegen::Feat
 void QOneGenWidget::writeFeature(const int map_index, const QString& nodeName,
                                  const std::string_view op, const std::string_view value)
 {
-  if (!lease_ || !feature_write_ || rebuilding_features_ || operation_watcher_.isRunning()) return;
+  if ((!lease_ && !interface_) || !feature_write_ || rebuilding_features_ || operation_watcher_.isRunning()) return;
   const auto opText = QString::fromUtf8(op.data(), static_cast<int>(op.size()));
   const auto valueText = QString::fromUtf8(value.data(), static_cast<int>(value.size()));
   const bool explicitSoftwareTrigger = map_index == 0
@@ -1203,7 +1268,10 @@ void QOneGenWidget::writeFeature(const int map_index, const QString& nodeName,
     // between that command and the worker's pending buffer receive.
     if (!explicitSoftwareTrigger) {
       try {
-        result.features = lease_->describe_features();
+        if (interface_) {
+          result.features.resize(4);
+          result.features[3] = {"Interface", coordinator_->interface_features(*interface_)};
+        } else result.features = lease_->describe_features();
       } catch (const std::exception& error) {
         if (result.error.isEmpty())
           result.error = QStringLiteral("feature tree refresh failed: %1")
@@ -1259,6 +1327,8 @@ void QOneGenWidget::restoreExpandedFeatures(QTreeWidgetItem* item, const QSet<QS
 
 bool QOneGenWidget::shouldShowFeature(const onegen::FeatureNode& n) const
 {
+  // The interface panel exposes typed settings; its camera-backed raw inspector is unavailable.
+  if (interface_ && n.kind == onegen::NodeKind::Register) return false;
   if (n.kind == onegen::NodeKind::Category) return false;
   if (!n.visible) return false;
   return n.readable || n.writable;

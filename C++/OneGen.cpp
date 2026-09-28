@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <iostream>
 #include <string_view>
 
 namespace onegen {
@@ -21,22 +22,6 @@ std::string dotted_ipv4(std::uint32_t v) {
   std::snprintf(b, sizeof(b), "%u.%u.%u.%u", (v >> 24) & 255u, (v >> 16) & 255u,
                 (v >> 8) & 255u, v & 255u);
   return b;
-}
-
-std::uint32_t bswap32(std::uint32_t v) {
-  return (v << 24) | ((v << 8) & 0xff0000u) | ((v >> 8) & 0xff00u) | (v >> 24);
-}
-
-bool plausible_ipv4(std::uint32_t v) {
-  const unsigned a = (v >> 24) & 255u;
-  return a != 0 && a < 224 && a != 127;
-}
-
-std::string ipv4_from_int(std::uint32_t v) {
-  if (plausible_ipv4(v)) return dotted_ipv4(v);
-  const std::uint32_t s = bswap32(v);
-  if (plausible_ipv4(s)) return dotted_ipv4(s);
-  return {};
 }
 
 void fill_ips_from_interface(Gentl& g, GenTL::IF_HANDLE hif, std::vector<FoundDevice>& devs) {
@@ -54,28 +39,23 @@ void fill_ips_from_interface(Gentl& g, GenTL::IF_HANDLE hif, std::vector<FoundDe
   auto ipn = nm.find("GevDeviceIPAddress");
   if (!ipn.valid() || !ipn.is_readable()) return;
   auto sel = nm.find("DeviceSelector");
-
+  auto device_id = nm.find("DeviceID");
+  if (!sel.valid() || !sel.is_readable() || !sel.is_writable()
+      || !device_id.valid() || !device_id.is_readable()) return;
+  std::int64_t previous;
+  try { previous = sel.get_int(); } catch (...) { return; }
+  // GenTL SFNC ties DeviceSelector to IFGetDeviceID's index; verify the selected ID.
   for (size_t i = 0; i < devs.size(); ++i) {
-    if (!devs[i].info.ip.empty()) continue;
-    if (sel.valid() && sel.is_writable()) {
-      try {
-        sel.set_int(static_cast<std::int64_t>(i));
-      } catch (...) {
-        continue;
-      }
-    }
     try {
-      auto ip = ipv4_from_int(static_cast<std::uint32_t>(ipn.get_int()));
-      if (!ip.empty()) devs[i].info.ip = ip;
-    } catch (...) {
-    }
+      sel.set_int(static_cast<std::int64_t>(i));
+      if (device_id.get_string() != devs[i].info.id) continue;
+      const auto address = ipn.get_int();
+      if (address >= 0 && static_cast<std::uint64_t>(address) <= UINT32_MAX)
+        devs[i].info.ip = dotted_ipv4(static_cast<std::uint32_t>(address));
+    } catch (...) { }
   }
-}
+  try { sel.set_int(previous); } catch (...) { }
 
-bool loopback_interface(std::string_view id)
-{
-  return id.find("127.0.0.1") != std::string_view::npos
-      || id.find("::1") != std::string_view::npos;
 }
 
 template <std::size_t InitialSize = 512, typename Read>
@@ -111,12 +91,74 @@ std::string read_gentl_string(Gentl& g, const char* where, Read read, bool optio
 
 }  // namespace
 
+namespace {
+Producer& producer_for(std::vector<std::unique_ptr<Producer>>& producers, const InterfaceInfo& info) {
+  std::error_code error;
+  const auto path = std::filesystem::weakly_canonical(info.cti_path, error);
+  if (!error) for (auto& producer : producers) if (producer->path == path) return *producer;
+  throw Error("Interface producer is unavailable: " + info.cti_path);
+}
+}
+
 void close_interfaces(Producer& producer) {
+  producer.interface_maps.clear();
   for (auto& [id, hif] : producer.interfaces) {
     (void)id;
     if (hif) producer.api.IFClose(hif);
   }
   producer.interfaces.clear();
+  producer.claims.clear();
+  producer.pinned.clear();
+}
+
+void close_interface(Producer& producer, const std::string& id) {
+  if (producer.active_devices[id]) throw Error("Disconnect this interface's cameras before release.");
+  if (const auto found = producer.interfaces.find(id); found != producer.interfaces.end()) {
+    producer.interface_maps.erase(id);
+    producer.api.check(producer.api.IFClose(found->second), "IFClose");
+    producer.interfaces.erase(found);
+    producer.claims.erase(id);
+  }
+  producer.pinned.erase(id);
+}
+
+InterfaceInfo interface_info(Producer& producer, const std::string& id) {
+  auto& g = producer.api;
+  InterfaceInfo info{id, producer.path.string()};
+  const auto producer_string = [&](GenTL::TL_INFO_CMD command) {
+    if (!g.GCGetInfo) return std::string{};
+    GenTL::INFO_DATATYPE type = GenTL::INFO_DATATYPE_UNKNOWN;
+    auto value = read_gentl_string(g, "GCGetInfo", [&](char* data, size_t* size) {
+      return g.GCGetInfo(command, &type, data, size);
+    }, true);
+    return type == GenTL::INFO_DATATYPE_STRING ? value : std::string{};
+  };
+  info.vendor = producer_string(GenTL::TL_INFO_VENDOR);
+  if (g.TLGetInterfaceInfo) {
+    const auto interface_string = [&](GenTL::INTERFACE_INFO_CMD command) {
+      GenTL::INFO_DATATYPE type = GenTL::INFO_DATATYPE_UNKNOWN;
+      auto value = read_gentl_string(g, "TLGetInterfaceInfo", [&](char* data, size_t* size) {
+        return g.TLGetInterfaceInfo(g.tl, id.c_str(), command, &type, data, size);
+      }, true);
+      return type == GenTL::INFO_DATATYPE_STRING ? value : std::string{};
+    };
+    info.display_name = interface_string(GenTL::INTERFACE_INFO_DISPLAYNAME);
+    info.tl_type = interface_string(GenTL::INTERFACE_INFO_TLTYPE);
+  }
+  return info;
+}
+
+GenTL::IF_HANDLE ensure_interface(Producer& producer, const std::string& id) {
+  if (const auto found = producer.interfaces.find(id); found != producer.interfaces.end()) return found->second;
+  auto claim = producer.claim ? producer.claim(interface_info(producer, id)) : std::shared_ptr<void>{};
+  GenTL::IF_HANDLE handle = nullptr;
+  try { producer.api.check(producer.api.TLOpenInterface(producer.api.tl, id.c_str(), &handle), "TLOpenInterface"); }
+  catch (const std::exception& error) {
+    throw Error("interface=" + id + " cti=" + producer.path.string() + ": " + error.what());
+  }
+  producer.interfaces.emplace(id, handle);
+  producer.claims[id] = std::move(claim);
+  return handle;
 }
 
 std::string gentl_string(Gentl& g, GenTL::IF_HANDLE hif, const char* devid,
@@ -129,9 +171,10 @@ std::string gentl_string(Gentl& g, GenTL::IF_HANDLE hif, const char* devid,
 }
 
 std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& producers,
-                                      uint64_t timeout_ms) {
+    uint64_t timeout_ms, std::string_view selected_interface, std::string_view selected_producer) {
   std::vector<FoundDevice> out;
   for (auto& prod : producers) {
+    if (!selected_producer.empty() && prod->path.string() != selected_producer) continue;
     const auto first_device = out.size();
     auto& g = prod->api;
     bool8_t changed = 0;
@@ -143,17 +186,9 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
       const auto ifid = read_gentl_string(g, "TLGetInterfaceID", [&](char* buffer, size_t* size) {
         return g.TLGetInterfaceID(g.tl, i, buffer, size);
       });
-      if (loopback_interface(ifid)) {
-        stage_log("worker skip loopback interface=%s", ifid.c_str());
-        continue;
-      }
-      GenTL::IF_HANDLE hif = nullptr;
-      if (const auto it = prod->interfaces.find(ifid); it != prod->interfaces.end()) {
-        hif = it->second;
-      } else {
-        g.check(g.TLOpenInterface(g.tl, ifid.c_str(), &hif), "TLOpenInterface");
-        prod->interfaces.emplace(ifid, hif);
-      }
+      if (!selected_interface.empty() && ifid != selected_interface) continue;
+      try {
+      const auto hif = ensure_interface(*prod, ifid);
       bool8_t dch = 0;
       const auto update_started = std::chrono::steady_clock::now();
       g.check(g.IFUpdateDeviceList(hif, &dch, timeout_ms), "IFUpdateDeviceList");
@@ -177,12 +212,7 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
         fd.info.display_name = gentl_string(g, hif, devid.c_str(), GenTL::DEVICE_INFO_DISPLAYNAME);
         fd.info.tl_type = gentl_string(g, hif, devid.c_str(), GenTL::DEVICE_INFO_TLTYPE);
         fd.info.cti_path = prod->path.string();
-        if (auto ip = extract_ipv4(fd.info.id))
-          fd.info.ip = *ip;
-        else if (auto ip2 = extract_ipv4(fd.info.display_name))
-          fd.info.ip = *ip2;
-        else if (auto ip3 = extract_ipv4(fd.info.user_defined_name))
-          fd.info.ip = *ip3;
+        fd.info.interface_id = ifid;
         batch.push_back(std::move(fd));
       }
       if (!batch.empty()) {
@@ -196,6 +226,11 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
                   static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - update_started).count()));
       for (auto& fd : batch) out.push_back(std::move(fd));
+      } catch (const std::exception& error) {
+        if (!selected_interface.empty()) throw;
+        std::cerr << "[GenICam] interface search failed: cti=" << prod->path.string()
+                  << " interface=" << ifid << ": " << error.what() << '\n';
+      }
     }
     if (out.size() > first_device)
       stage_log("producer scan completed: interfaces=%u cameras=%u timeout_ms=%llu elapsed_ms=%lld",
@@ -229,7 +264,141 @@ void OneGen::loadCti(const std::filesystem::path& cti) {
   auto prod = std::make_unique<Producer>();
   prod->path = canon;
   prod->api.load(canon);
+  prod->claim = impl_->claim;
   impl_->producers.push_back(std::move(prod));
+}
+
+void OneGen::set_interface_claim_callback(InterfaceClaimFn claim) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  for (const auto& producer : impl_->producers)
+    if (!producer->interfaces.empty()) throw Error("Set resource claims before interface discovery.");
+  impl_->claim = claim;
+  for (auto& producer : impl_->producers) {
+    producer->claim = claim;
+  }
+}
+
+std::vector<InterfaceInfo> OneGen::interfaces() const {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  std::vector<InterfaceInfo> result;
+  for (auto& producer : impl_->producers) {
+    auto& g = producer->api;
+    bool8_t changed = 0;
+    g.check(g.TLUpdateInterfaceList(g.tl, &changed, 1000), "TLUpdateInterfaceList");
+    uint32_t count = 0;
+    g.check(g.TLGetNumInterfaces(g.tl, &count), "TLGetNumInterfaces");
+    for (uint32_t i = 0; i < count; ++i) {
+      const auto id = read_gentl_string(g, "TLGetInterfaceID", [&](char* data, size_t* size) {
+        return g.TLGetInterfaceID(g.tl, i, data, size);
+      });
+      result.push_back(interface_info(*producer, id));
+    }
+  }
+  return result;
+}
+
+void OneGen::open_interface(std::string_view id) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  const auto inventory = interfaces();
+  const auto match = std::find_if(inventory.begin(), inventory.end(),
+      [&](const auto& item) { return item.id == id; });
+  if (match == inventory.end()) throw Error("Interface is unavailable: " + std::string(id));
+  if (std::count_if(inventory.begin(), inventory.end(), [&](const auto& item) { return item.id == id; }) != 1)
+    throw Error("Interface ID is ambiguous across producers.");
+  for (auto& producer : impl_->producers) if (producer->path.string() == match->cti_path) {
+    ensure_interface(*producer, match->id);
+    producer->pinned.insert(match->id);
+  }
+}
+
+void OneGen::open_interface(const InterfaceInfo& info) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  auto& producer = producer_for(impl_->producers, info);
+  ensure_interface(producer, info.id);
+  producer.pinned.insert(info.id);
+}
+
+void OneGen::release_interface(std::string_view id) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  const auto key = std::string(id);
+  if (std::count_if(impl_->producers.begin(), impl_->producers.end(),
+      [&](const auto& producer) { return producer->interfaces.count(key); }) > 1)
+    throw Error("Interface ID is ambiguous across producers.");
+  for (auto& producer : impl_->producers) if (producer->interfaces.count(key)) close_interface(*producer, key);
+}
+
+void OneGen::release_interface(const InterfaceInfo& info) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  close_interface(producer_for(impl_->producers, info), info.id);
+}
+
+void OneGen::release_idle_interfaces() {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  for (auto& producer : impl_->producers) {
+    std::vector<std::string> idle;
+    for (const auto& [id, handle] : producer->interfaces)
+      if (!producer->pinned.count(id) && !producer->active_devices[id]) idle.push_back(id);
+    for (const auto& id : idle) close_interface(*producer, id);
+  }
+}
+
+std::vector<DeviceInfo> OneGen::enumerate_interface(std::string_view id, std::chrono::milliseconds timeout) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  const auto inventory = interfaces();
+  const auto match = std::find_if(inventory.begin(), inventory.end(), [&](const auto& info) { return info.id == id; });
+  if (match == inventory.end()) throw Error("Interface is unavailable: " + std::string(id));
+  if (std::count_if(inventory.begin(), inventory.end(), [&](const auto& info) { return info.id == id; }) != 1)
+    throw Error("Interface ID is ambiguous across producers; specify its producer.");
+  return enumerate_interface(*match, timeout);
+}
+
+std::vector<DeviceInfo> OneGen::enumerate_interface(const InterfaceInfo& info, std::chrono::milliseconds timeout) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  auto& producer = producer_for(impl_->producers, info);
+  auto found = scan_devices(impl_->producers, static_cast<uint64_t>(timeout.count()), info.id, producer.path.string());
+  std::erase_if(impl_->discovered, [&](const auto& device) { return device.producer == &producer && device.if_id == info.id; });
+  impl_->discovered.insert(impl_->discovered.end(), found.begin(), found.end());
+  std::vector<DeviceInfo> result;
+  for (auto& device : found) result.push_back(std::move(device.info));
+  return result;
+}
+
+NodeMap& OneGen::interface_features(std::string_view id) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  if (std::count_if(impl_->producers.begin(), impl_->producers.end(),
+      [&](const auto& producer) { return producer->interfaces.count(std::string(id)); }) > 1)
+    throw Error("Interface ID is ambiguous across producers.");
+  for (auto& producer : impl_->producers) {
+    const auto found = producer->interfaces.find(std::string(id));
+    if (found == producer->interfaces.end()) continue;
+    return interface_features(InterfaceInfo{found->first, producer->path.string()});
+  }
+  throw Error("Interface is unavailable: " + std::string(id));
+}
+
+NodeMap& OneGen::interface_features(const InterfaceInfo& info) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  auto& producer = producer_for(impl_->producers, info);
+  const auto handle = producer.interfaces.find(info.id);
+  if (handle == producer.interfaces.end()) throw Error("Interface is unavailable: " + info.id);
+  auto& map = producer.interface_maps[info.id];
+  if (!map) {
+    auto loaded = std::make_unique<NodeMap>();
+    load_remote_nodemap(*loaded, producer.api, handle->second, "Interface");
+    map = std::move(loaded);
+  }
+  return *map;
+}
+
+void OneGen::release_interfaces() {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  if (!impl_->open_keys.empty()) throw Error("Disconnect all cameras before interface reconfiguration.");
+  impl_->discovered.clear();
+  for (auto& producer : impl_->producers) {
+    std::vector<std::string> ids;
+    for (const auto& [id, handle] : producer->interfaces) ids.push_back(id);
+    for (const auto& id : ids) close_interface(*producer, id);
+  }
 }
 
 std::vector<DeviceInfo> OneGen::enumerate(std::chrono::milliseconds timeout) {

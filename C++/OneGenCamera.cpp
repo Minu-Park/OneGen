@@ -398,6 +398,14 @@ void Camera::set_error_callback(ErrorFn cb) {
 }
 
 void Camera::open(std::string_view query) {
+  open_impl(query, {}, {});
+}
+
+void Camera::open(const DeviceInfo& device) {
+  open_impl(device.id, device.cti_path, device.interface_id);
+}
+
+void Camera::open_impl(std::string_view query, std::string_view producer, std::string_view interface_id) {
   ConnectTiming timing("device-open");
   if (impl_->opened) throw Error("open: camera already open");
   auto* og = impl_->owner->impl_.get();
@@ -406,9 +414,15 @@ void Camera::open(std::string_view query) {
 
   // Open an enumerated ID directly; zero-timeout refresh can discard producer results.
   auto found = og->discovered;
+  const auto in_scope = [&](const auto& device) {
+    return (producer.empty() || device.info.cti_path == producer)
+        && (interface_id.empty() || device.if_id == interface_id);
+  };
+  std::erase_if(found, [&](const auto& device) { return !in_scope(device); });
   if (std::none_of(found.begin(), found.end(), [&](const auto& device) { return device.info.id == query; })) {
-    found = scan_devices(og->producers, 10000);
-    og->discovered = found;
+    found = scan_devices(og->producers, 10000, interface_id, producer);
+    std::erase_if(og->discovered, in_scope);
+    og->discovered.insert(og->discovered.end(), found.begin(), found.end());
   }
   timing.mark("discovery-result-resolution");
   std::vector<DeviceInfo> infos;
@@ -418,17 +432,14 @@ void Camera::open(std::string_view query) {
 
   FoundDevice* hit = nullptr;
   for (auto& f : found)
-    if (f.info.id == match.id && f.info.cti_path == match.cti_path) hit = &f;
+    if (f.info.id == match.id && f.info.cti_path == match.cti_path && f.if_id == match.interface_id) hit = &f;
   if (!hit) throw Error("open: match lost");
 
-  const std::string key = hit->info.cti_path + "|" + hit->info.id;
+  const std::string key = hit->info.cti_path + '\0' + hit->if_id + '\0' + hit->info.id;
   if (og->open_keys.count(key)) throw Error("open: device already open: " + hit->info.id);
 
   auto& g = hit->producer->api;
-  const auto if_it = hit->producer->interfaces.find(hit->if_id);
-  if (if_it == hit->producer->interfaces.end() || !if_it->second)
-    throw Error("open: interface is not open");
-  GenTL::IF_HANDLE hif = if_it->second;
+  GenTL::IF_HANDLE hif = ensure_interface(*hit->producer, hit->if_id);
 
   GenTL::DEVICE_ACCESS_FLAGS modes[] = {GenTL::DEVICE_ACCESS_EXCLUSIVE,
                                         GenTL::DEVICE_ACCESS_CONTROL};
@@ -484,6 +495,7 @@ void Camera::open(std::string_view query) {
   impl_->open_key = key;
   impl_->opened = true;
   og->open_keys.insert(key);
+  ++hit->producer->active_devices[hit->if_id];
 }
 
 void Camera::Impl::cmd(const char* name) {
@@ -576,6 +588,10 @@ void Camera::close() {
   impl_->system_features.detach();
   if (impl_->g && impl_->hdev) impl_->g->DevClose(impl_->hdev);
   og->open_keys.erase(impl_->open_key);
+  for (auto& producer : og->producers) if (producer->path.string() == impl_->info.cti_path) {
+    auto& count = producer->active_devices[impl_->info.interface_id];
+    if (count) --count;
+  }
   impl_->hdev = nullptr;
   impl_->hif = nullptr;
   impl_->hport = nullptr;
