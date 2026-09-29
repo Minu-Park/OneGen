@@ -1,5 +1,6 @@
 #pragma once
 #include "OneGenWorkerMessages.h"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -169,7 +170,8 @@ inline int fakeWorker(const std::filesystem::path& cti)
       const bool slow = cti.parent_path().filename() == "vendor-a";
       if (cti.stem() == "Heartbeat") std::this_thread::sleep_for(std::chrono::seconds{6});
       if (slow) std::this_thread::sleep_for(std::chrono::seconds{1});
-      if (cti.stem() == "EmptyBoard" || (cti.stem() == "Retry" && probes < 2)) {
+      if (cti.stem() == "EmptyBoard" || cti.stem() == "ProbeFail"
+          || (cti.stem() == "Retry" && probes < 2)) {
         payload.scalar(std::uint32_t{0});
       } else {
         onegen::DeviceInfo device;
@@ -181,6 +183,12 @@ inline int fakeWorker(const std::filesystem::path& cti)
         payload.scalar(std::uint32_t{1});
         write(payload, device);
       }
+      const bool failed = cti.stem() == "ProbeFail" || cti.stem() == "PartialProbe"
+          || (cti.stem() == "SessionProbeFailure"
+              && std::any_of(opened.begin(), opened.end(), [](const auto& item) { return !item.second.empty(); }));
+      writeStrings(payload, failed ? std::vector<std::string>{"interface=busy-board: TLOpenInterface: test failure"}
+                                   : std::vector<std::string>{});
+      if (failed) std::ofstream(cti.string() + ".probes", std::ios::app) << "probe\n";
     }
     transmit({request.operation, request.id, true, {}, payload.take(), request.session});
     if (request.operation == Operation::Shutdown) return 0;

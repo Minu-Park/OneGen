@@ -121,8 +121,11 @@ int main() {
     if (info.id == "busy-interface") throw onegen::Error("Interface resource busy: another owner");
     return {};
   };
-  const auto partial = onegen::scan_devices(fake_producers, 0);
+  std::vector<std::string> failures;
+  const auto partial = onegen::scan_devices(fake_producers, 0, {}, {}, &failures);
   assert(claims == 2 && partial.size() == 1 && partial.front().info.id == device_id);
+  assert(failures.size() == 1 && failures.front().find("interface=busy-interface") != std::string::npos);
+  assert(failures.front().find("Interface resource busy: another owner") != std::string::npos);
   bool selected_busy_failed = false;
   try { onegen::scan_devices(fake_producers, 0, "busy-interface"); }
   catch (const onegen::Error&) { selected_busy_failed = true; }

@@ -171,7 +171,8 @@ std::string gentl_string(Gentl& g, GenTL::IF_HANDLE hif, const char* devid,
 }
 
 std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& producers,
-    uint64_t timeout_ms, std::string_view selected_interface, std::string_view selected_producer) {
+    uint64_t timeout_ms, std::string_view selected_interface, std::string_view selected_producer,
+    std::vector<std::string>* failures) {
   std::vector<FoundDevice> out;
   for (auto& prod : producers) {
     if (!selected_producer.empty() && prod->path.string() != selected_producer) continue;
@@ -228,6 +229,8 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
       for (auto& fd : batch) out.push_back(std::move(fd));
       } catch (const std::exception& error) {
         if (!selected_interface.empty()) throw;
+        if (failures) failures->push_back("interface=" + ifid + " cti=" + prod->path.string()
+                                         + ": " + error.what());
         stage_log_warning("interface search failed: cti=%s interface=%s: %s",
                           prod->path.string().c_str(), ifid.c_str(), error.what());
       }
@@ -402,9 +405,16 @@ void OneGen::release_interfaces() {
 }
 
 std::vector<DeviceInfo> OneGen::enumerate(std::chrono::milliseconds timeout) {
+  std::vector<std::string> failures;
+  return enumerate(timeout, failures);
+}
+
+std::vector<DeviceInfo> OneGen::enumerate(std::chrono::milliseconds timeout,
+    std::vector<std::string>& failures) {
   std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  failures.clear();
   if (impl_->producers.empty()) throw Error("enumerate: no CTI loaded");
-  auto found = scan_devices(impl_->producers, static_cast<uint64_t>(timeout.count()));
+  auto found = scan_devices(impl_->producers, static_cast<uint64_t>(timeout.count()), {}, {}, &failures);
   impl_->discovered = found;
   std::vector<DeviceInfo> out;
   out.reserve(found.size());

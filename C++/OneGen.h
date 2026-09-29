@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -54,8 +55,12 @@ public:
       std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
   /** Closes interfaces for explicit reconfiguration; rejects open cameras. */
   void release_interfaces();
+  /** Enumerates devices while logging individual Interface failures. */
   std::vector<DeviceInfo> enumerate(
       std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
+  /** Returns surviving devices and reports every failed producer-scoped Interface. */
+  std::vector<DeviceInfo> enumerate(std::chrono::milliseconds timeout,
+      std::vector<std::string>& failures);
 
   Camera& addCamera();
 

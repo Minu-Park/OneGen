@@ -9,6 +9,12 @@ int main()
   onegen::worker::Message message{onegen::worker::Operation::Frame};
   message.session = 42;
   assert(onegen::worker::decode(onegen::worker::encode(message)).session == 42);
+  auto old_protocol = onegen::worker::encode(message);
+  old_protocol[0] = std::byte(onegen::worker::protocol_version - 1);
+  bool old_protocol_rejected = false;
+  try { onegen::worker::decode(old_protocol); }
+  catch (const std::runtime_error&) { old_protocol_rejected = true; }
+  assert(old_protocol_rejected);
   onegen::InterfaceInfo iface{"id", "producer", "display", "vendor", "CXP"};
   onegen::worker::Writer interface_writer;
   onegen::worker::write(interface_writer, iface);

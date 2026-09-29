@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve leading producer NOTICE/INFO, DEBUG/TRACE and ERROR/FATAL severity fields without interpreting message-body text as a severity.
+- Report Interface discovery failures alongside surviving Devices through worker protocol v10; retain Interface inventory, stop retrying failures as empty inventories, and retire failed idle discovery workers while preserving connected or opening sessions.
+
 - Align feature-search clearing with the result count and favorites control; retain focus and filtering state when cleared.
 
 - Declare the GenTL / GenApi subtitle and discovery, feature, and acquisition summary in package metadata.

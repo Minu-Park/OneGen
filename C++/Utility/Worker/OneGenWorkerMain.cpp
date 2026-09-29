@@ -266,9 +266,11 @@ int main(int argc, char** argv)
           case Operation::Probe: {
             const auto timeout = std::clamp(input.scalar<std::uint32_t>(), 1U, 60000U);
             try {
-              auto devices = system.enumerate(std::chrono::milliseconds{timeout});
+              std::vector<std::string> failures;
+              auto devices = system.enumerate(std::chrono::milliseconds{timeout}, failures);
               system.release_idle_interfaces();
               writeVector(output, devices);
+              onegen::worker::writeStrings(output, failures);
             } catch (...) { system.release_idle_interfaces(); throw; }
             break;
           }

@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QDebug>
+#include <QRegularExpression>
 #include <QString>
 #include <utility>
 
@@ -38,10 +39,23 @@ private:
     const auto header = known ? line.mid(9).trimmed() : QByteArray{};
     const QString message = (known ? QString() : QStringLiteral("[GenICam/Producer] "))
         + QString::fromUtf8(line) + QStringLiteral(" cti=") + cti_;
-    // Explicit tags retain severity for any consumer; legacy stage lines remain informational.
+    // Match only a leading vendor severity field, never severity words in the message body.
+    static const QRegularExpression vendor_level(QStringLiteral(
+        R"(^\s*(?:\[\d{4}-\d{2}-\d{2}[ T][^\]\r\n]*\]\s*)?(?:\[(TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|CRIT|CRITICAL|FATAL)\]|(TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|CRIT|CRITICAL|FATAL)\s*:)(?:\s|$))"),
+        QRegularExpression::CaseInsensitiveOption);
+    const auto vendor = known ? QRegularExpressionMatch{} : vendor_level.match(QString::fromUtf8(line));
+    const auto level = (vendor.captured(1).isEmpty() ? vendor.captured(2) : vendor.captured(1)).toUpper();
+    // Explicit tags retain severity; unclassified vendor output keeps its warning fallback.
     if (known && header.startsWith("[DEBUG]")) qDebug().noquote() << message;
     else if (known && (header.startsWith("[CRIT]") || header.startsWith("[ERROR]")
                       || header.startsWith("[FATAL]"))) qCritical().noquote() << message;
+    else if (!known && (level == QLatin1String("DEBUG") || level == QLatin1String("TRACE")))
+      qDebug().noquote() << message;
+    else if (!known && (level == QLatin1String("ERROR") || level == QLatin1String("CRIT")
+                        || level == QLatin1String("CRITICAL") || level == QLatin1String("FATAL")))
+      qCritical().noquote() << message;
+    else if (!known && (level == QLatin1String("INFO") || level == QLatin1String("NOTICE")))
+      qInfo().noquote() << message;
     else if (!known || header.startsWith("[WARN]") || header.startsWith("[WARNING]"))
       qWarning().noquote() << message;
     else qInfo().noquote() << message;

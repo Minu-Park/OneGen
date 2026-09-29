@@ -39,8 +39,10 @@ struct FoundDevice {
   DeviceInfo info;
 };
 
+/** Scans scoped Interfaces, retaining surviving Devices and optional failure details. */
 std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& producers,
-    uint64_t timeout_ms, std::string_view selected_interface = {}, std::string_view selected_producer = {});
+    uint64_t timeout_ms, std::string_view selected_interface = {}, std::string_view selected_producer = {},
+    std::vector<std::string>* failures = nullptr);
 
 std::string gentl_string(Gentl& g, GenTL::IF_HANDLE hif, const char* devid,
                          GenTL::DEVICE_INFO_CMD cmd);

@@ -32,14 +32,20 @@ const char* moduleLabel(int index)
 }
 
 template <class T>
-std::vector<T> readVector(const std::vector<std::byte>& payload, T (*read)(Reader&))
+std::vector<T> readVector(Reader& input, T (*read)(Reader&))
 {
-  Reader input(payload);
   const auto count = input.scalar<std::uint32_t>();
   std::vector<T> values;
   values.reserve(count);
   for (std::uint32_t index = 0; index < count; ++index) values.push_back(read(input));
   return values;
+}
+
+template <class T>
+std::vector<T> readVector(const std::vector<std::byte>& payload, T (*read)(Reader&))
+{
+  Reader input(payload);
+  return readVector(input, read);
 }
 
 } // namespace
@@ -294,8 +300,9 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
   for (const auto& cti : ctis) {
     probes.push_back(std::async(std::launch::async, [&, cti] {
       Item item{cti};
+      std::shared_ptr<Connection> worker;
       try {
-        auto worker = connection(cti.string());
+        worker = connection(cti.string());
         item.interfaces = readVector<InterfaceInfo>(worker->request(Operation::ListInterfaces), readInterfaceInfo);
         const auto deadline = std::chrono::steady_clock::now() + probe_timeout_;
         do {
@@ -305,22 +312,22 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
           const auto slice = std::min(std::chrono::milliseconds{1000}, remaining);
           Writer out;
           out.scalar(static_cast<std::uint32_t>(slice.count()));
-          try {
-            item.devices = readVector<DeviceInfo>(
-                worker->request(Operation::Probe, out.take(), slice * 4 + std::chrono::seconds{5}),
-                readDeviceInfo);
-            item.error.clear();
-          } catch (const std::exception& error) {
-            item.error = error.what();
-            if (!item.error.starts_with("Interface resource busy:")) throw;
+          const auto payload = worker->request(Operation::Probe, out.take(), slice * 4 + std::chrono::seconds{5});
+          Reader input(payload);
+          item.devices = readVector(input, readDeviceInfo);
+          for (const auto& failure : readStrings(input)) {
+            if (!item.error.empty()) item.error += '\n';
+            item.error += failure;
           }
-          if (!item.devices.empty() || std::chrono::steady_clock::now() >= deadline) break;
+          if (!input.empty()) throw std::runtime_error("Unexpected producer probe response bytes.");
+          if (!item.error.empty() || !item.devices.empty() || std::chrono::steady_clock::now() >= deadline) break;
           std::this_thread::sleep_until(std::min(deadline, attempt_started + slice));
         } while (std::chrono::steady_clock::now() < deadline);
         for (auto& device : item.devices)
           if (device.cti_path.empty()) device.cti_path = cti.string();
       } catch (const std::exception& exception) { item.error = exception.what(); }
       catch (...) { item.error = "Unknown producer probe failure."; }
+      if (!item.error.empty() && worker) retire_failed_discovery(cti.string(), worker.get());
       { std::lock_guard lock(completed_mutex); completed.push(std::move(item)); }
       completed_cv.notify_one();
     }));
@@ -348,11 +355,10 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
     qDebug().noquote() << QStringLiteral("[GenICam] producer search result: cti=%1 cameras=%2 status=%3 detail=%4")
         .arg(QString::fromStdString(item.cti.string())).arg(item.devices.size())
         .arg(item.error.empty() ? (item.devices.empty() ? QStringLiteral("no connected camera") : QStringLiteral("available"))
-                              : QStringLiteral("unavailable"))
+                              : (item.devices.empty() ? QStringLiteral("search failed") : QStringLiteral("partial result")))
         .arg(QString::fromStdString(item.error));
-    if (item.error.empty()) {
-      for (auto& device : item.devices) result.devices.push_back(std::move(device));
-    } else {
+    for (auto& device : item.devices) result.devices.push_back(std::move(device));
+    if (!item.error.empty()) {
       result.failures.push_back(item.cti.string() + ": " + item.error);
     }
     // Merge a copy so later producer aliases do not lose earlier candidates.
@@ -365,6 +371,26 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
   for (auto& probe : probes) probe.get();
   result.devices = merge(std::move(result.devices));
   return result;
+}
+
+void Coordinator::retire_failed_discovery(const std::string& cti, Connection* expected)
+{
+  std::shared_ptr<Connection> failed;
+  {
+    std::lock_guard lock(mutex_);
+    const auto found = connections_.find(cti);
+    if (found == connections_.end() || found->second.get() != expected) return;
+    if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
+                    [&](const auto& item) { return item.second.cti_path == cti; })
+        || std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
+                       [&](const auto& item) { return item.second.starts_with(cti + '\0'); })) return;
+    failed = std::move(found->second);
+    connections_.erase(found);
+    std::erase_if(device_connections_, [&](const auto& item) { return item.second == failed; });
+  }
+  failed->close();
+  qInfo().noquote() << QStringLiteral("[GenICam] failed discovery worker retired: cti=%1")
+                          .arg(QString::fromStdString(cti));
 }
 
 std::vector<DeviceInfo> Coordinator::merge(std::vector<DeviceInfo> devices)

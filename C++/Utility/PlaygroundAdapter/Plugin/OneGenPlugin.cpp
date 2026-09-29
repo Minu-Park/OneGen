@@ -100,7 +100,7 @@ std::vector<onegen::DeviceInfo> discover(
           .arg(std::chrono::duration_cast<std::chrono::seconds>(now - started).count());
     }
   });
-  qInfo().noquote() << QStringLiteral("[GenICam] camera search completed: %1 camera(s), %2/%3 producers checked, %4 unavailable producer(s), elapsed=%5 ms%6")
+  qInfo().noquote() << QStringLiteral("[GenICam] camera search completed: %1 camera(s), %2/%3 producers checked, %4 producer(s) with search failures, elapsed=%5 ms%6")
       .arg(result.devices.size()).arg(result.finished_producers).arg(result.total_producers)
       .arg(result.failures.size())
       .arg(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count())
@@ -108,7 +108,7 @@ std::vector<onegen::DeviceInfo> discover(
   if (!result.failures.empty()) {
     QStringList details;
     for (const auto& failure : result.failures) details.append(QString::fromStdString(failure));
-    qInfo().noquote() << QStringLiteral("[GenICam] optional producers unavailable; other search results remain usable. Details:\n%1")
+    qWarning().noquote() << QStringLiteral("[GenICam] producer search failures; available results remain usable. Details:\n%1")
         .arg(details.join(QLatin1Char('\n')));
   }
   for (const auto& device : result.devices)

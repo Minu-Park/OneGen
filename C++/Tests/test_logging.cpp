@@ -57,6 +57,23 @@ int main(int argc, char** argv)
   assert(records[4].text == QStringLiteral("[GenICam/Producer]   vendor detail=<sdk>& cti=producer.cti"));
   assert(records[5].type == QtWarningMsg);
   assert(records[5].text.endsWith(QStringLiteral("partial cti=producer.cti")));
+  const std::vector<std::pair<QByteArray, QtMsgType>> vendor_records{
+    {"[2026-09-29 13:37:21,907:19808:Map.FgSdk] NOTICE: Applet loaded", QtInfoMsg},
+    {"[2026-09-29 13:37:21,456:19808:FgSdk.fglib.Lib] ERROR: failed to initialize", QtCriticalMsg},
+    {"INFO: vendor ready", QtInfoMsg}, {"warning: vendor warning", QtWarningMsg},
+    {"[DEBUG] vendor trace", QtDebugMsg}, {"TRACE: vendor trace", QtDebugMsg},
+    {"FATAL: vendor failure", QtCriticalMsg},
+    {"NOTICE: value includes ERROR: as data", QtInfoMsg},
+    {"vendor detail: ERROR: is embedded", QtWarningMsg},
+    {"ERROR_COUNT: 0", QtWarningMsg},
+    {"[GenICam] [INFO] value includes ERROR: as data", QtInfoMsg},
+  };
+  for (const auto& [line, level] : vendor_records) {
+    forwarder.append(line + '\n');
+    assert(records.back().type == level);
+    assert(records.back().text.contains(QString::fromUtf8(line)));
+    assert(records.back().text.endsWith(QStringLiteral(" cti=producer.cti")));
+  }
   qInstallMessageHandler(handler);
   std::cout << "Stage serialization and worker diagnostic forwarding passed.\n";
 }

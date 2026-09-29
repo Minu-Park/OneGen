@@ -29,6 +29,20 @@ int main(int argc, char** argv)
 {
   QCoreApplication application(argc, argv);
   if (argc == 3 && std::string_view(argv[1]) == "--cti") return fakeWorker(argv[2]);
+  if ((argc == 4 || argc == 5) && std::string_view(argv[1]) == "--profile-discovery") {
+    try {
+      const auto budget = argc == 5 ? std::chrono::milliseconds{std::stoll(argv[4])}
+                                    : std::chrono::milliseconds{1000};
+      onegen::worker::Coordinator coordinator(argv[2], argv[3], budget);
+      const auto result = coordinator.discover();
+      std::cout << "Discovery: producers=" << result.finished_producers << '/' << result.total_producers
+                << " interfaces=" << result.interfaces.size() << " devices=" << result.devices.size()
+                << " failed-producers=" << result.failures.size() << '\n';
+      for (const auto& failure : result.failures) std::cout << "Failure: " << failure << '\n';
+      coordinator.shutdown();
+      return result.completed ? 0 : 1;
+    } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+  }
   if (argc == 6 && std::string_view(argv[1]) == "--profile-interface") {
     try {
       const std::string id = argv[5];
@@ -391,6 +405,75 @@ int main(int argc, char** argv)
     while (std::getline(starts, line)) ++count;
     assert(count == 2);
     failed.shutdown();
+  }
+  const auto line_count = [](const std::filesystem::path& path) {
+    std::ifstream file(path);
+    std::size_t count = 0;
+    for (std::string line; std::getline(file, line);) ++count;
+    return count;
+  };
+  // Failed Interfaces are reported once without dropping devices from surviving Interfaces.
+  for (const auto name : {"ProbeFail", "PartialProbe"}) {
+    const auto directory = root / name;
+    std::filesystem::create_directories(directory);
+    const auto cti = directory / (std::string(name) + ".cti");
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator failed(argv[0], directory, 5s);
+    const auto result = failed.discover();
+    assert(result.completed && result.interfaces.size() == 1 && result.failures.size() == 1);
+    assert(result.failures.front().find("interface=busy-board") != std::string::npos);
+    assert(result.devices.size() == (std::string_view(name) == "PartialProbe" ? 1U : 0U));
+    assert(line_count(cti.string() + ".probes") == 1); // Failure never becomes an empty-inventory retry.
+    failed.open_interface(result.interfaces.front());
+    assert(line_count(cti.string() + ".starts") == 2); // Failed idle discovery worker was retired.
+    failed.close_interface(result.interfaces.front());
+    failed.shutdown();
+  }
+  // Discovery failure cannot retire a pinned Interface or interrupt its live Device.
+  {
+    const auto directory = root / "active-failure";
+    std::filesystem::create_directories(directory);
+    const auto cti = directory / "PartialProbe.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator active(argv[0], directory, 100ms);
+    const onegen::InterfaceInfo board{"board", cti.string()};
+    active.open_interface(board);
+    const auto pinned_result = active.discover();
+    assert(pinned_result.failures.size() == 1 && line_count(cti.string() + ".starts") == 1);
+    assert(active.interface_features(board).name == "Root");
+    auto camera = active.open(active.rescan_interface(board).front());
+    std::atomic<int> frames{0};
+    camera->set_frame_callback([&](const auto&) { ++frames; });
+    camera->live();
+    const auto result = active.discover();
+    assert(result.failures.size() == 1 && result.devices.size() == 1);
+    assert(camera->alive() && camera->data_streams().front().id == "channel-a");
+    camera->trigger();
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (frames == 0 && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
+    assert(frames == 1 && line_count(cti.string() + ".starts") == 1);
+    camera.reset();
+    assert(active.interface_features(board).name == "Root");
+    active.close_interface(board);
+    active.shutdown();
+  }
+  // A direct Device lease protects its worker independently of pinned Interface sessions.
+  {
+    const auto directory = root / "direct-active-failure";
+    std::filesystem::create_directories(directory);
+    const auto cti = directory / "SessionProbeFailure.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator active(argv[0], directory, 100ms);
+    const auto initial = active.discover();
+    assert(initial.failures.empty() && initial.devices.size() == 1);
+    auto camera = active.open(initial.devices.front());
+    camera->live();
+    const auto result = active.discover();
+    assert(result.failures.size() == 1 && result.devices.size() == 1);
+    assert(camera->alive() && camera->data_streams().front().id == "fast");
+    assert(line_count(cti.string() + ".starts") == 1);
+    camera.reset();
+    active.shutdown();
   }
   std::filesystem::remove_all(root);
   std::cout << "test_worker ok\n";

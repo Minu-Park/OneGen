@@ -74,6 +74,20 @@ Discovery runs are serialized per coordinator; process isolation does not confer
 exclusive ownership of hardware shared by different producer installations.
 Shutdown suppresses pending GUI updates and joins discovery before teardown.
 
+Probe responses in protocol v10 carry both Devices and producer-scoped Interface
+failure details. An individual Interface failure preserves other Interfaces and
+their Devices, appears in the cumulative result, and is not retried as an empty
+inventory. Successful empty inventories retain the initial-discovery budget.
+An idle worker with a failed probe is retired before publishing its result so
+native resources retained during failed initialization are released. Connected
+or opening Interface/Device sessions prevent retirement of their worker.
+
+Worker diagnostics preserve OneGen severity tags and leading producer severity
+fields, including timestamped `NOTICE:` and `ERROR:` records. Unclassified
+producer output retains the warning fallback; message-body keywords do not
+change severity. Vendor fatal diagnostics are forwarded as critical messages
+without terminating the consumer.
+
 ## OneGen Session UI
 
 Creating `Device > GenICam` creates one independent OneGen session.
@@ -96,7 +110,7 @@ for reconnect; shutdown releases them.
 ## Multiple Sessions
 
 The plugin owns one coordinator. An explicitly connected Interface pins one
-producer worker and its Device channels share that worker through protocol v9.
+producer worker and its Device channels share that worker through protocol v10.
 Standalone Device connections retain the existing worker-isolation policy.
 
 - Duplicate local opens of the same complete Device identity are rejected.
