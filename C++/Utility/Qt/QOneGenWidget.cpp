@@ -1,6 +1,7 @@
 #include "QOneGenWidget.h"
 #include <QElapsedTimer>
 #include "NumericFeatureEditor.h"
+#include "OneGenFeatureTree.h"
 
 #include "OneGenCoordinator.h"
 #include "OneGenSourceController.h"
@@ -127,7 +128,7 @@ QOneGenWidget::QOneGenWidget(
   top_layout->addLayout(tool_layout, 0);
   layout->addLayout(top_layout);
 
-  features_ = new QTreeWidget;
+  features_ = new OneGenFeatureTree;
   features_->setObjectName(QStringLiteral("CameraFeaturesTree"));
   features_->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
   features_->setColumnCount(2);
@@ -136,15 +137,35 @@ QOneGenWidget::QOneGenWidget(
   features_->setRootIsDecorated(true);
   features_->setContextMenuPolicy(Qt::CustomContextMenu);
   connect(features_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& position) {
-    if (!lease_ || operation_watcher_.isRunning() || grab_watcher_.isRunning() || grab_live_button_->isChecked()) return;
-    const auto* item = features_->itemAt(position);
+    auto* item = features_->itemAt(position);
     if (!item) return;
     const int module = item->data(0, Qt::UserRole + 1).toInt();
+    const auto nodeName = item->data(0, Qt::UserRole).toString();
     QMenu menu(this);
-    auto* copy = menu.addAction(QStringLiteral("Copy module settings"));
-    auto* restore = menu.addAction(QStringLiteral("Restore module settings from clipboard"));
-    restore->setEnabled(!QApplication::clipboard()->text().isEmpty());
+    QAction* favorite = nullptr;
+    if (item->data(0, OneGenFeatureTree::LeafRole).toBool()) {
+      favorite = menu.addAction(features_->isFavorite(item)
+          ? tr("Remove from favorites") : tr("Add to favorites"));
+      favorite->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
+    }
+    const bool canPersist = lease_ && !operation_watcher_.isRunning()
+        && !grab_watcher_.isRunning() && !grab_live_button_->isChecked();
+    QAction* copy = nullptr;
+    QAction* restore = nullptr;
+    if (canPersist) {
+      if (favorite) menu.addSeparator();
+      copy = menu.addAction(QStringLiteral("Copy module settings"));
+      restore = menu.addAction(QStringLiteral("Restore module settings from clipboard"));
+      restore->setEnabled(!QApplication::clipboard()->text().isEmpty());
+    }
+    if (menu.isEmpty()) return;
     const auto* chosen = menu.exec(features_->viewport()->mapToGlobal(position));
+    if (!chosen) return;
+    if (chosen == favorite) {
+      const auto hits = featureItemsNamed(nodeName, module);
+      if (!hits.isEmpty()) features_->toggleFavorite(hits.front());
+      return;
+    }
     try {
       if (chosen == copy) {
         QApplication::clipboard()->setText(QString::fromStdString(lease_->save_features(module)));
@@ -692,6 +713,7 @@ void QOneGenWidget::setFeatureSnapshot(
   feature_modules_ = std::move(modules);
   pending_features_.clear();
   if (!applyFeatureSnapshotInPlace()) rebuildFeatures();
+  features_->refreshFilter();
 }
 
 void QOneGenWidget::setFeatureGrabbing(bool grabbing)
@@ -770,6 +792,7 @@ void QOneGenWidget::rebuildFeatures()
   features_->clear();
   if (feature_modules_.empty()) {
     rebuilding_features_ = false;
+    features_->refreshFilter();
     return;
   }
 
@@ -803,6 +826,7 @@ void QOneGenWidget::rebuildFeatures()
     features_->setCurrentItem(cam);
   else
     restoreFeatureViewport(viewport);
+  features_->refreshFilter();
   rebuilding_features_ = false;
 }
 
@@ -985,6 +1009,7 @@ void QOneGenWidget::addFeatureLeaf(QTreeWidgetItem* parent, const onegen::Featur
   auto* item = new QTreeWidgetItem(parent, QStringList(QString::fromStdString(n.display_name)));
   item->setData(0, Qt::UserRole, QString::fromStdString(n.name));
   item->setData(0, Qt::UserRole + 1, map_index);
+  features_->registerFeature(item, QString::fromStdString(feature_modules_.at(map_index).first));
   const auto help = n.tooltip.empty() ? n.description : n.tooltip;
   item->setToolTip(0, QString::fromStdString(help));
   features_->setItemWidget(item, 1, w);
@@ -1377,6 +1402,7 @@ void QOneGenWidget::drainFeatureInvalidates()
     }
   }
   if (need_rebuild && !feature_grabbing_) rebuildFeatures();
+  features_->refreshFilter();
   if (qEnvironmentVariableIntValue("ONEGEN_TRACE_CONNECT") == 1)
     qInfo().noquote() << QStringLiteral("[GenICam] connect timing: scope=host stage=feature-invalidation-drain nodes=%1 duration=%2 ms")
         .arg(batch.size()).arg(timing.elapsed());

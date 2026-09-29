@@ -113,6 +113,14 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Worker")
   target_link_libraries(OneGenWorkerClient PUBLIC onegen Qt6::Core)
   if(ONEGEN_BUILD_TESTS)
+    add_executable(test_logging Tests/test_logging.cpp)
+    target_link_libraries(test_logging PRIVATE OneGen::WorkerClient)
+    target_compile_options(test_logging PRIVATE
+      $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+      $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+    add_test(NAME test_logging COMMAND test_logging)
+    set_tests_properties(test_logging PROPERTIES ENVIRONMENT_MODIFICATION
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
     find_package(Qt6 QUIET COMPONENTS Widgets)
     if(TARGET Qt6::Widgets)
       add_executable(test_numeric_editor Tests/test_numeric_editor.cpp
@@ -162,6 +170,8 @@ if(ONEGEN_BUILD_QT_WIDGET)
     Utility/Qt/QOneGenWidget.cpp
     Utility/Qt/QOneGenWidget.h
     Utility/Qt/NumericFeatureEditor.h
+    Utility/Qt/OneGenFeatureTree.cpp
+    Utility/Qt/OneGenFeatureTree.h
   )
   add_library(OneGen::QtWidget ALIAS OneGenQtWidget)
   set_target_properties(OneGenQtWidget PROPERTIES AUTOMOC ON)
@@ -176,6 +186,22 @@ if(ONEGEN_BUILD_QT_WIDGET)
       Playground::DevicePlugin
       Qt6::Widgets
       Qt6::Concurrent)
+  if(ONEGEN_BUILD_TESTS AND TARGET Qt6::Test AND ONEGEN_BUILD_PLAYGROUND_ADAPTER)
+    enable_testing()
+    qt_add_executable(OneGenFeatureTreeTests
+      Utility/Qt/OneGenFeatureTreeTests.cpp
+      Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
+      Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
+    target_link_libraries(OneGenFeatureTreeTests PRIVATE OneGen::QtWidget OneGen::PlaygroundAdapter Qt6::Test)
+    if(TARGET Resources::Resources)
+      target_link_libraries(OneGenFeatureTreeTests PRIVATE Resources::Resources)
+      target_compile_definitions(OneGenFeatureTreeTests PRIVATE ONEGEN_FEATURE_THEME=1)
+    endif()
+    add_test(NAME OneGenFeatureTreeTests COMMAND OneGenFeatureTreeTests -o -,txt)
+    set_tests_properties(OneGenFeatureTreeTests PROPERTIES
+      ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+  endif()
   message(STATUS "[OneGen] OneGen::QtWidget enabled.")
 endif()
 

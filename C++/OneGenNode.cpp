@@ -65,7 +65,7 @@ public:
       if (rc != GenTL::GC_ERR_SUCCESS && g->GCGetLastError)
         last_error_rc = g->GCGetLastError(
             &producer_error_code, producer_error, &producer_error_size);
-      stage_log("worker CPort::Read failed rc=%d port=%p addr=%lld requested=%lld returned=%zu"
+      stage_log_warning("worker CPort::Read failed rc=%d port=%p addr=%lld requested=%lld returned=%zu"
                 " elapsed_ms=%lld read_seq=%llu since_last_success_ms=%lld"
                 " last_error_rc=%d producer_error_code=%d producer_error=\"%s\""
                 " (genuine producer read failure or empty transfer)",

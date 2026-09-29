@@ -228,8 +228,8 @@ std::vector<FoundDevice> scan_devices(std::vector<std::unique_ptr<Producer>>& pr
       for (auto& fd : batch) out.push_back(std::move(fd));
       } catch (const std::exception& error) {
         if (!selected_interface.empty()) throw;
-        std::cerr << "[GenICam] interface search failed: cti=" << prod->path.string()
-                  << " interface=" << ifid << ": " << error.what() << '\n';
+        stage_log_warning("interface search failed: cti=%s interface=%s: %s",
+                          prod->path.string().c_str(), ifid.c_str(), error.what());
       }
     }
     if (out.size() > first_device)

@@ -23,7 +23,7 @@ class QComboBox;
 class QLabel;
 class QTimer;
 class QToolButton;
-class QTreeWidget;
+class OneGenFeatureTree;
 class QTreeWidgetItem;
 namespace onegen::worker {
 class Coordinator;
@@ -164,7 +164,7 @@ private:
   QToolButton* grab_one_button_ = nullptr;
   QToolButton* grab_live_button_ = nullptr;
   QLabel* status_ = nullptr;
-  QTreeWidget* features_ = nullptr;
+  OneGenFeatureTree* features_ = nullptr;
   QTimer* feature_drain_timer_ = nullptr;
   FeatureRead feature_read_;
   FeatureWrite feature_write_;

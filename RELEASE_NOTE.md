@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Align feature-search clearing with the result count and favorites control; retain focus and filtering state when cleared.
+
+- Declare the GenTL / GenApi subtitle and discovery, feature, and acquisition summary in package metadata.
+
+- Preserve worker diagnostic severity, producer messages, and final partial lines; serialize complete stage records through a capturable standard diagnostic stream.
+
+- Add a compact floating bottom feature search with the feature-header surface and a subtle shadow, name/category filtering, result counts, Ctrl+F and Escape shortcuts; omit surrounding gradient/blur.
+- Share favorites by node-map/internal-name across devices; silently omit absent nodes while retaining the saved list. Toggle row stars or Ctrl+D and combine favorites-only browsing with search without rebuilding editors.
+- Restore expansion and scrolling after filtering and let the last feature scroll above the search bubble.
+
 - Let the outer panel own embedded page minimum sizes so tabs and status bars fit at the supported minimum window size.
 - Select Data Streams asynchronously; keep stream changes and Live start disabled during Single while explicit triggers and disconnect remain available.
 - Drain pending Single requests before releasing their camera lease and reject stream reconfiguration during active acquisition.

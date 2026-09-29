@@ -2,6 +2,9 @@
 set(PLAYGROUND_PLUGIN_ID "onegen")
 set(PLAYGROUND_PLUGIN_VERSION "0.1.0")
 set(PLAYGROUND_PLUGIN_DISPLAY_NAME "GenICam")
+# Optional presentation metadata; consumers must export it to manifests/catalogs.
+set(PLAYGROUND_PLUGIN_SUBTITLE "GenTL / GenApi")
+set(PLAYGROUND_PLUGIN_DESCRIPTION "Discover devices through GenTL producers, edit GenApi features, and acquire image and multipart data.")
 set(PLAYGROUND_PLUGIN_ADD_ACTION_TEXT "GenICam")
 set(PLAYGROUND_PLUGIN_SESSION_TYPE "OneGenCamera")
 set(PLAYGROUND_PLUGIN_MENU_ORDER 110)

@@ -1,6 +1,7 @@
 #include "OneGenWorkerClient.h"
 
 #include "OneGenWorkerMessages.h"
+#include "WorkerLogForwarder.h"
 
 #include <QDir>
 #include <QDebug>
@@ -149,7 +150,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
 
     QByteArray buffer;
     QByteArray diagnostic;
-    QByteArray timing_lines;
+    WorkerLogForwarder log_forwarder(QString::fromStdString(impl_->cti.string()));
     while (process.state() != QProcess::NotRunning) {
       std::queue<Message> pending;
       {
@@ -167,14 +168,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         buffer.append(process.readAllStandardOutput());
         const auto stderr_bytes = process.readAllStandardError();
         diagnostic.append(stderr_bytes);
-        timing_lines.append(stderr_bytes);
-        for (auto newline = timing_lines.indexOf('\n'); newline >= 0; newline = timing_lines.indexOf('\n')) {
-          const auto line = timing_lines.left(newline).trimmed();
-          timing_lines.remove(0, newline + 1);
-          if (line.startsWith("[GenICam]"))
-            qInfo().noquote() << QString::fromUtf8(line) << "cti=" << QString::fromStdString(impl_->cti.string());
-        }
-        if (timing_lines.size() > 65536) timing_lines.clear();
+        log_forwarder.append(stderr_bytes);
         if (diagnostic.size() > 65536) diagnostic.remove(0, diagnostic.size() - 65536);
         Message message;
         while (takeMessage(buffer, message)) {
@@ -230,7 +224,10 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
     }
     impl_->interface_claims.clear();
     {
-      diagnostic.append(process.readAllStandardError());
+      const auto final_diagnostics = process.readAllStandardError();
+      diagnostic.append(final_diagnostics);
+      log_forwarder.append(final_diagnostics);
+      log_forwarder.finish();
       QString last_error;
       auto remainder = QString::fromUtf8(diagnostic);
       for (auto line : remainder.split('\n')) {
