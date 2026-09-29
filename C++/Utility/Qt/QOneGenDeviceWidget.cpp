@@ -35,8 +35,7 @@ QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordin
 {
   setMinimumSize(300, 350);
   auto* layout = new QVBoxLayout(this);
-  layout->setContentsMargins(0, 0, 0, 0);
-  layout->setSpacing(0);
+  layout->setObjectName(QStringLiteral("DeviceRootLayout"));
   selector_bar_ = new QFrame(this);
   selector_bar_->setObjectName(QStringLiteral("OneGenSelectorBar"));
   auto* top = new QHBoxLayout(selector_bar_);
@@ -170,7 +169,7 @@ void QOneGenDeviceWidget::refresh() {
             self->interfaces_ = self->coordinator_->interfaces();
             if (!self->interface_ && !self->watcher_.isRunning()
                 && std::none_of(self->cameras_.begin(), self->cameras_.end(),
-                    [](const auto& item) { return item.second->cameraInUse(); })) self->updateTargets();
+                    [](const auto& item) { return item.second->cameraInUse(); })) self->updateTargets(false);
           }, Qt::QueuedConnection);
         }) : devices_;
         result.interfaces = coordinator_->interfaces();
@@ -196,8 +195,14 @@ void QOneGenDeviceWidget::finishDiscovery() {
   updateControls();
 }
 
-void QOneGenDeviceWidget::updateTargets() {
+void QOneGenDeviceWidget::updateTargets(bool complete) {
   const auto selected = devices_box_->currentData().toString();
+  std::optional<Target> retained;
+  if (!complete) {
+    const auto previous = std::find_if(targets_.begin(), targets_.end(),
+        [&](const auto& target) { return QString::fromStdString(target.key) == selected; });
+    if (previous != targets_.end()) retained = *previous;
+  }
   targets_.clear();
   for (const auto& device : devices_) {
     targets_.push_back({"Device|" + cameraKey(device), cameraLabel(device), device, {}});
@@ -207,6 +212,9 @@ void QOneGenDeviceWidget::updateTargets() {
         QString::fromStdString(info.display_name.empty() ? info.id : info.display_name),
         {}, info});
   }
+  // Absence in a partial scan is not evidence that the selected target disappeared.
+  if (retained && std::none_of(targets_.begin(), targets_.end(),
+      [&](const auto& target) { return target.key == retained->key; })) targets_.push_back(*retained);
   {
     const QSignalBlocker blocker(devices_box_);
     devices_box_->clear();
@@ -293,7 +301,15 @@ void QOneGenDeviceWidget::disconnectInterface() {
   watcher_.setFuture(QtConcurrent::run([this, info] {
     Result result;
     try { coordinator_->close_interface(info); }
-    catch (const std::exception& error) { result.error = QString::fromLocal8Bit(error.what()); }
+    catch (const std::exception& error) {
+      result.error = QString::fromLocal8Bit(error.what());
+      try {
+        result.features = coordinator_->interface_features(info);
+        result.devices = coordinator_->rescan_interface(info);
+      } catch (const std::exception& recovery) {
+        qWarning() << "[GenICam] interface state refresh after failed release failed:" << recovery.what();
+      }
+    }
     return result;
   }));
   updateControls();

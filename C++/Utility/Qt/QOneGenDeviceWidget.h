@@ -43,7 +43,7 @@ private:
   void disconnectInterface();
   void finish();
   void finishDiscovery();
-  void updateTargets();
+  void updateTargets(bool complete = true);
   void updateCameraTabs(const std::vector<onegen::DeviceInfo>& devices);
   void showInterface(const Result& result);
   void clearTabs();

@@ -263,6 +263,10 @@ Camera::~Camera() {
 
 bool Camera::is_open() const { return impl_->opened; }
 bool Camera::is_live() const { return impl_->live.load(); }
+bool Camera::is_acquiring() const {
+  std::lock_guard<std::mutex> lock(impl_->acq_mu);
+  return impl_->acquiring;
+}
 const DeviceInfo& Camera::info() const { return impl_->info; }
 NodeMap& Camera::features() {
   return impl_->features.empty() ? impl_->device_features : impl_->features;
@@ -295,7 +299,8 @@ std::vector<DataStreamInfo> Camera::data_streams() const {
 }
 
 void Camera::select_data_stream(const std::uint32_t index) {
-  if (impl_->live) throw Error("select_data_stream: acquisition is active");
+  std::lock_guard<std::mutex> lock(impl_->acq_mu);
+  if (impl_->live || impl_->acquiring) throw Error("select_data_stream: acquisition is active");
   const auto streams = data_streams();
   if (index >= streams.size()) throw Error("select_data_stream: index out of range");
   if (index == impl_->stream_index) return;
@@ -925,6 +930,7 @@ std::vector<Frame> Camera::single(std::size_t n) {
   if (n == 0) throw Error("single: n == 0");
   {
     std::lock_guard<std::mutex> lk(impl_->acq_mu);
+    if (impl_->acquiring) throw Error("single: acquisition is active");
     impl_->start_stream(n);
   }
   timing.mark("stream-start");
@@ -951,6 +957,7 @@ std::vector<Frame> Camera::single(std::size_t n) {
 void Camera::prepare() {
   if (!impl_->opened) throw Error("prepare: not open");
   std::lock_guard<std::mutex> lk(impl_->acq_mu);
+  if (impl_->live || impl_->acquiring) throw Error("prepare: acquisition is active");
   try {
     impl_->release_stream();
     impl_->prepare_stream();
@@ -964,6 +971,7 @@ void Camera::live() {
   if (!impl_->opened) throw Error("live: not open");
   if (impl_->live.load()) return;
   std::lock_guard<std::mutex> lk(impl_->acq_mu);
+  if (impl_->acquiring) throw Error("live: acquisition is active");
   impl_->stop_live = false;
   try {
     impl_->start_stream(GENTL_INFINITE);

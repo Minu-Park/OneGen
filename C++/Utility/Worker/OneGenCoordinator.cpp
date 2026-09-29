@@ -279,6 +279,12 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
   std::lock_guard discovery_lock(discovery_mutex_);
   DiscoveryResult result;
   const auto ctis = cti_root_.empty() ? defaults::producerCtis() : defaults::producerCtis(cti_root_);
+  {
+    std::lock_guard lock(mutex_);
+    std::erase_if(interface_inventory_, [&](const auto& item) {
+      return std::none_of(ctis.begin(), ctis.end(), [&](const auto& cti) { return cti.string() == item.first; });
+    });
+  }
   result.total_producers = ctis.size();
   struct Item { std::filesystem::path cti; std::vector<DeviceInfo> devices; std::string error; std::vector<InterfaceInfo> interfaces; };
   std::mutex completed_mutex;
@@ -514,17 +520,17 @@ void Coordinator::release(const std::string& identity, const std::string& cti, b
                           Connection* dying, std::uint32_t session)
 {
   std::lock_guard lock(mutex_);
+  const auto found = device_connections_.find(cti + '\0' + identity);
+  // A dead worker's lease may outlive a reconnect with the same scoped identity.
+  if (dying && (found == device_connections_.end() || found->second.get() != dying)) return;
   leased_.erase(identity);
   leased_interfaces_.erase(identity);
-  if (!reusable) {
-    if (const auto found = device_connections_.find(cti + '\0' + identity); found != device_connections_.end()) {
-      if (dying && found->second.get() != dying) return;
-      if (!session) {
-        if (const auto probe = connections_.find(cti); probe != connections_.end() && probe->second == found->second)
-          connections_.erase(probe);
-      }
-      device_connections_.erase(found);
+  if (!reusable && found != device_connections_.end()) {
+    if (!session) {
+      if (const auto probe = connections_.find(cti); probe != connections_.end() && probe->second == found->second)
+        connections_.erase(probe);
     }
+    device_connections_.erase(found);
   }
 }
 

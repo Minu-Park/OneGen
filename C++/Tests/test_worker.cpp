@@ -251,6 +251,21 @@ int main(int argc, char** argv)
   }
   progressive.shutdown();
 
+  // A stale lease must not release the same camera's replacement worker lease.
+  {
+    onegen::worker::Coordinator restarted(argv[0], root, 100ms);
+    auto stale = restarted.open(*fast);
+    try { stale->read_node(0, "ExitWorker"); } catch (const std::exception&) {}
+    assert(!stale->alive());
+    auto current = restarted.open(*fast);
+    stale.reset();
+    bool duplicate_rejected = false;
+    try { restarted.open(*fast); } catch (const std::exception&) { duplicate_rejected = true; }
+    assert(duplicate_rejected);
+    assert(current->data_streams().front().id == "fast");
+    current.reset();
+  }
+
   // Empty short probes retry within the overall budget and return as soon as a camera appears.
   const auto retry_root = root / "retry";
   std::filesystem::create_directories(retry_root);
@@ -353,6 +368,9 @@ int main(int argc, char** argv)
     assert(empty_board.interface_features(scan.interfaces[0]).name == "Root");
     empty_board.write_interface(scan.interfaces[0], "Feature", "set", "1");
     empty_board.close_interface(scan.interfaces[0]);
+    std::filesystem::remove(boards / "EmptyBoard.cti");
+    assert(empty_board.discover().interfaces.empty());
+    assert(empty_board.interfaces().empty());
     empty_board.shutdown();
   }
   // A failed native open must release its idle worker before another producer is tried.

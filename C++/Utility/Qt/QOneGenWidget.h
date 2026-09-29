@@ -50,7 +50,7 @@ public:
   void setExternalSelector(QComboBox* selector, QToolButton* refresh);
   /** Keeps the feature tree and status bar while hiding camera-specific controls. */
   void setFeaturePanelOnly();
-  /** Installs the interface-only settings panel without a camera connection. */
+  /** Installs Interface settings or updates the same Interface's existing feature editors. */
   void setInterface(const onegen::InterfaceInfo& info, onegen::FeatureNode snapshot);
   /** Reports a camera connection or operation that blocks board reconfiguration. */
   bool cameraInUse() const;
@@ -81,7 +81,7 @@ private:
     int writeMap = 0;
     qint64 elapsedMs = 0;
   };
-  enum class Operation { None, Connect, Disconnect, GrabOne, Start, Stop, Write, Restore };
+  enum class Operation { None, Connect, Disconnect, GrabOne, Start, Stop, Write, Restore, SelectStream };
 
   void refresh();
   void updateDiscoveryDevices(std::vector<onegen::DeviceInfo> devices);

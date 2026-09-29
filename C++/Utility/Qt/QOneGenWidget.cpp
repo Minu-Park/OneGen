@@ -68,6 +68,8 @@ QOneGenWidget::QOneGenWidget(
   devices_box_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
   devices_box_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
   streams_box_ = new QComboBox;
+  streams_box_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  streams_box_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
   streams_box_->setToolTip(QStringLiteral("Data Stream"));
   streams_box_->setEnabled(false);
 
@@ -134,7 +136,7 @@ QOneGenWidget::QOneGenWidget(
   features_->setRootIsDecorated(true);
   features_->setContextMenuPolicy(Qt::CustomContextMenu);
   connect(features_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& position) {
-    if (!lease_ || operation_watcher_.isRunning() || grab_live_button_->isChecked()) return;
+    if (!lease_ || operation_watcher_.isRunning() || grab_watcher_.isRunning() || grab_live_button_->isChecked()) return;
     const auto* item = features_->itemAt(position);
     if (!item) return;
     const int module = item->data(0, Qt::UserRole + 1).toInt();
@@ -184,13 +186,14 @@ QOneGenWidget::QOneGenWidget(
     else disconnectCamera();
   });
   connect(streams_box_, &QComboBox::currentIndexChanged, this, [this](const int index) {
-    if (index < 0 || !lease_) return;
-    try {
-      lease_->select_data_stream(streams_box_->currentData().toUInt());
-    } catch (const std::exception& error) {
-      qWarning().noquote() << QStringLiteral("[GenICam] stream selection failed: %1")
-                                  .arg(QString::fromLocal8Bit(error.what()));
-    }
+    if (index < 0 || !lease_ || grab_watcher_.isRunning() || grab_live_button_->isChecked()) return;
+    const auto stream = streams_box_->currentData().toUInt();
+    run(Operation::SelectStream, [this, stream] {
+      lease_->select_data_stream(stream);
+      AsyncResult result;
+      result.features = lease_->describe_features();
+      return result;
+    });
   });
   connect(grab_one_button_, &QToolButton::clicked, this, [this] { startGrabOne(); });
   connect(grab_live_button_, &QToolButton::toggled, this, [this](bool checked) {
@@ -247,6 +250,8 @@ void QOneGenWidget::setExternalSelector(QComboBox* selector, QToolButton* refres
 void QOneGenWidget::setTabbedCamera()
 {
   setFixedCamera();
+  // The containing device panel owns the minimum size for embedded pages.
+  setMinimumSize(0, 0);
   if (auto* panel = findChild<QVBoxLayout*>(QStringLiteral("DeviceTreePanelLayout")))
     panel->setObjectName(QStringLiteral("DeviceTabbedTreePanelLayout"));
 }
@@ -259,6 +264,7 @@ bool QOneGenWidget::cameraInUse() const
 void QOneGenWidget::setFeaturePanelOnly()
 {
   setFixedCamera();
+  setMinimumSize(0, 0);
   connect_button_->hide();
   grab_one_button_->hide();
   grab_live_button_->hide();
@@ -271,12 +277,16 @@ void QOneGenWidget::setFeaturePanelOnly()
 
 void QOneGenWidget::setInterface(const onegen::InterfaceInfo& info, onegen::FeatureNode snapshot)
 {
+  const bool sameInterface = interface_ && interface_->cti_path == info.cti_path && interface_->id == info.id;
   interface_ = info;
   setFeaturePanelOnly();
   setTabbedCamera();
   std::vector<std::pair<std::string, onegen::FeatureNode>> modules(4);
   modules[3] = {"Interface", std::move(snapshot)};
-  setFeatureModules(std::move(modules),
+  if (sameInterface) {
+    feature_camera_name_ = QString::fromStdString(info.display_name.empty() ? info.id : info.display_name);
+    setFeatureSnapshot(std::move(modules));
+  } else setFeatureModules(std::move(modules),
       [this, info](int, std::string_view name) { return coordinator_->read_interface(info, name); },
       [this, info](int, std::string_view name, std::string_view op, std::string_view value) {
         return coordinator_->write_interface(info, name, op, value);
@@ -408,9 +418,11 @@ void QOneGenWidget::connectCamera()
 
 void QOneGenWidget::disconnectCamera()
 {
-  if (!run(Operation::Disconnect, [this] {
+  auto pendingGrab = grab_watcher_.future();
+  if (!run(Operation::Disconnect, [this, pendingGrab]() mutable {
         if (controller_) {
           controller_->stop();
+          pendingGrab.waitForFinished();
           controller_->setLease(nullptr);
         }
         return AsyncResult{};
@@ -466,6 +478,7 @@ void QOneGenWidget::finishOperation()
         : operation == Operation::Connect ? QStringLiteral("connect")
         : operation == Operation::Write ? QStringLiteral("feature write")
         : operation == Operation::Restore ? QStringLiteral("module restore")
+        : operation == Operation::SelectStream ? QStringLiteral("stream selection")
         : QStringLiteral("control");
     if (operation == Operation::Write) {
       qWarning().noquote() << QStringLiteral("[GenICam] feature write failed: module=%1 node=%2 operation=%3 value=%4; cause=%5")
@@ -545,6 +558,9 @@ void QOneGenWidget::finishOperation()
   } else if (operation == Operation::Restore) {
     if (!result.features.empty()) setFeatureSnapshot(result.features);
     qInfo() << "[GenICam] module settings restored and verified";
+  } else if (operation == Operation::SelectStream) {
+    if (!result.features.empty()) setFeatureSnapshot(result.features);
+    qInfo().noquote() << "[GenICam] stream selected:" << streams_box_->currentText();
   }
   setOperationActive(false);
 }
@@ -605,6 +621,7 @@ void QOneGenWidget::startGrabOne()
     result.elapsedMs = timing.elapsed();
     return result;
   }));
+  setOperationActive(operation_watcher_.isRunning());
 }
 
 void QOneGenWidget::finishGrabOne()
@@ -635,15 +652,15 @@ void QOneGenWidget::setOperationActive(bool active)
   const bool grabbing = grab_watcher_.isRunning();
   const bool blocking = active
       && (operation_ == Operation::Connect || operation_ == Operation::Disconnect
-          || operation_ == Operation::Restore);
+          || operation_ == Operation::Restore || operation_ == Operation::SelectStream);
   devices_box_->setEnabled(!active && !connected);
   streams_box_->setVisible(connected && streams_box_->count() > 1);
-  streams_box_->setEnabled(!active && connected && !grab_live_button_->isChecked()
+  streams_box_->setEnabled(!active && connected && !grabbing && !grab_live_button_->isChecked()
                            && streams_box_->count() > 1);
   refresh_button_->setEnabled(!active && !connected && !discovery_watcher_.isRunning());
   connect_button_->setEnabled(!blocking && (connected || devices_box_->count() > 0));
-  grab_one_button_->setEnabled(!active && connected && !grabbing);
-  grab_live_button_->setEnabled(!blocking && connected);
+  grab_one_button_->setEnabled(!active && connected && !grabbing && !grab_live_button_->isChecked());
+  grab_live_button_->setEnabled(!blocking && connected && !grabbing);
   features_->setEnabled(connected || interface_.has_value());
   updateStatus();
   emit stateChanged();
@@ -798,7 +815,7 @@ bool QOneGenWidget::applyFeatureSnapshotInPlace()
     return false;
 
   const auto viewport = captureFeatureViewport();
-  QWidget* focused = QApplication::focusWidget();
+  QPointer<QWidget> focused = QApplication::focusWidget();
   if (focused && !features_->isAncestorOf(focused) && focused != features_) focused = nullptr;
 
   if (cam->text(0) != feature_camera_name_) cam->setText(0, feature_camera_name_);
@@ -810,7 +827,7 @@ bool QOneGenWidget::applyFeatureSnapshotInPlace()
     for (std::size_t index = 0; index < feature_modules_.size(); ++index) {
       const auto& entry = feature_modules_[index];
       const int map_index = static_cast<int>(index);
-      if (!entry.first.empty() && entry.first != "Remote Device") {
+      if (!interface_ && !entry.first.empty() && entry.first != "Remote Device") {
         const QString moduleName = QStringLiteral("__module_%1__").arg(index);
         auto* parent = ensureFeatureGroup(
             cam, moduleName, QString::fromStdString(entry.first), map_index, mutated);
@@ -1061,7 +1078,7 @@ QWidget* QOneGenWidget::createFeatureEditor(const onegen::FeatureNode& n, const 
                   reinterpret_cast<const char*>(value.data()), static_cast<qsizetype>(value.size())).toHex(' ')));
             }
             auto* allow = new QCheckBox(QStringLiteral("Enable raw register writes"));
-            allow->setEnabled(n.writable && !grab_live_button_->isChecked());
+            allow->setEnabled(n.writable && !grab_watcher_.isRunning() && !grab_live_button_->isChecked());
             auto* actions = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
             actions->button(QDialogButtonBox::Save)->setEnabled(false);
             connect(allow, &QCheckBox::toggled, &dialog, [bytes, actions](bool checked) {

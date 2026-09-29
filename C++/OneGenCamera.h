@@ -38,6 +38,8 @@ public:
   void trigger();
   void stop();
   bool is_live() const;
+  /** Reports active Single or Live acquisition before stream reconfiguration. */
+  bool is_acquiring() const;
 
   using FrameFn = std::function<void(const Frame&)>;
   using ErrorFn = std::function<void(std::string_view)>;

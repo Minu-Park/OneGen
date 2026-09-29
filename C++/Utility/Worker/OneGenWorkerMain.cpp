@@ -353,7 +353,7 @@ int main(int argc, char** argv)
             onegen::apply_feature(node, operation, value);
             auto changed = onegen::snapshot(node);
             if (module == onegen::Camera::Module::RemoteDevice
-                && operation != "execute" && !opened.is_live())
+                && operation != "execute" && !opened.is_live() && !opened.is_acquiring())
               opened.prepare();
             onegen::worker::write(output, changed);
             break;
@@ -373,7 +373,8 @@ int main(int argc, char** argv)
               throw std::runtime_error("Use the interface settings tab for shared configuration.");
             const auto name = input.string();
             const auto bytes = onegen::worker::readBytes(input);
-            if (ensureCamera().is_live()) throw std::runtime_error("Stop Live before raw register writes.");
+            if (ensureCamera().is_live() || ensureCamera().is_acquiring())
+              throw std::runtime_error("Stop acquisition before raw register writes.");
             ensureCamera().features(module).find(name).write_register(bytes);
             ensureCamera().prepare();
             break;
@@ -387,7 +388,8 @@ int main(int argc, char** argv)
             const auto module = moduleFromIndex(input.scalar<std::int32_t>());
             if (request.session && (module == onegen::Camera::Module::Interface || module == onegen::Camera::Module::System))
               throw std::runtime_error("Use the interface settings tab for shared configuration.");
-            if (ensureCamera().is_live()) throw std::runtime_error("Stop Live before restoring features.");
+            if (ensureCamera().is_live() || ensureCamera().is_acquiring())
+              throw std::runtime_error("Stop acquisition before restoring features.");
             ensureCamera().features(module).load_features(input.string());
             ensureCamera().prepare();
             break;

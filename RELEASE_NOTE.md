@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Let the outer panel own embedded page minimum sizes so tabs and status bars fit at the supported minimum window size.
+- Select Data Streams asynchronously; keep stream changes and Live start disabled during Single while explicit triggers and disconnect remain available.
+- Drain pending Single requests before releasing their camera lease and reject stream reconfiguration during active acquisition.
+
+- Preserve Interface feature rows and editors across writes and rescans; safely track focus when a refreshed feature disappears.
+- Keep the selected target during incomplete discovery, remove inventories for removed Producers, and restore Interface settings and Device choices after a failed native close.
+- Prevent an old worker lease from releasing a camera that has reconnected through a replacement worker.
 - Retain the current feature panel across discovery updates with the same producer-scoped target identity, including reordered lists and updated labels.
 - Show target names without role prefixes or icons; distinguish Devices and Interfaces with full-name tooltips and accessible role labels.
 - Preserve the empty feature tree for disconnected Interfaces and move the same panel beneath tabs only after connection succeeds.
