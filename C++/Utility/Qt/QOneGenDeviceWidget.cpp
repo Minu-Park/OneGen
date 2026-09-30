@@ -29,9 +29,11 @@ QString cameraLabel(const onegen::DeviceInfo& device) {
 
 QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordinator> coordinator,
     OneGenSourceController* controller, std::vector<onegen::DeviceInfo> devices,
-    QOneGenWidget::DiscoverFn discover, QWidget* parent)
+    QOneGenWidget::DiscoverFn discover, QWidget* parent,
+    const QString& settingsFile, const QString& favoritesKey)
     : QWidget(parent), coordinator_(std::move(coordinator)), controller_(controller),
-      discover_(std::move(discover)), devices_(std::move(devices))
+      discover_(std::move(discover)), settings_file_(settingsFile), favorites_key_(favoritesKey),
+      devices_(std::move(devices))
 {
   setMinimumSize(300, 350);
   auto* layout = new QVBoxLayout(this);
@@ -247,7 +249,7 @@ void QOneGenDeviceWidget::selectTarget() {
   if (index >= 0 && !targets_[index].interface) {
     const auto& device = targets_[index].camera;
     auto* source = controller_->cameraController(cameraKey(device), cameraLabel(device).toStdString());
-    direct_camera_ = new QOneGenWidget(coordinator_, source, {device}, {}, content_);
+    direct_camera_ = new QOneGenWidget(coordinator_, source, {device}, {}, content_, settings_file_, favorites_key_);
     direct_camera_->setExternalSelector(devices_box_, refresh_button_);
     direct_camera_->setTitleCallback([this](const QString& title) {
       if (title_callback_) title_callback_(title);
@@ -258,7 +260,7 @@ void QOneGenDeviceWidget::selectTarget() {
     content_->setCurrentWidget(direct_camera_);
     selector_bar_->hide();
   } else {
-    interface_settings_ = new QOneGenWidget(coordinator_, nullptr, {}, {}, content_);
+    interface_settings_ = new QOneGenWidget(coordinator_, nullptr, {}, {}, content_, settings_file_, favorites_key_);
     connect(interface_settings_, &QOneGenWidget::stateChanged, this, [this] { updateControls(); });
     interface_settings_->setFeaturePanelOnly();
     content_->addWidget(interface_settings_);
@@ -331,7 +333,7 @@ void QOneGenDeviceWidget::updateCameraTabs(const std::vector<onegen::DeviceInfo>
       continue;
     }
     auto* source = controller_->cameraController(key, label.toStdString());
-    auto* camera = new QOneGenWidget(coordinator_, source, {device}, {}, tabs_);
+    auto* camera = new QOneGenWidget(coordinator_, source, {device}, {}, tabs_, settings_file_, favorites_key_);
     camera->setTabbedCamera();
     camera->setTitleCallback([this](const QString& title) { if (!interface_ && title_callback_) title_callback_(title); });
     cameras_[key] = camera;
@@ -385,7 +387,7 @@ void QOneGenDeviceWidget::finish() {
 
 void QOneGenDeviceWidget::showInterface(const Result& result) {
   if (!interface_settings_) {
-    interface_settings_ = new QOneGenWidget(coordinator_, nullptr, {}, {}, tabs_);
+    interface_settings_ = new QOneGenWidget(coordinator_, nullptr, {}, {}, tabs_, settings_file_, favorites_key_);
     connect(interface_settings_, &QOneGenWidget::stateChanged, this, [this] { updateControls(); });
   }
   interface_settings_->setInterface(*interface_, result.features);

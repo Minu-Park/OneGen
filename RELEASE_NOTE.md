@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Accept consumer-provided favorite storage, import the legacy list only into an absent destination key, and preserve standalone storage and unrelated settings.
+
 - Use canonical temporary producer paths in worker regression fixtures, keeping pinned Interface identities consistent with discovery on symlinked temporary directories.
 
 - Preserve leading producer NOTICE/INFO, DEBUG/TRACE and ERROR/FATAL severity fields without interpreting message-body text as a severity.

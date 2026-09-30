@@ -23,7 +23,9 @@ class OneGenFeatureTree final : public QTreeWidget {
   Q_PROPERTY(QColor searchShadowColor READ searchShadowColor WRITE setSearchShadowColor)
 public:
   enum Role { NodeNameRole = Qt::UserRole, MapRole, LeafRole, ModuleNameRole, FavoriteRole };
-  explicit OneGenFeatureTree(QWidget* parent = nullptr);
+  /** Creates a browser with optional consumer-selected INI storage and favorite key. */
+  explicit OneGenFeatureTree(QWidget* parent = nullptr, const QString& settingsFile = {},
+                             const QString& favoritesKey = {});
   /** Marks an existing editable row without replacing its editor or hierarchy. */
   void registerFeature(QTreeWidgetItem* item, const QString& moduleName);
   /** Toggles and persists a leaf's favorite state without contacting the producer. */
@@ -80,6 +82,8 @@ private:
   QToolButton* favorites_only_ = nullptr;
   QLabel* result_count_ = nullptr;
   QTimer* filter_timer_ = nullptr;
+  QString settings_file_;
+  QString favorites_key_;
   QSet<QString> favorites_;
   QStringList filter_tokens_;
   QHash<QString, bool> saved_expansion_;

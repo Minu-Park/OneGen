@@ -123,7 +123,10 @@ private:
 
 } // namespace
 
-OneGenFeatureTree::OneGenFeatureTree(QWidget* parent) : QTreeWidget(parent) {
+OneGenFeatureTree::OneGenFeatureTree(QWidget* parent, const QString& settingsFile,
+                                   const QString& favoritesKey)
+    : QTreeWidget(parent), settings_file_(settingsFile),
+      favorites_key_(favoritesKey.isEmpty() ? QStringLiteral("Favorites/Nodes") : favoritesKey) {
   setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
   setItemDelegateForColumn(0, new FavoriteDelegate(this));
   search_inset_ = style()->pixelMetric(QStyle::PM_LayoutLeftMargin);
@@ -198,13 +201,22 @@ OneGenFeatureTree::OneGenFeatureTree(QWidget* parent) : QTreeWidget(parent) {
 }
 
 QString OneGenFeatureTree::settingsPath() const {
+  if (!settings_file_.isEmpty()) return settings_file_;
   return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
       .filePath(QStringLiteral("OneGenFeatures.ini"));
 }
 
 void OneGenFeatureTree::loadFavorites() {
   QSettings settings(settingsPath(), QSettings::IniFormat);
-  const auto saved = settings.value(QStringLiteral("Favorites/Nodes")).toStringList();
+  if (!settings_file_.isEmpty() && !settings.contains(favorites_key_)) {
+    const auto legacyPath = QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+        .filePath(QStringLiteral("OneGenFeatures.ini"));
+    QSettings legacy(legacyPath, QSettings::IniFormat);
+    QDir().mkpath(QFileInfo(settingsPath()).absolutePath());
+    settings.setValue(favorites_key_, legacy.value(QStringLiteral("Favorites/Nodes"), QStringList{}));
+    settings.sync();
+  }
+  const auto saved = settings.value(favorites_key_).toStringList();
   favorites_ = QSet<QString>(saved.begin(), saved.end());
 }
 
@@ -230,7 +242,7 @@ void OneGenFeatureTree::toggleFavorite(QTreeWidgetItem* item) {
   if (!item || !item->data(0, LeafRole).toBool()) return;
   QSettings settings(settingsPath(), QSettings::IniFormat);
   settings.sync();
-  const auto settingsKey = QStringLiteral("Favorites/Nodes");
+  const auto& settingsKey = favorites_key_;
   const auto saved = settings.value(settingsKey).toStringList();
   favorites_ = QSet<QString>(saved.begin(), saved.end());
   const auto key = featureKey(item);
@@ -240,11 +252,13 @@ void OneGenFeatureTree::toggleFavorite(QTreeWidgetItem* item) {
   sorted.sort();
   settings.setValue(settingsKey, sorted);
   settings.sync();
-  // All open device/Interface panels share the same node-map/name favorite list.
+  // Synchronize device/Interface panels using the same consumer storage.
   for (auto* widget : QApplication::allWidgets()) {
     if (auto* tree = qobject_cast<OneGenFeatureTree*>(widget)) {
-      tree->loadFavorites();
-      tree->refreshFilter();
+      if (tree->settingsPath() == settingsPath() && tree->favorites_key_ == favorites_key_) {
+        tree->loadFavorites();
+        tree->refreshFilter();
+      }
     }
   }
 }

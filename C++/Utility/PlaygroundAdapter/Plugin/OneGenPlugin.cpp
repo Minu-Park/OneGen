@@ -129,9 +129,9 @@ class OneGenPluginSession final : public IDevicePluginSession {
 public:
   OneGenPluginSession(std::shared_ptr<onegen::worker::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
-                      std::shared_ptr<onegen::worker::StartupDiscovery> startup)
+                      std::shared_ptr<onegen::worker::StartupDiscovery> startup, QString settingsFile)
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
-        startup_(std::move(startup)),
+        startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
         controller_(std::make_unique<OneGenSourceController>()) {}
 
   ~OneGenPluginSession() override
@@ -152,7 +152,8 @@ public:
             if (auto initial = std::exchange(*startup, {}))
               return initial->finish(std::move(progress));
             return discover(coordinator, std::move(progress));
-          }, parent);
+          }, parent, settings_file_, settings_file_.isEmpty() ? QString{}
+              : QStringLiteral("Plugins/OneGen/Favorites/Nodes"));
       widget_->setTitleCallback([this](const QString& title) {
         title_ = title;
         if (title_changed_) title_changed_(title_);
@@ -174,6 +175,7 @@ private:
   std::shared_ptr<onegen::worker::Coordinator> coordinator_;
   std::vector<onegen::DeviceInfo> devices_;
   std::shared_ptr<onegen::worker::StartupDiscovery> startup_;
+  QString settings_file_;
   std::unique_ptr<OneGenSourceController> controller_;
   QPointer<QOneGenDeviceWidget> widget_;
   QString title_ = QStringLiteral("GenICam Session");
@@ -182,11 +184,14 @@ private:
 
 } // namespace
 
-class OneGenPlugin final : public DevicePluginTemplate {
+class OneGenPlugin final : public DevicePluginTemplate, public IDevicePluginSettings {
   Q_OBJECT
   Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
-  Q_INTERFACES(IDevicePlugin)
+  Q_INTERFACES(IDevicePlugin IDevicePluginSettings)
 public:
+  /** Selects consumer settings without coupling the reusable UI to host paths. */
+  void setSettingsFile(const QString& fileName) override { settings_file_ = fileName; }
+
   DevicePluginDescriptor descriptor() const override
   { return {QStringLiteral("onegen"), QStringLiteral("GenICam"), playgroundDevicePluginVersion(), false}; }
 
@@ -222,7 +227,7 @@ public:
       { std::lock_guard lock(mutex_); startup = std::exchange(startup_, {}); }
       return std::make_unique<OneGenPluginSession>(
           worker_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
-          std::move(startup));
+          std::move(startup), settings_file_);
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
       return {};
@@ -239,6 +244,7 @@ public:
   }
 
 private:
+  QString settings_file_;
   std::shared_ptr<onegen::worker::Coordinator> coordinator()
   {
     std::lock_guard<std::mutex> lock(mutex_);

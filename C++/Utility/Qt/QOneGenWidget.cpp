@@ -56,7 +56,8 @@ bool workerProcessDead(const QString& error)
 QOneGenWidget::QOneGenWidget(
     std::shared_ptr<onegen::worker::Coordinator> coordinator,
     OneGenSourceController* controller, std::vector<onegen::DeviceInfo> devices,
-    DiscoverFn discover, QWidget* parent)
+    DiscoverFn discover, QWidget* parent,
+    const QString& settingsFile, const QString& favoritesKey)
     : QWidget(parent), coordinator_(std::move(coordinator)), controller_(controller),
       devices_(std::move(devices)), discover_(std::move(discover))
 {
@@ -128,7 +129,7 @@ QOneGenWidget::QOneGenWidget(
   top_layout->addLayout(tool_layout, 0);
   layout->addLayout(top_layout);
 
-  features_ = new OneGenFeatureTree;
+  features_ = new OneGenFeatureTree(nullptr, settingsFile, favoritesKey);
   features_->setObjectName(QStringLiteral("CameraFeaturesTree"));
   features_->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
   features_->setColumnCount(2);

@@ -8,6 +8,7 @@
 #include <QCheckBox>
 #include <QDir>
 #include <QFrame>
+#include <QFileInfo>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
@@ -16,6 +17,7 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTest>
+#include <QTemporaryDir>
 #include <QToolButton>
 #include <QUuid>
 
@@ -79,6 +81,87 @@ private slots:
         .filePath(QStringLiteral("OneGenFeatures.ini")), QSettings::IniFormat);
     settings.clear();
     settings.sync();
+  }
+
+  void consumerSettingsMigrateOnceAndPreserveOtherKeys() {
+    OneGenFeatureTree standalone;
+    configure(standalone);
+    auto* oldRoot = new QTreeWidgetItem(&standalone, {QStringLiteral("Legacy")});
+    auto* oldNode = leaf(standalone, oldRoot, QStringLiteral("ExposureTime"),
+                         QStringLiteral("Exposure"), QStringLiteral("Remote Device"));
+    standalone.toggleFavorite(oldNode);
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto file = directory.filePath(QStringLiteral("nested/consumer.ini"));
+    const auto key = QStringLiteral("Plugins/OneGen/Favorites/Nodes");
+    QDir().mkpath(QFileInfo(file).absolutePath());
+    QSettings settings(file, QSettings::IniFormat);
+    settings.setValue(QStringLiteral("Window/Geometry"), QByteArray("unchanged"));
+    settings.sync();
+    {
+      OneGenFeatureTree hosted(nullptr, file, key);
+      configure(hosted);
+      auto* root = new QTreeWidgetItem(&hosted, {QStringLiteral("Hosted")});
+      auto* node = leaf(hosted, root, QStringLiteral("ExposureTime"),
+                         QStringLiteral("Exposure"), QStringLiteral("Remote Device"));
+      QVERIFY(hosted.isFavorite(node));
+      settings.sync();
+      QVERIFY(settings.contains(key));
+      hosted.toggleFavorite(node);
+      QVERIFY(!hosted.isFavorite(node));
+      QVERIFY(standalone.isFavorite(oldNode));
+    }
+    // An explicitly empty destination must not resurrect legacy favorites.
+    OneGenFeatureTree reopened(nullptr, file, key);
+    configure(reopened);
+    auto* root = new QTreeWidgetItem(&reopened, {QStringLiteral("Reopened")});
+    auto* node = leaf(reopened, root, QStringLiteral("ExposureTime"),
+                       QStringLiteral("Exposure"), QStringLiteral("Remote Device"));
+    QVERIFY(!reopened.isFavorite(node));
+    settings.sync();
+    QVERIFY(settings.value(key).toStringList().isEmpty());
+    QCOMPARE(settings.value(QStringLiteral("Window/Geometry")).toByteArray(), QByteArray("unchanged"));
+    auto* gain = leaf(reopened, root, QStringLiteral("GainRaw"),
+                       QStringLiteral("Gain"), QStringLiteral("Remote Device"));
+    reopened.toggleFavorite(gain);
+    OneGenFeatureTree existing(nullptr, file, key);
+    configure(existing);
+    auto* existingRoot = new QTreeWidgetItem(&existing, {QStringLiteral("Existing")});
+    auto* existingExposure = leaf(existing, existingRoot, QStringLiteral("ExposureTime"),
+                                   QStringLiteral("Exposure"), QStringLiteral("Remote Device"));
+    auto* existingGain = leaf(existing, existingRoot, QStringLiteral("GainRaw"),
+                               QStringLiteral("Gain"), QStringLiteral("Remote Device"));
+    QVERIFY(!existing.isFavorite(existingExposure));
+    QVERIFY(existing.isFavorite(existingGain));
+
+  }
+
+  void consumerPanelsShareOnlyTheirSettingsStore() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto file = directory.filePath(QStringLiteral("consumer.ini"));
+    const auto key = QStringLiteral("Plugins/OneGen/Favorites/Nodes");
+    QOneGenWidget first({}, nullptr, {}, {}, nullptr, file, key);
+    QOneGenWidget second({}, nullptr, {}, {}, nullptr, file, key);
+    QOneGenWidget isolated({}, nullptr, {}, {}, nullptr,
+                           directory.filePath(QStringLiteral("other.ini")), key);
+    QOneGenWidget otherKey({}, nullptr, {}, {}, nullptr, file, QStringLiteral("Other/Nodes"));
+    onegen::InterfaceInfo identity;
+    identity.cti_path = QUuid::createUuid().toString().toStdString();
+    identity.id = "interface";
+    identity.display_name = "Interface";
+    for (auto* panel : {&first, &second, &isolated, &otherKey})
+      panel->setInterface(identity, snapshot(true, false));
+    auto tree = [](QOneGenWidget& panel) { return panel.findChild<OneGenFeatureTree*>(); };
+    auto node = [&](QOneGenWidget& panel) { return tree(panel)->topLevelItem(0)->child(0)->child(0); };
+    tree(first)->toggleFavorite(node(first));
+    QVERIFY(tree(second)->isFavorite(node(second)));
+    QVERIFY(node(second)->data(0, OneGenFeatureTree::FavoriteRole).toBool());
+    QVERIFY(!tree(isolated)->isFavorite(node(isolated)));
+    QVERIFY(!tree(otherKey)->isFavorite(node(otherKey)));
+    QSettings settings(file, QSettings::IniFormat);
+    QCOMPARE(settings.value(key).toStringList().size(), 1);
+    QVERIFY(!settings.contains(QStringLiteral("Favorites/Nodes")));
   }
 
   void searchPreservesEditorsAndExpansion() {

@@ -36,11 +36,13 @@ class QOneGenWidget final : public QWidget {
 public:
   using DiscoverFn = std::function<std::vector<onegen::DeviceInfo>(
       onegen::worker::Coordinator::ProgressFn)>;
+  /** Creates controls with optional consumer-selected favorite storage. */
   QOneGenWidget(std::shared_ptr<onegen::worker::Coordinator> coordinator,
                 OneGenSourceController* controller,
                 std::vector<onegen::DeviceInfo> devices,
                 DiscoverFn discover,
-                QWidget* parent = nullptr);
+                QWidget* parent = nullptr,
+                const QString& settingsFile = {}, const QString& favoritesKey = {});
   ~QOneGenWidget() override;
   /** Restricts the reusable camera panel to its assigned device. */
   void setFixedCamera();
