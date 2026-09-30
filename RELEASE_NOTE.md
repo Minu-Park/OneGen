@@ -12,6 +12,7 @@
 - Accept exact consumer-owned CTI file lists, including an authoritative empty list. Share asynchronous startup discovery across later sessions and disconnected-control rescans; return completed empty results without another startup wait. Preserve standalone directory/environment discovery and protect active operations during reconfiguration.
 
 - Keep search and Interface operations busy until their GUI completion callbacks are applied, including the initially queued search, to prevent premature reconfiguration.
+- Show unsaved feature-row stars only on hover; keep saved favorites visible at all times. Center the visible star outline vertically in feature rows and favorite controls.
 
 - Support consumer-requested GenTL path reconfiguration while disconnected, releasing idle workers and refreshing device inventories without restarting the consumer.
 

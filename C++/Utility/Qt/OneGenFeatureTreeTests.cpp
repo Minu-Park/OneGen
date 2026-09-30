@@ -6,16 +6,20 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QCursor>
 #include <QDir>
 #include <QFrame>
 #include <QFileInfo>
 #include <QHeaderView>
+#include <QHoverEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
 #include <QScrollBar>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QStyledItemDelegate>
 #include <QTest>
 #include <QTemporaryDir>
 #include <QToolButton>
@@ -331,6 +335,156 @@ private slots:
     QTest::mouseClick(tree.viewport(), Qt::LeftButton, Qt::NoModifier,
         QPoint(nameRight - extent / 2 - 4, rect.center().y()));
     QVERIFY(!tree.isFavorite(item));
+  }
+
+  void rowStarsFollowHoverWithoutMovingEditorFocus() {
+    OneGenFeatureTree tree;
+    configure(tree);
+    tree.setColumnWidth(0, 220);
+    auto* root = new QTreeWidgetItem(&tree, {QStringLiteral("Camera")});
+    auto* exposure = leaf(tree, root, QStringLiteral("ExposureTime"), QStringLiteral("Exposure"),
+                          QStringLiteral("Remote Device"));
+    auto* gain = leaf(tree, root, QStringLiteral("Gain"), QStringLiteral("Gain"),
+                      QStringLiteral("Remote Device"));
+    for (int row = 0; row < 30; ++row)
+      leaf(tree, root, QString::number(row), QStringLiteral("Feature %1").arg(row),
+           QStringLiteral("Remote Device"));
+    root->setExpanded(true);
+    tree.setCurrentItem(exposure);
+    tree.show();
+    tree.activateWindow();
+    auto* input = tree.findChild<QLineEdit*>(QStringLiteral("DeviceFeatureSearchInput"));
+    input->setFocus();
+    QTRY_VERIFY(input->hasFocus());
+
+    const auto hover = [&](QEvent::Type type, const QPoint& position) {
+      QHoverEvent event(type, position, tree.viewport()->mapToGlobal(position), QPointF(-1, -1));
+      QApplication::sendEvent(tree.viewport(), &event);
+    };
+    const auto renderName = [&](QTreeWidgetItem* item) {
+      const auto index = tree.indexFromItem(item, 0);
+      QStyleOptionViewItem option;
+      option.initFrom(tree.viewport());
+      option.rect = tree.visualRect(index);
+      QImage result(option.rect.size(), QImage::Format_ARGB32_Premultiplied);
+      result.fill(Qt::transparent);
+      QPainter painter(&result);
+      painter.translate(-option.rect.topLeft());
+      tree.itemDelegateForColumn(0)->paint(&painter, option, index);
+      return result;
+    };
+
+    QVERIFY(!tree.visualRect(tree.indexFromItem(exposure, 0)).isEmpty());
+    hover(QEvent::HoverLeave, QPoint(-1, -1));
+    const auto idleExposure = renderName(exposure);
+    const auto idleGain = renderName(gain);
+    tree.toggleFavorite(gain);
+    const auto favoriteGain = renderName(gain);
+    QVERIFY(favoriteGain != idleGain);
+
+    const auto rowCenter = tree.visualItemRect(exposure).center().y();
+    hover(QEvent::HoverEnter, QPoint(100, rowCenter));
+    const auto hoveredExposure = renderName(exposure);
+    QVERIFY(hoveredExposure != idleExposure);
+    hover(QEvent::HoverMove, QPoint(tree.columnWidth(0) + 30, rowCenter));
+    QCOMPARE(renderName(exposure), hoveredExposure);
+    hover(QEvent::HoverMove, QPoint(100, tree.visualItemRect(gain).center().y()));
+    QCOMPARE(renderName(exposure), idleExposure);
+    QCOMPARE(renderName(gain), favoriteGain);
+    hover(QEvent::HoverLeave, QPoint(-1, -1));
+    QCOMPARE(renderName(gain), favoriteGain);
+    QCOMPARE(tree.currentItem(), exposure);
+    QVERIFY(input->hasFocus());
+    QCOMPARE(qobject_cast<QLineEdit*>(tree.itemWidget(exposure, 1))->text(), QStringLiteral("42"));
+
+    const QPoint pointer(100, rowCenter);
+    const auto previousCursor = QCursor::pos();
+    QCursor::setPos(tree.viewport()->mapToGlobal(pointer));
+    tree.verticalScrollBar()->setValue(tree.verticalScrollBar()->maximum() / 2);
+    auto* scrolledRow = tree.itemAt(pointer);
+    QVERIFY(scrolledRow && scrolledRow != exposure && scrolledRow != gain);
+    const auto scrolledHover = renderName(scrolledRow);
+    hover(QEvent::HoverLeave, QPoint(-1, -1));
+    QVERIFY(renderName(scrolledRow) != scrolledHover);
+    QCursor::setPos(previousCursor);
+    QCOMPARE(tree.currentItem(), exposure);
+    QVERIFY(input->hasFocus());
+
+    hover(QEvent::HoverMove, pointer);
+    tree.clear();
+    auto* replacement = new QTreeWidgetItem(&tree, {QStringLiteral("Replacement")});
+    auto* fresh = leaf(tree, replacement, QStringLiteral("Fresh"), QStringLiteral("Fresh"),
+                       QStringLiteral("Remote Device"));
+    replacement->setExpanded(true);
+    QVERIFY(!tree.visualRect(tree.indexFromItem(fresh, 0)).isEmpty());
+    const auto freshIdle = renderName(fresh);
+    hover(QEvent::HoverLeave, QPoint(-1, -1));
+    QCOMPARE(renderName(fresh), freshIdle);
+  }
+
+  void favoriteStarsAreVerticallyCentered() {
+    OneGenFeatureTree tree;
+    configure(tree);
+    auto* root = new QTreeWidgetItem(&tree, {QStringLiteral("Camera")});
+    auto* item = leaf(tree, root, QStringLiteral("Gain"), QStringLiteral("Gain"),
+                      QStringLiteral("Remote Device"));
+    root->setExpanded(true);
+    tree.show();
+    QTest::qWait(30);
+    const auto index = tree.indexFromItem(item, 0);
+    const auto render = [&](int height, qreal scale) {
+      QStyleOptionViewItem option;
+      option.initFrom(tree.viewport());
+      option.rect = QRect(0, 0, 240, height);
+      QImage image(QSize(qRound(240 * scale), qRound(height * scale)),
+                   QImage::Format_ARGB32_Premultiplied);
+      image.setDevicePixelRatio(scale);
+      image.fill(Qt::transparent);
+      QPainter painter(&image);
+      tree.itemDelegateForColumn(0)->paint(&painter, option, index);
+      return image;
+    };
+    const auto changedBounds = [](const QImage& baseline, const QImage& image) {
+      QRect bounds;
+      for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x)
+          if (baseline.pixel(x, y) != image.pixel(x, y))
+            bounds |= QRect(x, y, 1, 1);
+      return bounds;
+    };
+    const QPoint position(100, tree.visualItemRect(item).center().y());
+    const auto hover = [&](QEvent::Type type) {
+      QHoverEvent event(type, position, tree.viewport()->mapToGlobal(position), QPointF(-1, -1));
+      QApplication::sendEvent(tree.viewport(), &event);
+    };
+    for (const qreal scale : {1.0, 1.25, 1.5, 2.0}) {
+      for (const int height : {23, 24, 25, 26, 30}) {
+        hover(QEvent::HoverLeave);
+        const auto baseline = render(height, scale);
+        tree.toggleFavorite(item);
+        const auto filled = render(height, scale);
+        tree.toggleFavorite(item);
+        hover(QEvent::HoverMove);
+        const auto outline = render(height, scale);
+        for (const auto& image : {filled, outline}) {
+          const auto bounds = changedBounds(baseline, image);
+          QVERIFY(!bounds.isEmpty());
+          const qreal center = bounds.top() + bounds.height() / 2.0;
+          const auto detail = QStringLiteral("row=%1 scale=%2 center=%3 expected=%4")
+              .arg(height).arg(scale).arg(center).arg(image.height() / 2.0).toLatin1();
+          QVERIFY2(qAbs(center - image.height() / 2.0) <= 0.75, detail.constData());
+        }
+      }
+    }
+    const auto* favorites = tree.findChild<QToolButton*>(QStringLiteral("DeviceFeatureFavoritesOnly"));
+    for (const auto state : {QIcon::Off, QIcon::On}) {
+      const auto icon = favorites->icon().pixmap(QSize(16, 16), QIcon::Normal, state).toImage();
+      QImage empty(icon.size(), icon.format());
+      empty.fill(Qt::transparent);
+      const auto bounds = changedBounds(empty, icon);
+      QVERIFY(!bounds.isEmpty());
+      QVERIFY(qAbs(bounds.top() + bounds.height() / 2.0 - icon.height() / 2.0) <= 0.75);
+    }
   }
 
   void clearSearchAlignmentAndBehavior() {
