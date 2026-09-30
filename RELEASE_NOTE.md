@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Use canonical temporary producer paths in worker regression fixtures, keeping pinned Interface identities consistent with discovery on symlinked temporary directories.
+
 - Preserve leading producer NOTICE/INFO, DEBUG/TRACE and ERROR/FATAL severity fields without interpreting message-body text as a severity.
 - Report Interface discovery failures alongside surviving Devices through worker protocol v10; retain Interface inventory, stop retrying failures as empty inventories, and retire failed idle discovery workers while preserving connected or opening sessions.
 

@@ -189,7 +189,8 @@ int main(int argc, char** argv)
   assert(onegen::worker::Coordinator::merge({first, scoped}).size() == 2);
   assert(onegen::worker::Coordinator::merge({first, first}).size() == 1);
 
-  const auto root = std::filesystem::temp_directory_path() /
+  // Fabricated InterfaceInfo values must use the same canonical paths as discovery.
+  const auto root = std::filesystem::canonical(std::filesystem::temp_directory_path()) /
       ("onegen-worker-ctis-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   std::filesystem::create_directories(root / "vendor-a");
   std::filesystem::create_directories(root / "vendor-b");
