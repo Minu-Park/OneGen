@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show unsaved feature-row stars only on hover; keep saved favorites visible at all times. Center the visible star outline vertically in feature rows and favorite controls.
+
 - Support consumer-requested GenTL path reconfiguration while disconnected, releasing idle workers and refreshing device inventories without restarting the consumer.
 
 - Accept consumer-provided favorite storage, import the legacy list only into an absent destination key, and preserve standalone storage and unrelated settings.

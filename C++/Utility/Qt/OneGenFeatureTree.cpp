@@ -2,11 +2,13 @@
 
 #include <QAbstractItemModel>
 #include <QApplication>
+#include <QCursor>
 #include <QDir>
 #include <QFileInfo>
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
+#include <QHoverEvent>
 #include <QIconEngine>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -15,6 +17,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPersistentModelIndex>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QSettings>
@@ -30,6 +33,7 @@
 
 namespace {
 
+/** Centers the visible star outline within the requested icon canvas. */
 void paintStar(QPainter* painter, const QRectF& rect, bool filled, const QColor& color) {
   painter->save();
   painter->setRenderHint(QPainter::Antialiasing);
@@ -42,6 +46,7 @@ void paintStar(QPainter* painter, const QRectF& rect, bool filled, const QColor&
     if (point == 0) star.moveTo(vertex); else star.lineTo(vertex);
   }
   star.closeSubpath();
+  star.translate(rect.center() - star.boundingRect().center());
   painter->setPen(color);
   painter->setBrush(filled ? QBrush(color) : Qt::NoBrush);
   painter->drawPath(star);
@@ -78,11 +83,31 @@ QString tupleKey(const QStringList& parts) {
 /** Paints and handles stars in the name cell, leaving the Value editor untouched. */
 class FavoriteDelegate final : public QStyledItemDelegate {
 public:
-  explicit FavoriteDelegate(OneGenFeatureTree* tree) : QStyledItemDelegate(tree), tree_(tree) {}
+  explicit FavoriteDelegate(OneGenFeatureTree* tree) : QStyledItemDelegate(tree), tree_(tree) {
+    tree_->viewport()->setAttribute(Qt::WA_Hover);
+    tree_->viewport()->installEventFilter(this);
+    const auto scrolled = [this] {
+      updateHover(tree_->viewport()->mapFromGlobal(QCursor::pos()));
+    };
+    connect(tree_->verticalScrollBar(), &QScrollBar::valueChanged, this, scrolled);
+    connect(tree_->horizontalScrollBar(), &QScrollBar::valueChanged, this, scrolled);
+  }
+
+  /** Tracks row hover independently of theme-suppressed item-view mouse moves. */
+  bool eventFilter(QObject* watched, QEvent* event) override {
+    if (watched == tree_->viewport()
+        && (event->type() == QEvent::HoverEnter || event->type() == QEvent::HoverMove
+            || event->type() == QEvent::HoverLeave)) {
+      updateHover(event->type() == QEvent::HoverLeave ? QPoint(-1, -1)
+          : static_cast<QHoverEvent*>(event)->position().toPoint());
+    }
+    return watched == tree_->viewport() ? false : QStyledItemDelegate::eventFilter(watched, event);
+  }
 
   QRect starRect(const QStyleOptionViewItem& option) const {
     const int extent = tree_->style()->pixelMetric(QStyle::PM_SmallIconSize);
-    return QRect(option.rect.right() - extent - 3, option.rect.center().y() - extent / 2,
+    return QRect(option.rect.right() - extent - 3,
+                 option.rect.top() + (option.rect.height() - extent) / 2,
                  extent, extent);
   }
 
@@ -94,10 +119,11 @@ public:
     QStyledItemDelegate::paint(painter, label, index);
     if (!leaf) return;
     const bool favorite = index.data(OneGenFeatureTree::FavoriteRole).toBool();
+    if (!favorite && index != hovered_) return;
     painter->save();
-    const auto rect = starRect(option).adjusted(2, 2, -2, -2);
+    auto rect = QRectF(starRect(option)).adjusted(2, 2, -2, -2);
+    rect.moveCenter(QPointF(rect.center().x(), QRectF(option.rect).center().y()));
     const auto color = favorite ? tree_->favoriteColor() : option.palette.color(QPalette::Text);
-    painter->setOpacity(favorite || option.state.testFlag(QStyle::State_MouseOver) ? 1.0 : 0.3);
     paintStar(painter, rect, favorite, color);
     painter->restore();
   }
@@ -118,7 +144,19 @@ public:
   }
 
 private:
+  /** Repaints only the name cells whose hover state changed, without altering focus. */
+  void updateHover(const QPoint& position) {
+    const auto next = tree_->viewport()->rect().contains(position)
+        ? tree_->indexAt(position).siblingAtColumn(0) : QModelIndex{};
+    if (hovered_ == next) return;
+    const auto previous = hovered_;
+    hovered_ = next;
+    if (previous.isValid()) tree_->viewport()->update(tree_->visualRect(previous));
+    if (hovered_.isValid()) tree_->viewport()->update(tree_->visualRect(hovered_));
+  }
+
   OneGenFeatureTree* tree_;
+  QPersistentModelIndex hovered_;
 };
 
 } // namespace
