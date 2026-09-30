@@ -23,6 +23,12 @@ public:
   void prepareForShutdown();
   /** Publishes device titles without changing connection state on tab selection. */
   void setTitleCallback(std::function<void(const QString&)> callback);
+  /** @brief Allows search-path changes only without connection or pending control operations. */
+  bool canReconfigureSearch() const;
+  /** @brief Gives an actionable connected, busy or shutdown reason for search-path preflight. */
+  QString genTLPathChangeBlockReason() const;
+  /** @brief Drops old selection inventories and asynchronously searches the updated paths. */
+  void rescanGenTLPaths();
 
 private:
   struct Target {

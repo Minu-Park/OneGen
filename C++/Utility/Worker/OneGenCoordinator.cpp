@@ -505,6 +505,31 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
   throw std::runtime_error(error.empty() ? "No producer candidate is available." : error);
 }
 
+bool Coordinator::reset_idle_search()
+{
+  std::unique_lock discovery_lock(discovery_mutex_, std::try_to_lock);
+  if (!discovery_lock.owns_lock()) return false;
+  std::unordered_map<std::string, std::shared_ptr<Connection>> connections;
+  std::unordered_map<std::string, std::shared_ptr<Connection>> devices;
+  {
+    std::lock_guard lock(mutex_);
+    if (!leased_.empty() || !interface_sessions_.empty()) return false;
+    connections.swap(connections_);
+    devices.swap(device_connections_);
+    interface_inventory_.clear();
+    session_channels_.clear();
+    leased_interfaces_.clear();
+  }
+  // Both maps can reference the same worker. Close each process before returning.
+  std::unordered_set<Connection*> closed;
+  for (const auto& map : {&connections, &devices})
+    for (const auto& [key, connection] : *map) {
+      (void)key;
+      if (connection && closed.insert(connection.get()).second) connection->close();
+    }
+  return true;
+}
+
 void Coordinator::shutdown()
 {
   std::unordered_map<std::string, std::shared_ptr<Connection>> connections;

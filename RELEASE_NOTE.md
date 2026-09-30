@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Support consumer-requested GenTL path reconfiguration while disconnected, releasing idle workers and refreshing device inventories without restarting the consumer.
+
 - Accept consumer-provided favorite storage, import the legacy list only into an absent destination key, and preserve standalone storage and unrelated settings.
 
 - Use canonical temporary producer paths in worker regression fixtures, keeping pinned Interface identities consistent with discovery on symlinked temporary directories.

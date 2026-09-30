@@ -110,6 +110,8 @@ public:
   static std::vector<DeviceInfo> merge(std::vector<DeviceInfo> devices);
   std::unique_ptr<Lease> open(const DeviceInfo& device);
   void shutdown();
+  /** @brief Releases retained workers only when no discovery, Interface or Device is active. */
+  bool reset_idle_search();
 
 private:
   friend class Lease;

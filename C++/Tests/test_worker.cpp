@@ -439,10 +439,12 @@ int main(int argc, char** argv)
     onegen::worker::Coordinator active(argv[0], directory, 100ms);
     const onegen::InterfaceInfo board{"board", cti.string()};
     active.open_interface(board);
+    assert(!active.reset_idle_search()); // A camera-less Interface still owns its producer.
     const auto pinned_result = active.discover();
     assert(pinned_result.failures.size() == 1 && line_count(cti.string() + ".starts") == 1);
     assert(active.interface_features(board).name == "Root");
     auto camera = active.open(active.rescan_interface(board).front());
+    assert(!active.reset_idle_search());
     std::atomic<int> frames{0};
     camera->set_frame_callback([&](const auto&) { ++frames; });
     camera->live();
@@ -456,6 +458,11 @@ int main(int argc, char** argv)
     camera.reset();
     assert(active.interface_features(board).name == "Root");
     active.close_interface(board);
+    assert(active.reset_idle_search());
+    assert(active.interfaces().empty());
+    active.open_interface(board);
+    assert(line_count(cti.string() + ".starts") == 2);
+    active.close_interface(board);
     active.shutdown();
   }
   // A direct Device lease protects its worker independently of pinned Interface sessions.
@@ -468,12 +475,14 @@ int main(int argc, char** argv)
     const auto initial = active.discover();
     assert(initial.failures.empty() && initial.devices.size() == 1);
     auto camera = active.open(initial.devices.front());
+    assert(!active.reset_idle_search());
     camera->live();
     const auto result = active.discover();
     assert(result.failures.size() == 1 && result.devices.size() == 1);
     assert(camera->alive() && camera->data_streams().front().id == "fast");
     assert(line_count(cti.string() + ".starts") == 1);
     camera.reset();
+    assert(active.reset_idle_search());
     active.shutdown();
   }
   std::filesystem::remove_all(root);

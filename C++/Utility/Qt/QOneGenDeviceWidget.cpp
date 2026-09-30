@@ -148,6 +148,29 @@ void QOneGenDeviceWidget::clearTabs() {
   tabs_->hide();
 }
 
+bool QOneGenDeviceWidget::canReconfigureSearch() const {
+  return genTLPathChangeBlockReason().isEmpty();
+}
+
+QString QOneGenDeviceWidget::genTLPathChangeBlockReason() const {
+  if (shutting_down_) return tr("GenICam is shutting down. Wait before applying paths.");
+  if (interface_ || std::any_of(cameras_.begin(), cameras_.end(),
+      [](const auto& item) { return item.second->cameraConnected(); }))
+    return tr("Disconnect GenICam cameras and Interfaces before applying paths.");
+  if (watcher_.isRunning() || discovery_watcher_.isRunning()
+      || std::any_of(cameras_.begin(), cameras_.end(), [](const auto& item) { return item.second->cameraInUse(); }))
+    return tr("Wait for GenICam searches or pending operations to finish before applying paths.");
+  return {};
+}
+
+void QOneGenDeviceWidget::rescanGenTLPaths() {
+  if (!canReconfigureSearch()) return;
+  devices_.clear();
+  interfaces_.clear();
+  updateTargets();
+  refresh();
+}
+
 void QOneGenDeviceWidget::refresh() {
   if (shutting_down_ || watcher_.isRunning()) return;
   if (!interface_ && discovery_watcher_.isRunning()) return;

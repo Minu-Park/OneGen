@@ -129,10 +129,11 @@ class OneGenPluginSession final : public IDevicePluginSession {
 public:
   OneGenPluginSession(std::shared_ptr<onegen::worker::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
-                      std::shared_ptr<onegen::worker::StartupDiscovery> startup, QString settingsFile)
+                      std::shared_ptr<onegen::worker::StartupDiscovery> startup, QString settingsFile,
+                      std::function<void(QOneGenDeviceWidget*)> registerWidget)
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
         startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
-        controller_(std::make_unique<OneGenSourceController>()) {}
+        controller_(std::make_unique<OneGenSourceController>()), register_widget_(std::move(registerWidget)) {}
 
   ~OneGenPluginSession() override
   {
@@ -158,6 +159,7 @@ public:
         title_ = title;
         if (title_changed_) title_changed_(title_);
       });
+      register_widget_(widget_);
     }
     return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
              Qt::LeftDockWidgetArea, widget_, true}};
@@ -180,14 +182,15 @@ private:
   QPointer<QOneGenDeviceWidget> widget_;
   QString title_ = QStringLiteral("GenICam Session");
   std::function<void(const QString&)> title_changed_;
+  std::function<void(QOneGenDeviceWidget*)> register_widget_;
 };
 
 } // namespace
 
-class OneGenPlugin final : public DevicePluginTemplate, public IDevicePluginSettings {
+class OneGenPlugin final : public DevicePluginTemplate, public IDevicePluginSettings, public IDevicePluginGenTLPaths {
   Q_OBJECT
   Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
-  Q_INTERFACES(IDevicePlugin IDevicePluginSettings)
+  Q_INTERFACES(IDevicePlugin IDevicePluginSettings IDevicePluginGenTLPaths)
 public:
   /** Selects consumer settings without coupling the reusable UI to host paths. */
   void setSettingsFile(const QString& fileName) override { settings_file_ = fileName; }
@@ -227,11 +230,37 @@ public:
       { std::lock_guard lock(mutex_); startup = std::exchange(startup_, {}); }
       return std::make_unique<OneGenPluginSession>(
           worker_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
-          std::move(startup), settings_file_);
+          std::move(startup), settings_file_, [this](auto* widget) { widgets_.push_back(widget); });
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
       return {};
     }
+  }
+
+  /** @brief Keeps connected cameras, Interfaces and ongoing searches intact. */
+  QString genTLPathChangeBlockReason() const override {
+    for (const auto& widget : widgets_)
+      if (widget && !widget->canReconfigureSearch())
+        return widget->genTLPathChangeBlockReason();
+    return {};
+  }
+
+  /** @brief Retires disconnected producer workers without unloading the plugin. */
+  bool resetGenTLSearch(QString* error) override {
+    const auto reason = genTLPathChangeBlockReason();
+    if (!reason.isEmpty()) { if (error) *error = reason; return false; }
+    std::lock_guard lock(mutex_);
+    if (coordinator_ && !coordinator_->reset_idle_search()) {
+      if (error) *error = QStringLiteral("GenICam is still searching or connected. Wait for it to become idle.");
+      return false;
+    }
+    return true;
+  }
+
+  /** @brief Refreshes surviving controls after the host applies new search paths. */
+  void rescanGenTLPaths() override {
+    std::erase_if(widgets_, [](const auto& widget) { return widget.isNull(); });
+    for (const auto& widget : widgets_) if (widget) widget->rescanGenTLPaths();
   }
 
   void shutdown() override
@@ -245,6 +274,7 @@ public:
 
 private:
   QString settings_file_;
+  std::vector<QPointer<QOneGenDeviceWidget>> widgets_;
   std::shared_ptr<onegen::worker::Coordinator> coordinator()
   {
     std::lock_guard<std::mutex> lock(mutex_);
