@@ -37,11 +37,21 @@ inline int fakeWorker(const std::filesystem::path& cti)
   int probes = 0;
   int interface_closes = 0;
   bool interface_value = false;
-  const auto frame = [&streams](std::uint32_t session) {
+  std::map<std::uint32_t, unsigned int> frame_counts;
+  const auto frame = [&streams, &cti, &frame_counts](std::uint32_t session) {
     onegen::Frame result;
     result.payload = {1}; result.width = 1; result.height = 1;
     result.pixel_format = 0x01080001; result.stride = 1;
     result.buffer_info.image_present = true; result.stream_index = streams[session];
+    if (cti.stem() == "AdapterDropBoard") {
+      onegen::Frame::Part part;
+      part.data_type = 7; part.data_format = 0x011000b8;
+      part.width = part.height = 1; part.stride = 2;
+      const auto count = ++frame_counts[session];
+      part.payload = (count == 1 || count >= 5)
+          ? std::vector<std::uint8_t>{7} : std::vector<std::uint8_t>{7, 0};
+      result.parts.push_back(std::move(part));
+    }
     return result;
   };
   while (std::cin.read(reinterpret_cast<char*>(header.data()), header.size())) {

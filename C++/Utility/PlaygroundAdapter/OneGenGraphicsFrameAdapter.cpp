@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstring>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -118,6 +119,8 @@ std::uint8_t monoBits(std::uint64_t pfnc) noexcept
 constexpr std::uint64_t kPart2dImage = 1;
 constexpr std::uint64_t kPart3dImage = 5;
 constexpr std::uint64_t kPartConfidence = 9;
+/** @brief Recognizes GenTL 3D images and individual planes of planar 3D images. */
+bool is3dPart(std::uint64_t type) noexcept { return type >= kPart3dImage && type <= 8; }
 constexpr std::uint64_t kConfidence1 = 0x010800c4;
 constexpr std::uint64_t kConfidence1p = 0x010100c5;
 constexpr std::uint64_t kConfidence8 = 0x010800c6;
@@ -275,44 +278,56 @@ bool appendAuxiliary(const onegen::Frame::Part& part, RangeFrame& range,
 }
 
 std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
-                                     const onegen::Frame& source)
+                                     const onegen::Frame& source, std::string* diagnostic = nullptr)
 {
-  if (part.data_type != kPart3dImage || !part.width || !part.height) return std::nullopt;
+  const auto reject = [diagnostic](const std::string& reason) {
+    if (diagnostic) *diagnostic = reason;
+    return std::optional<RangeFrame>{};
+  };
   const auto layout = onegen::coordinate_format(part.data_format);
-  if (!layout.components || source.pixel_endianness > 2
+  // Coord3D is a range whether the producer labels the part 3D, 2D, or unknown.
+  const bool rangePartType = is3dPart(part.data_type)
+      || part.data_type == kPart2dImage || part.data_type == 0;
+  if (!layout.components || !rangePartType || !part.width || !part.height
+      || source.pixel_endianness > 2
       || part.width > (std::numeric_limits<std::size_t>::max)() / part.height)
-    return std::nullopt;
+    return reject("unsupported coordinate format/part type, dimensions, or byte order");
   const auto count = static_cast<std::size_t>(part.width) * part.height;
   if (part.width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
       || part.height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()))
-    return std::nullopt;
-  if (!source.scan3d_geometry) return std::nullopt;
-  const auto& geometry = *source.scan3d_geometry;
+    return reject("coordinate dimensions exceed the supported integer range");
+  // Scalar C without calibration is still an organized height map. Multi-axis
+  // modes stay rejected so missing A/B/C calibration is not invented.
+  onegen::Frame::Scan3dGeometry pixelGridPreview;
+  const bool pixelGridPreviewActive = !source.scan3d_geometry && layout.components == 1;
+  if (pixelGridPreviewActive) pixelGridPreview.output_mode = "UncalibratedC";
+  if (!source.scan3d_geometry && !pixelGridPreviewActive) return reject("multi-axis coordinates require Scan3d calibration");
+  const auto& geometry = pixelGridPreviewActive ? pixelGridPreview : *source.scan3d_geometry;
   const auto mode = geometry.output_mode;
   const bool native = mode == "UncalibratedC";
   const auto system = geometry.coordinate_system;
   if (layout.components == 1) {
     if (!mode.empty() && mode != "CalibratedC" && mode != "RectifiedC"
         && mode != "DisparityC" && !native)
-      return std::nullopt;
+      return reject("unsupported scalar Scan3dOutputMode=" + mode);
   } else if (layout.components == 2) {
-    if (mode != "CalibratedAC" && mode != "RectifiedAC") return std::nullopt;
+    if (mode != "CalibratedAC" && mode != "RectifiedAC") return reject("unsupported AC Scan3dOutputMode=" + mode);
   } else if (!mode.empty() && mode != "CalibratedABC_Grid" && mode != "CalibratedABC_PointCloud") {
-    return std::nullopt;
+    return reject("unsupported ABC Scan3dOutputMode=" + mode);
   }
   if (!native && !system.empty() && system != "Cartesian" && system != "Spherical"
       && system != "Cylindrical")
-    return std::nullopt;
+    return reject("unsupported Scan3dCoordinateSystem=" + system);
   if ((system == "Spherical" || system == "Cylindrical") && layout.components == 1
       && mode != "RectifiedC")
-    return std::nullopt;
+    return reject("scalar angular coordinates require RectifiedC");
   if (mode == "DisparityC" && (!std::isfinite(geometry.focal_length)
       || !std::isfinite(geometry.baseline) || geometry.focal_length == 0 || geometry.baseline == 0))
-    return std::nullopt;
+    return reject("DisparityC requires finite nonzero focal length and baseline");
   const bool full_axes = layout.components > 1 || mode == "RectifiedC";
   for (std::size_t axis = full_axes ? 0 : 2; axis < 3; ++axis)
     if (!native && (!geometry.calibrated_axes[axis] || !std::isfinite(geometry.scale[axis])
-        || !std::isfinite(geometry.offset[axis]))) return std::nullopt;
+        || !std::isfinite(geometry.offset[axis]))) return reject("missing or invalid calibration for axis=" + std::to_string(axis));
   RangeFrame range;
   range.width = static_cast<int>(part.width);
   range.height = static_cast<int>(part.height);
@@ -326,14 +341,14 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
     else if (unit == "nanometer" || unit == "nm") range.lengthUnit = GraphicsLengthUnit::Nanometer;
     else if (unit == "meter" || unit == "m") { range.lengthUnit = GraphicsLengthUnit::Millimeter; unit_scale = 1000; }
     else if (unit == "inch" || unit == "in") { range.lengthUnit = GraphicsLengthUnit::Millimeter; unit_scale = 25.4; }
-    else return std::nullopt;
+    else return reject("unsupported Scan3dDistanceUnit=" + geometry.distance_unit);
   }
   const auto row_bytes = onegen::coordinate_row_bytes(layout, part.width);
-  if (!row_bytes) return std::nullopt;
+  if (!row_bytes) return reject("coordinate row size is unsupported");
   const auto stride = part.stride ? part.stride : row_bytes;
   const auto planes = layout.planar ? layout.components : 1U;
   if (stride < row_bytes || part.height > part.payload.size() / stride / planes)
-    return std::nullopt;
+    return reject("coordinate payload is truncated or stride is smaller than the row size");
   const auto plane_bytes = stride * part.height;
   range.zValues.resize(count);
   range.validMask.resize(count);
@@ -478,7 +493,7 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
     }
     }
   }
-  return range.isValid() ? std::optional<RangeFrame>(std::move(range)) : std::nullopt;
+  return range.isValid() ? std::optional<RangeFrame>(std::move(range)) : reject("converted range layout is invalid");
 }
 
 void presentPointCloud(GraphicsFrame& frame, const onegen::Frame& source)
@@ -542,7 +557,7 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source)
   std::vector<PlanarRangeAssembly> assemblies;
   for (std::size_t base_index = 0; base_index < source.parts.size(); ++base_index) {
     const auto& a = source.parts[base_index];
-    if (a.data_type != kPart3dImage) continue;
+    if (!is3dPart(a.data_type)) continue;
     std::array<std::uint64_t, 3> formats{};
     switch (a.data_format) {
       case 0x010800af: formats = {0x010800b0, 0x010800b1, 0x021800b3}; break;
@@ -558,7 +573,7 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source)
     bool ambiguous = false;
     for (std::size_t part_index = 0; part_index < source.parts.size(); ++part_index) {
       const auto& part = source.parts[part_index];
-      if (part.data_type != kPart3dImage || part.source_id != a.source_id
+      if (!is3dPart(part.data_type) || part.source_id != a.source_id
           || part.region_id != a.region_id || part.format_namespace != a.format_namespace
           || part.width != a.width || part.height != a.height) continue;
       const auto axis = part.data_format == a.data_format ? 0
@@ -608,14 +623,28 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     const onegen::Frame& source, const std::uint64_t sequence,
     std::string* rejection_reason)
 {
+  if (rejection_reason) rejection_reason->clear();
   const auto reject = [rejection_reason](const char* reason) {
     if (rejection_reason) *rejection_reason = reason;
     return std::optional<GraphicsFrame>{};
   };
   if (!source.parts.empty()) {
     GraphicsFrame result;
+    std::string droppedParts;
+    const auto dropped = [&](std::size_t index, const std::string& reason) {
+      const auto& part = source.parts[index];
+      std::ostringstream detail;
+      detail << "part=" << index << " type=" << part.data_type << " PFNC=0x" << std::hex
+          << part.data_format << std::dec << " namespace=" << part.format_namespace
+          << " shape=" << part.width << 'x' << part.height << " stride=" << part.stride
+          << " bytes=" << part.payload.size() << " source=" << part.source_id << " region=" << part.region_id
+          << " cause=" << reason;
+      if (!droppedParts.empty()) droppedParts += "; ";
+      droppedParts += detail.str();
+    };
     std::vector<const onegen::Frame::Part*> selected_parts;
     std::vector<bool> consumed_parts(source.parts.size(), false);
+    std::vector<bool> confidence_used(source.parts.size(), false);
     for (auto& assembly : planarPartsRanges(source)) {
       const auto& selected = source.parts[assembly.selected_index];
       const auto group = std::to_string(selected.source_id) + ":"
@@ -628,15 +657,19 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     for (std::size_t index = 0; index < source.parts.size(); ++index) {
       const auto& part = source.parts[index];
       if (!consumed_parts[index]) {
-        if (auto range = rangeFrame(part, source)) {
+        std::string rangeDiagnostic;
+        if (auto range = rangeFrame(part, source, &rangeDiagnostic)) {
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
           result.addRange("range." + group + "." + std::to_string(index),
                           std::move(*range), "Range", group);
           selected_parts.push_back(&part);
+        } else if (onegen::coordinate_format(part.data_format).components || is3dPart(part.data_type)) {
+          dropped(index, rangeDiagnostic);
         }
       }
-      if (part.data_type == kPart2dImage) {
-        auto imageFrame = oneGenGraphicsFrame(partFrame(part, source), sequence, rejection_reason);
+      if (part.data_type == kPart2dImage && !onegen::coordinate_format(part.data_format).components) {
+        std::string imageDiagnostic;
+        auto imageFrame = oneGenGraphicsFrame(partFrame(part, source), sequence, &imageDiagnostic);
         if (imageFrame && !imageFrame->images.empty()) {
           auto image = std::move(imageFrame->images.front());
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
@@ -644,15 +677,22 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
           image.descriptor.displayName = "Image";
           image.descriptor.groupId = group;
           result.images.push_back(std::move(image));
-        }
+        } else if (!imageFrame) dropped(index, imageDiagnostic);
       }
+      if (!consumed_parts[index] && !is3dPart(part.data_type)
+          && part.data_type != kPart2dImage && part.data_type != kPartConfidence
+          && !onegen::coordinate_format(part.data_format).components)
+        dropped(index, "unsupported multipart part type or PFNC format");
     }
     for (std::size_t index = 0; index < result.ranges.size(); ++index) {
       const auto* selected = selected_parts[index];
-      for (const auto& part : source.parts)
+      for (std::size_t auxiliary = 0; auxiliary < source.parts.size(); ++auxiliary) {
+        const auto& part = source.parts[auxiliary];
         if ((part.data_type == kPartConfidence || part.data_type == kPart2dImage)
             && part.source_id == selected->source_id && part.region_id == selected->region_id)
-          appendAuxiliary(part, result.ranges[index].payload, source.pixel_endianness);
+          if (appendAuxiliary(part, result.ranges[index].payload, source.pixel_endianness))
+            confidence_used[auxiliary] = true;
+      }
     }
     if (result.ranges.empty() && result.images.empty()) {
       for (std::size_t index = 0; index < source.parts.size(); ++index) {
@@ -667,14 +707,23 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
           range.descriptor.displayName = "Confidence";
           range.descriptor.groupId = group;
           result.ranges.push_back(std::move(range));
+          confidence_used[index] = true;
         }
       }
     }
+    for (std::size_t index = 0; index < source.parts.size(); ++index)
+      if (source.parts[index].data_type == kPartConfidence && !confidence_used[index])
+        dropped(index, "confidence part has no matching range or a supported auxiliary layout");
     result.metadata.frameIndex = sequence;
     if (source.frame_id) result.metadata.frameId = std::to_string(source.frame_id);
     presentPointCloud(result, source);
-    return result.isValid() ? std::optional<GraphicsFrame>(std::move(result))
-                            : reject("multipart payload has no supported image or range data");
+    if (rejection_reason) *rejection_reason = droppedParts;
+    if (result.isValid()) return result;
+    if (rejection_reason && !droppedParts.empty()) {
+      *rejection_reason = "multipart payload has no supported image or range data; " + droppedParts;
+      return std::nullopt;
+    }
+    return reject("multipart payload has no supported image or range data");
   }
   if (source.payload_type != 0 && source.payload_type != 1
       && source.payload_type != 4 && source.payload_type != kPayloadJpeg)
@@ -718,7 +767,9 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
         preview.validMask[i] = std::isfinite(preview.zValues[i]) ? 1U : 0U;
       frame.addRange("confidence", std::move(preview), "Confidence");
     } else {
-      if (auto range = rangeFrame(part, source)) frame.addRange("range", std::move(*range), "Range");
+      std::string diagnostic;
+      if (auto range = rangeFrame(part, source, &diagnostic)) frame.addRange("range", std::move(*range), "Range");
+      else return reject(diagnostic.c_str());
     }
     frame.metadata.frameIndex = sequence;
     if (source.frame_id) frame.metadata.frameId = std::to_string(source.frame_id);
