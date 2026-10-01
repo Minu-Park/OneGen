@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Report every adapter rejection, discarded multipart/confidence part and missing frame consumer, including repeated failures, with camera/frame identity and layout/calibration diagnostics.
+
+- Identify the first received/converted frame and multipart layout, including missing presentation consumers, to distinguish adapter rejection from acquisition failure.
+- Accept declared GenTL 3D planar parts and report each rejected part's layout and calibration cause while preserving supported sibling resources.
+
+- Publish scalar Coord3D parts that lack Scan3d calibration, including parts labeled as 2D images, as a native PixelGrid height map. Multi-axis payloads without calibration stay rejected.
+
+- Accept exact consumer-owned CTI file lists, including an authoritative empty list. Share asynchronous startup discovery across later sessions and disconnected-control rescans; return completed empty results without another startup wait. Preserve standalone directory/environment discovery and protect active operations during reconfiguration.
+
+- Keep search and Interface operations busy until their GUI completion callbacks are applied, including the initially queued search, to prevent premature reconfiguration.
 - Show unsaved feature-row stars only on hover; keep saved favorites visible at all times. Center the visible star outline vertically in feature rows and favorite controls.
 
 - Support consumer-requested GenTL path reconfiguration while disconnected, releasing idle workers and refreshing device inventories without restarting the consumer.

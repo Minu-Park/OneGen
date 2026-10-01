@@ -139,14 +139,46 @@ int main(int argc, char** argv)
   assert(startup.waitForCamera(1s).size() == 1);
   continue_scan.set_value();
   assert(startup.finish({}).size() == 2);
+  assert(startup.finish({}).size() == 2); // Reusable by another session.
+  assert(!startup.running());
 
-  // Even a completed empty scan holds the overlay until the no-camera deadline.
+  // Multiple consumers wait on one in-flight result; cached exceptions reach each reader.
+  {
+    std::promise<void> complete_scan;
+    auto signal = complete_scan.get_future();
+    std::atomic<int> scans{0};
+    onegen::worker::StartupDiscovery shared([&](auto) {
+      ++scans;
+      signal.wait();
+      onegen::DeviceInfo device;
+      device.id = "shared";
+      return std::vector<onegen::DeviceInfo>{device};
+    });
+    auto first_waiter = std::async(std::launch::async, [&] { return shared.finish({}); });
+    auto second_waiter = std::async(std::launch::async, [&] { return shared.finish({}); });
+    complete_scan.set_value();
+    assert(first_waiter.get().front().id == "shared");
+    assert(second_waiter.get().front().id == "shared");
+    assert(scans == 1);
+    onegen::worker::StartupDiscovery failed([](auto) -> std::vector<onegen::DeviceInfo> {
+      throw std::runtime_error("Synthetic startup failure");
+    });
+    for (int consumer = 0; consumer < 2; ++consumer) {
+      bool rejected = false;
+      try { failed.finish({}); } catch (const std::runtime_error& error) {
+        rejected = std::string_view(error.what()) == "Synthetic startup failure";
+      }
+      assert(rejected);
+    }
+  }
+
+  // A completed empty startup inventory does not impose another session wait.
   onegen::worker::StartupDiscovery empty([](auto) {
     return std::vector<onegen::DeviceInfo>{};
   });
   const auto empty_start = std::chrono::steady_clock::now();
   assert(empty.waitForCamera().empty());
-  assert(std::chrono::steady_clock::now() - empty_start >= 10s);
+  assert(std::chrono::steady_clock::now() - empty_start < 1s);
   assert(empty.finish({}).empty());
 
   // A camera arriving after the deadline is still delivered without a second scan.
@@ -196,6 +228,19 @@ int main(int argc, char** argv)
   std::filesystem::create_directories(root / "vendor-b");
   std::ofstream(root / "vendor-a" / "Producer.cti").put('\0');
   std::ofstream(root / "vendor-b" / "Producer.cti").put('\0');
+  std::ofstream(root / "vendor-b" / "Producer.cti.starts", std::ios::trunc);
+  // Exact consumer files override directory/environment discovery, including empty.
+  {
+    onegen::worker::Coordinator explicit_files(argv[0], root, std::chrono::milliseconds{1});
+    assert(explicit_files.set_producer_files({root / "vendor-b" / "Producer.cti"}));
+    const auto selected = explicit_files.discover();
+    assert(selected.total_producers == 1 && selected.completed);
+    assert(!explicit_files.set_producer_files({})); // Retained workers require reset.
+    assert(explicit_files.reset_idle_search());
+    assert(explicit_files.set_producer_files({}));
+    const auto none = explicit_files.discover();
+    assert(none.completed && none.total_producers == 0 && none.devices.empty());
+  }
   std::ofstream(root / "vendor-b" / "Producer.cti.starts", std::ios::trunc);
   onegen::worker::Coordinator coordinator(argv[1], root, std::chrono::seconds{2});
   std::size_t updates = 0;

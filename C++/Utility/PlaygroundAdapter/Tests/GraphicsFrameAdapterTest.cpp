@@ -141,9 +141,49 @@ int main()
   const auto c16Scene = oneGenGraphicsFrame(c16Frame, 15);
   assert(c16Scene && c16Scene->hasRangeFrame());
   assert(c16Scene->ranges.front().payload.xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
+  for (const auto type : {6U, 7U, 8U}) {
+    auto planarC = c16Frame;
+    planarC.parts.front().data_type = type;
+    const auto plane = oneGenGraphicsFrame(planarC, 15, &rejectionReason);
+    assert(plane && plane->hasRangeFrame() && rejectionReason.empty());
+  }
+  auto missingCalibration = c16Frame;
+  missingCalibration.scan3d_geometry->calibrated_axes[2] = false;
+  assert(!oneGenGraphicsFrame(missingCalibration, 15, &rejectionReason));
+  assert(rejectionReason.find("part=0") != std::string::npos
+      && rejectionReason.find("PFNC=0x11000b8") != std::string::npos
+      && rejectionReason.find("axis=2") != std::string::npos);
+  onegen::Frame::Part survivingImage;
+  survivingImage.data_type = 1;
+  survivingImage.data_format = 0x01080001;
+  survivingImage.width = 2; survivingImage.height = 1; survivingImage.stride = 2;
+  survivingImage.payload = {1, 2};
+  missingCalibration.parts.push_back(survivingImage);
+  const auto partial = oneGenGraphicsFrame(missingCalibration, 15, &rejectionReason);
+  assert(partial && partial->hasImage() && !partial->hasRangeFrame()
+      && rejectionReason.find("axis=2") != std::string::npos);
+  missingCalibration.scan3d_geometry.reset();
+  const auto native = oneGenGraphicsFrame(missingCalibration, 15, &rejectionReason);
+  assert(native && native->hasRangeFrame() && rejectionReason.empty()
+      && native->ranges.front().payload.canDeriveSurface()
+      && !native->ranges.front().payload.canDerivePointCloud());
   assert(!std::isfinite(c16Scene->ranges.front().payload.xScale));
   assert(c16Scene->ranges.front().payload.physicalZAt(0) == 2.0);
   assert(c16Scene->ranges.front().payload.validMask == std::vector<std::uint8_t>({1, 0}));
+  auto discardedParts = c16Frame;
+  auto unsupportedPart = survivingImage;
+  unsupportedPart.data_type = 2;
+  discardedParts.parts.push_back(unsupportedPart);
+  auto orphanConfidence = survivingImage;
+  orphanConfidence.data_type = 9;
+  orphanConfidence.source_id = 999;
+  discardedParts.parts.push_back(orphanConfidence);
+  const auto retainedRange = oneGenGraphicsFrame(discardedParts, 16, &rejectionReason);
+  assert(retainedRange && retainedRange->hasRangeFrame());
+  assert(rejectionReason.find("part=1 type=2") != std::string::npos
+      && rejectionReason.find("unsupported multipart") != std::string::npos
+      && rejectionReason.find("part=2 type=9") != std::string::npos
+      && rejectionReason.find("confidence part has no matching range") != std::string::npos);
 
   onegen::Frame floating;
   floating.scan3d_geometry = multipart.scan3d_geometry;
@@ -180,7 +220,17 @@ int main()
   const auto singleRange = oneGenGraphicsFrame(single, 23);
   assert(singleRange && singleRange->ranges.front().payload.physicalZAt(3) == 2);
   single.scan3d_geometry.reset();
-  assert(!oneGenGraphicsFrame(single, 24));
+  const auto preview = oneGenGraphicsFrame(single, 24);
+  assert(preview && preview->ranges.front().payload.xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
+  assert(preview->ranges.front().payload.rangeField.domain == MeasurementValueDomain::Native);
+  assert(preview->ranges.front().payload.zValues[3] == 6);
+  assert(preview->ranges.front().payload.canDeriveSurface());
+  assert(!preview->ranges.front().payload.canDerivePointCloud());
+  single.parts = {floating.parts[0]};
+  single.parts[0].data_type = 1;
+  single.scan3d_geometry.reset();
+  assert(oneGenGraphicsFrame(single, 24)->ranges.front().payload.canDeriveSurface());
+  single.parts.clear();
   single.pixel_format = 0x012000c8;
   single.payload = floating.parts[1].payload;
   const auto confidencePreview = oneGenGraphicsFrame(single, 25);
@@ -238,7 +288,10 @@ int main()
   assert(!oneGenGraphicsFrame(floating, 21));
   floating.parts[0].payload.resize(24);
   floating.scan3d_geometry.reset();
-  assert(!oneGenGraphicsFrame(floating, 22));
+  const auto uncalibrated = oneGenGraphicsFrame(floating, 22);
+  assert(uncalibrated && uncalibrated->hasRangeFrame());
+  assert(uncalibrated->ranges.front().payload.xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
+  assert(uncalibrated->ranges.front().payload.canDeriveSurface());
 
   // Independent PFNC fixtures exercise every unpacked C/AC/ABC layout in both byte orders.
   struct LayoutCase { std::uint64_t format; unsigned components, bytes; bool planar, floating; };
@@ -305,6 +358,10 @@ int main()
       }
       const auto separated = oneGenGraphicsFrame(coordinates, 42);
       assert(separated && separated->ranges.front().payload.xValues[0] == 12 && separated->ranges.front().payload.physicalZAt(0) == 9.5);
+      for (auto& plane : coordinates.parts) plane.data_type = 7;
+      const auto declaredPlanes = oneGenGraphicsFrame(coordinates, 42);
+      assert(declaredPlanes && declaredPlanes->hasRangeFrame()
+          && declaredPlanes->ranges.front().payload.xValues[0] == 12);
       const auto firstPlanarGroup = coordinates.parts;
       for (auto plane : firstPlanarGroup) {
         plane.region_id = 1;

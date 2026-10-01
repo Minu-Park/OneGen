@@ -30,6 +30,8 @@ OneGenSourceController* OneGenSourceController::cameraController(const std::stri
       FrameConsumer consumer;
       { std::lock_guard lock(mutex_); consumer = consumer_; }
       if (consumer) consumer(std::move(frame), index);
+      else qWarning() << "[GenICam] outcome=rejected reason=no-parent-presentation-consumer sourceIndex="
+          << index << "sequence=" << frame.frameSeq;
     });
     result = child.get();
     children_.emplace(id, Child{index, label, std::move(child)});
@@ -89,6 +91,9 @@ void OneGenSourceController::setLease(onegen::worker::Lease* lease)
   lease_ = lease;
   rejected_frames_.store(0, std::memory_order_relaxed);
   incomplete_frames_.store(0, std::memory_order_relaxed);
+  received_frames_.store(0, std::memory_order_relaxed);
+  converted_frames_.store(0, std::memory_order_relaxed);
+  partial_frames_.store(0, std::memory_order_relaxed);
   bindLease();
 }
 
@@ -183,7 +188,19 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
 {
   try {
     const auto sequence = sequence_.fetch_add(1, std::memory_order_relaxed);
-    if (source.buffer_info.incomplete && incomplete_frames_.fetch_add(1, std::memory_order_relaxed) == 0) {
+    const bool firstFrame = received_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
+    if (firstFrame) {
+      qInfo().noquote() << QStringLiteral("[GenICam] first frame received: camera=%1 frame=%2 payloadType=%3 PFNC=0x%4 %5x%6 bytes=%7 parts=%8 scan3d=%9")
+          .arg(QString::fromStdString(sourceName)).arg(source.frame_id).arg(source.payload_type)
+          .arg(QString::number(source.pixel_format, 16)).arg(source.width).arg(source.height)
+          .arg(source.payload.size()).arg(source.parts.size()).arg(source.scan3d_geometry.has_value());
+      for (const auto& part : source.parts)
+        qInfo().noquote() << QStringLiteral("[GenICam] first frame part: type=%1 PFNC=0x%2 %3x%4 stride=%5 bytes=%6 source=%7 region=%8")
+            .arg(part.data_type).arg(QString::number(part.data_format, 16)).arg(part.width).arg(part.height)
+            .arg(part.stride).arg(part.payload.size()).arg(part.source_id).arg(part.region_id);
+    }
+    if (source.buffer_info.incomplete) {
+      incomplete_frames_.fetch_add(1, std::memory_order_relaxed);
       const auto diagnostic = source.buffer_info.diagnostic.empty()
           ? QStringLiteral("incomplete=%1 filled=%2 capacity=%3")
                 .arg(source.buffer_info.incomplete)
@@ -195,7 +212,8 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     std::string rejectionReason;
     auto payload = oneGenGraphicsFrame(source, sequence, &rejectionReason);
     if (!payload) {
-      if (rejected_frames_.fetch_add(1, std::memory_order_relaxed) == 0) {
+      rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      {
         const auto message = QStringLiteral(
             "Frame rejected: %1; PFNC 0x%2, %3x%4, stride %5, payload %6 bytes, "
             "endianness %7; buffer{capacity=%8, filled=%9, data=%10, deliveredHeight=%11, "
@@ -209,9 +227,17 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
             .arg(source.buffer_info.image_offset).arg(source.buffer_info.y_padding)
             .arg(source.buffer_info.incomplete).arg(source.buffer_info.image_present)
             .arg(source.buffer_info.contains_chunk_data);
-        qWarning().noquote() << "[GenICam]" << message;
+        qWarning().noquote() << "[GenICam] outcome=rejected camera=" << QString::fromStdString(sourceName)
+            << "sequence=" << sequence << "frameId=" << source.frame_id << message;
       }
       return;
+    }
+    const bool firstConverted = converted_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
+    if (!rejectionReason.empty()) {
+      partial_frames_.fetch_add(1, std::memory_order_relaxed);
+      qWarning().noquote() << "[GenICam] frame retained with rejected parts: camera="
+          << QString::fromStdString(sourceName) << "sequence=" << sequence
+          << "frameId=" << source.frame_id << QString::fromStdString(rejectionReason);
     }
     payload->metadata.sourceName = sourceName;
     SessionFrame frame;
@@ -222,7 +248,13 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
       std::lock_guard lock(mutex_);
       consumer = consumer_;
     }
-    if (!consumer) return;
+    if (!consumer) {
+      qWarning() << "[GenICam] frame converted but no presentation consumer is installed."
+          << "sequence=" << sequence << "frameId=" << source.frame_id;
+      return;
+    }
+    if (firstConverted) qInfo().noquote() << QStringLiteral("[GenICam] first frame converted: images=%1 ranges=%2 pointClouds=%3; forwarding to presentation")
+        .arg(frame.payload.images.size()).arg(frame.payload.ranges.size()).arg(frame.payload.pointClouds.size());
     consumer(std::move(frame), source.stream_index);
   } catch (const std::exception& error) {
     qWarning() << "[GenICam] frame delivery failed:" << error.what();

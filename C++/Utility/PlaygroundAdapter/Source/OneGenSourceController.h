@@ -55,4 +55,7 @@ private:
   std::atomic<std::uint64_t> sequence_{0};
   std::atomic<std::uint64_t> rejected_frames_{0};
   std::atomic<std::uint64_t> incomplete_frames_{0};
+  std::atomic<std::uint64_t> received_frames_{0};
+  std::atomic<std::uint64_t> converted_frames_{0};
+  std::atomic<std::uint64_t> partial_frames_{0};
 };

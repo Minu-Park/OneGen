@@ -9,7 +9,7 @@
 #include <optional>
 #include <string>
 
-/** Convert PFNC images, calibrated coordinates and native confidence previews without a vendor SDK. */
+/** @brief Converts PFNC data; diagnostics describe rejected parts even when other resources survive. */
 [[nodiscard]] std::optional<GraphicsFrame> oneGenGraphicsFrame(
     const onegen::Frame& source, std::uint64_t sequence,
     std::string* rejection_reason = nullptr);

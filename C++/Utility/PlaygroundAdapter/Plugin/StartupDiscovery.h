@@ -19,7 +19,7 @@ public:
               { std::lock_guard lock(mutex_); latest_ = update; ++revision_; }
               changed_.notify_all();
             });
-            { std::lock_guard lock(mutex_); latest_.devices = devices; finished_ = true; ++revision_; }
+            { std::lock_guard lock(mutex_); latest_.devices = devices; latest_.completed = true; finished_ = true; ++revision_; }
             changed_.notify_all();
             return devices;
           } catch (...) {
@@ -27,7 +27,7 @@ public:
             changed_.notify_all();
             throw;
           }
-        })) {}
+        }).share()) {}
 
   ~StartupDiscovery() { if (task_.valid()) task_.wait(); }
 
@@ -35,8 +35,15 @@ public:
   std::vector<DeviceInfo> waitForCamera(
       std::chrono::milliseconds timeout = std::chrono::seconds{10}) {
     std::unique_lock lock(mutex_);
-    changed_.wait_for(lock, timeout, [this] { return !latest_.devices.empty(); });
+    changed_.wait_for(lock, timeout, [this] { return !latest_.devices.empty() || finished_; });
+    if (finished_) { lock.unlock(); return task_.get(); }
     return latest_.devices;
+  }
+
+  /** @brief Reports unfinished startup work so reconfiguration can reject it without blocking. */
+  bool running() const {
+    std::lock_guard lock(mutex_);
+    return !finished_;
   }
 
   /** Delivers remaining scan updates on the caller thread without starting another scan. */
@@ -56,12 +63,12 @@ public:
   }
 
 private:
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::condition_variable changed_;
   DiscoveryResult latest_;
   std::size_t revision_ = 0;
   bool finished_ = false;
-  std::future<std::vector<DeviceInfo>> task_;
+  std::shared_future<std::vector<DeviceInfo>> task_;
 };
 
 } // namespace onegen::worker
