@@ -161,6 +161,8 @@ inline int fakeWorker(const std::filesystem::path& cti)
       }
     }
     if (request.operation == Operation::Probe) {
+      std::ofstream(cti.string() + ".all-probes", std::ios::app) << "probe\n";
+      if (cti.stem() == "CrashProbe") return 53;
       ++probes;
       const auto diagnostic = encode({Operation::Error, 0, false, "Interface XML test failure"});
       const auto diagnostic_header = frameSize(static_cast<std::uint32_t>(diagnostic.size()));

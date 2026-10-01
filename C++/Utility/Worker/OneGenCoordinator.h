@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -112,6 +113,8 @@ public:
   void shutdown();
   /** @brief Releases retained workers only when no discovery, Interface or Device is active. */
   bool reset_idle_search();
+  /** @brief Sets exact consumer-owned CTI files only after idle workers are released; empty disables discovery. */
+  bool set_producer_files(std::vector<std::filesystem::path> files);
 
 private:
   friend class Lease;
@@ -124,6 +127,7 @@ private:
 
   std::filesystem::path worker_executable_;
   std::filesystem::path cti_root_;
+  std::optional<std::vector<std::filesystem::path>> producer_files_;
   std::chrono::milliseconds probe_timeout_;
   Connection::ClaimFn claim_;
   std::unordered_map<std::string, InterfaceInfo> interface_sessions_;

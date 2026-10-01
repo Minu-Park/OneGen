@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Accept exact consumer-owned CTI file lists, including an authoritative empty list. Share asynchronous startup discovery across later sessions and disconnected-control rescans; return completed empty results without another startup wait. Preserve standalone directory/environment discovery and protect active operations during reconfiguration.
+
+- Keep search and Interface operations busy until their GUI completion callbacks are applied, including the initially queued search, to prevent premature reconfiguration.
+
 - Support consumer-requested GenTL path reconfiguration while disconnected, releasing idle workers and refreshing device inventories without restarting the consumer.
 
 - Accept consumer-provided favorite storage, import the legacy list only into an absent destination key, and preserve standalone storage and unrelated settings.

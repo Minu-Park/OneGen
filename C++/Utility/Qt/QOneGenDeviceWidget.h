@@ -27,8 +27,8 @@ public:
   bool canReconfigureSearch() const;
   /** @brief Gives an actionable connected, busy or shutdown reason for search-path preflight. */
   QString genTLPathChangeBlockReason() const;
-  /** @brief Drops old selection inventories and asynchronously searches the updated paths. */
-  void rescanGenTLPaths();
+  /** @brief Drops old inventories and searches updated paths, optionally reusing a consumer scan. */
+  void rescanGenTLPaths(QOneGenWidget::DiscoverFn discover = {});
 
 private:
   struct Target {
@@ -79,6 +79,8 @@ private:
   QFutureWatcher<Result> watcher_;
   QFutureWatcher<Result> discovery_watcher_;
   Operation operation_ = Operation::Discover;
+  bool operation_pending_ = false;
+  bool discovery_pending_ = false;
   bool shutting_down_ = false;
   std::function<void(const QString&)> title_callback_;
 };

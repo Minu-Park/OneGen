@@ -55,6 +55,7 @@ QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordin
   connect_button_->setCheckable(true);
   connect_button_->setToolTip(QStringLiteral("Connect / Disconnect Interface"));
   refresh_button_ = new QToolButton;
+  refresh_button_->setObjectName(QStringLiteral("OneGenDiscoveryRefresh"));
   refresh_button_->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-refresh-48.png")));
   refresh_button_->setToolTip(QStringLiteral("Refresh"));
   for (auto* button : {connect_button_, refresh_button_}) {
@@ -86,7 +87,14 @@ QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordin
   connect(&discovery_watcher_, &QFutureWatcher<Result>::finished, this, [this] { finishDiscovery(); });
   interfaces_ = coordinator_->interfaces();
   updateTargets();
-  if (discover_) QTimer::singleShot(0, this, [this] { refresh(); });
+  if (discover_) {
+    discovery_pending_ = true;
+    updateControls();
+    QTimer::singleShot(0, this, [this] {
+      discovery_pending_ = false;
+      refresh();
+    });
+  }
 }
 
 QOneGenDeviceWidget::~QOneGenDeviceWidget() { prepareForShutdown(); }
@@ -157,14 +165,15 @@ QString QOneGenDeviceWidget::genTLPathChangeBlockReason() const {
   if (interface_ || std::any_of(cameras_.begin(), cameras_.end(),
       [](const auto& item) { return item.second->cameraConnected(); }))
     return tr("Disconnect GenICam cameras and Interfaces before applying paths.");
-  if (watcher_.isRunning() || discovery_watcher_.isRunning()
+  if (operation_pending_ || discovery_pending_
       || std::any_of(cameras_.begin(), cameras_.end(), [](const auto& item) { return item.second->cameraInUse(); }))
     return tr("Wait for GenICam searches or pending operations to finish before applying paths.");
   return {};
 }
 
-void QOneGenDeviceWidget::rescanGenTLPaths() {
+void QOneGenDeviceWidget::rescanGenTLPaths(QOneGenWidget::DiscoverFn discover) {
   if (!canReconfigureSearch()) return;
+  if (discover) discover_ = std::move(discover);
   devices_.clear();
   interfaces_.clear();
   updateTargets();
@@ -172,12 +181,14 @@ void QOneGenDeviceWidget::rescanGenTLPaths() {
 }
 
 void QOneGenDeviceWidget::refresh() {
-  if (shutting_down_ || watcher_.isRunning()) return;
-  if (!interface_ && discovery_watcher_.isRunning()) return;
+  if (shutting_down_ || operation_pending_) return;
+  if (!interface_ && discovery_pending_) return;
   if (!interface_ && std::any_of(cameras_.begin(), cameras_.end(),
       [](const auto& item) { return item.second->cameraInUse(); })) return;
   operation_ = interface_ ? Operation::Rescan : Operation::Discover;
   const auto selectedInterface = interface_;
+  if (selectedInterface) operation_pending_ = true;
+  else discovery_pending_ = true;
   const QPointer<QOneGenDeviceWidget> self(this);
   auto future = QtConcurrent::run([this, selectedInterface, self] {
     Result result;
@@ -192,7 +203,7 @@ void QOneGenDeviceWidget::refresh() {
             if (!self || self->shutting_down_) return;
             self->devices_ = update.devices;
             self->interfaces_ = self->coordinator_->interfaces();
-            if (!self->interface_ && !self->watcher_.isRunning()
+            if (!self->interface_ && !self->operation_pending_
                 && std::none_of(self->cameras_.begin(), self->cameras_.end(),
                     [](const auto& item) { return item.second->cameraInUse(); })) self->updateTargets(false);
           }, Qt::QueuedConnection);
@@ -210,11 +221,12 @@ void QOneGenDeviceWidget::refresh() {
 void QOneGenDeviceWidget::finishDiscovery() {
   if (shutting_down_) return;
   const auto result = discovery_watcher_.result();
+  discovery_pending_ = false;
   if (!result.error.isEmpty()) qWarning().noquote() << "[GenICam] discovery failed:" << result.error;
   else {
     devices_ = result.devices;
     interfaces_ = result.interfaces;
-    if (!interface_ && !watcher_.isRunning() && std::none_of(cameras_.begin(), cameras_.end(),
+    if (!interface_ && !operation_pending_ && std::none_of(cameras_.begin(), cameras_.end(),
         [](const auto& item) { return item.second->cameraInUse(); })) updateTargets();
   }
   updateControls();
@@ -260,7 +272,7 @@ void QOneGenDeviceWidget::updateTargets(bool complete) {
 }
 
 void QOneGenDeviceWidget::selectTarget() {
-  if (interface_ || watcher_.isRunning()) return;
+  if (interface_ || operation_pending_) return;
   const auto index = devices_box_->currentIndex();
   const auto key = index >= 0 ? targets_[index].key : std::string{};
   if ((direct_camera_ || interface_settings_) && displayed_target_ == key) {
@@ -294,9 +306,10 @@ void QOneGenDeviceWidget::selectTarget() {
 
 void QOneGenDeviceWidget::connectInterface() {
   const auto index = devices_box_->currentIndex();
-  if (index < 0 || watcher_.isRunning() || interface_ || !targets_[index].interface) { updateControls(); return; }
+  if (index < 0 || operation_pending_ || interface_ || !targets_[index].interface) { updateControls(); return; }
   const auto info = *targets_[index].interface;
   operation_ = Operation::Connect;
+  operation_pending_ = true;
   watcher_.setFuture(QtConcurrent::run([this, info] {
     Result result;
     bool opened = false;
@@ -318,11 +331,12 @@ void QOneGenDeviceWidget::connectInterface() {
 }
 
 void QOneGenDeviceWidget::disconnectInterface() {
-  if (!interface_ || watcher_.isRunning()) { updateControls(); return; }
+  if (!interface_ || operation_pending_) { updateControls(); return; }
   const auto info = *interface_;
   // Each child drains only its own acquisition and device before the shared Interface closes.
   clearTabs();
   operation_ = Operation::Disconnect;
+  operation_pending_ = true;
   watcher_.setFuture(QtConcurrent::run([this, info] {
     Result result;
     try { coordinator_->close_interface(info); }
@@ -384,6 +398,7 @@ void QOneGenDeviceWidget::updateCameraTabs(const std::vector<onegen::DeviceInfo>
 void QOneGenDeviceWidget::finish() {
   if (shutting_down_) return;
   const auto result = watcher_.result();
+  operation_pending_ = false;
   if (!result.error.isEmpty()) qWarning().noquote() << "[GenICam] device operation failed:" << result.error;
   if (!result.error.isEmpty() && operation_ == Operation::Disconnect && interface_) showInterface(result);
   if (result.error.isEmpty()) {
@@ -425,11 +440,11 @@ void QOneGenDeviceWidget::showInterface(const Result& result) {
 
 void QOneGenDeviceWidget::updateControls() {
   if (shutting_down_) return;
-  const bool busy = watcher_.isRunning() || (interface_settings_ && interface_settings_->cameraInUse());
+  const bool busy = operation_pending_ || (interface_settings_ && interface_settings_->cameraInUse());
   const bool cameraBusy = std::any_of(cameras_.begin(), cameras_.end(),
       [](const auto& item) { return item.second->cameraInUse(); });
   devices_box_->setEnabled(!busy && !interface_ && !cameraBusy);
-  refresh_button_->setEnabled(!busy && (interface_ || (!cameraBusy && !discovery_watcher_.isRunning())));
+  refresh_button_->setEnabled(!busy && (interface_ || (!cameraBusy && !discovery_pending_)));
   refresh_button_->setToolTip(interface_ ? QStringLiteral("Rescan Devices") : QStringLiteral("Refresh devices"));
   const auto index = devices_box_->currentIndex();
   devices_box_->setToolTip(devices_box_->currentData(Qt::ToolTipRole).toString());

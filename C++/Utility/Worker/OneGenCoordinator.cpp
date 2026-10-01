@@ -284,7 +284,8 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
 {
   std::lock_guard discovery_lock(discovery_mutex_);
   DiscoveryResult result;
-  const auto ctis = cti_root_.empty() ? defaults::producerCtis() : defaults::producerCtis(cti_root_);
+  const auto ctis = producer_files_ ? *producer_files_
+      : (cti_root_.empty() ? defaults::producerCtis() : defaults::producerCtis(cti_root_));
   {
     std::lock_guard lock(mutex_);
     std::erase_if(interface_inventory_, [&](const auto& item) {
@@ -292,6 +293,7 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
     });
   }
   result.total_producers = ctis.size();
+  result.completed = ctis.empty();
   struct Item { std::filesystem::path cti; std::vector<DeviceInfo> devices; std::string error; std::vector<InterfaceInfo> interfaces; };
   std::mutex completed_mutex;
   std::condition_variable completed_cv;
@@ -503,6 +505,17 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
     }
   }
   throw std::runtime_error(error.empty() ? "No producer candidate is available." : error);
+}
+
+bool Coordinator::set_producer_files(std::vector<std::filesystem::path> files)
+{
+  std::unique_lock discovery_lock(discovery_mutex_, std::try_to_lock);
+  if (!discovery_lock.owns_lock()) return false;
+  std::lock_guard lock(mutex_);
+  if (!connections_.empty() || !device_connections_.empty()
+      || !leased_.empty() || !interface_sessions_.empty()) return false;
+  producer_files_ = std::move(files);
+  return true;
 }
 
 bool Coordinator::reset_idle_search()
