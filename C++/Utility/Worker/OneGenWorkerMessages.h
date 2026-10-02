@@ -232,6 +232,11 @@ inline void write(Writer& out, const Frame& value)
     out.scalar(chunk.offset);
     writeBytes(out, chunk.payload);
   }
+  out.scalar(static_cast<std::uint32_t>(value.components.size()));
+  for (const auto& component : value.components) {
+    out.scalar(component.id);
+    out.string(component.name);
+  }
   write(out, value.buffer_info);
   out.scalar(value.scan3d_geometry.has_value());
   if (value.scan3d_geometry) {
@@ -277,6 +282,13 @@ inline Frame readFrame(Reader& in)
     chunk.offset = in.scalar<std::uint64_t>();
     chunk.payload = readBytes(in);
     value.chunks.push_back(std::move(chunk));
+  }
+  const auto componentCount = in.scalar<std::uint32_t>();
+  for (std::uint32_t index = 0; index < componentCount; ++index) {
+    Frame::ComponentIdentity component;
+    component.id = in.scalar<std::uint64_t>();
+    component.name = in.string();
+    value.components.push_back(std::move(component));
   }
   value.buffer_info = readBufferInfo(in);
   if (in.scalar<bool>()) {

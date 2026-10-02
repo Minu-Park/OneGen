@@ -35,7 +35,8 @@ public:
   void setLease(onegen::worker::Lease* lease);
   void start() override;
   void stop() override;
-  void grabOne();
+  /** @brief Captures one frame, optionally retaining raw bytes in a consumer diagnostic directory. */
+  void grabOne(const QString& diagnosticDirectory = {});
   void trigger();
   bool isGrabbing() const override;
   void setFrameConsumer(FrameConsumer consumer) override;

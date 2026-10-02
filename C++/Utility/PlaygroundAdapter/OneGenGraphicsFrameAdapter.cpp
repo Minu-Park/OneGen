@@ -368,6 +368,8 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
       range.xScale = geometry.scale[0]; range.xOffset = geometry.offset[0];
       range.yScale = geometry.scale[1]; range.yOffset = geometry.offset[1];
     } else {
+      // SFNC CalibratedC guarantees calibrated C only, even if A/B nodes exist.
+      // Pixel coordinates are not physical XY; display fitting belongs to the consumer.
       range.xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
       range.xScale = range.yScale = std::numeric_limits<double>::quiet_NaN();
       range.xOffset = range.yOffset = std::numeric_limits<double>::quiet_NaN();
@@ -675,6 +677,15 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
           image.descriptor.id = "image." + group + "." + std::to_string(index);
           image.descriptor.displayName = "Image";
+          const onegen::Frame::ComponentIdentity* matched = nullptr;
+          std::size_t matches = 0;
+          for (const auto& component : source.components) {
+            if (component.id == part.purpose_id && !component.name.empty()) {
+              matched = &component;
+              ++matches;
+            }
+          }
+          if (matches == 1) image.descriptor.displayName = matched->name;
           image.descriptor.groupId = group;
           result.images.push_back(std::move(image));
         } else if (!imageFrame) dropped(index, imageDiagnostic);
@@ -683,6 +694,11 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
           && part.data_type != kPart2dImage && part.data_type != kPartConfidence
           && !onegen::coordinate_format(part.data_format).components)
         dropped(index, "unsupported multipart part type or PFNC format");
+    }
+    if (result.images.size() > 1) {
+      for (std::size_t imageIndex = 0; imageIndex < result.images.size(); ++imageIndex)
+        if (result.images[imageIndex].descriptor.displayName == "Image")
+          result.images[imageIndex].descriptor.displayName = "Image " + std::to_string(imageIndex + 1);
     }
     for (std::size_t index = 0; index < result.ranges.size(); ++index) {
       const auto* selected = selected_parts[index];

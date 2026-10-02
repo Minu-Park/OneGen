@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Label multipart images using unique SFNC ComponentIDValue identities matched to GenTL data-purpose IDs; retain numbered fallbacks for unavailable or ambiguous identities.
+
+- Number unidentified multipart images in delivered image order to distinguish sibling channels without assuming component semantics.
+
+- Keep attached-buffer diagnostic node inventories consumer-configured; vendor chunk names do not participate in standard frame conversion. Preserve the SFNC CalibratedC versus RectifiedC XY contract.
+
+- Offer opt-in Single capture dossiers with complete copied feature metadata, restored selector inventories, raw multipart/chunk bytes and attached-buffer chunk part diagnostics.
+
+- Log selector-preserving component feature inventory on connection and first-frame part indices to support multipart channel identification.
+
+- Report effective first-frame Scan3d mode, system, units, axis calibration and delivered chunk count for geometry diagnosis.
+
 - Report every adapter rejection, discarded multipart/confidence part and missing frame consumer, including repeated failures, with camera/frame identity and layout/calibration diagnostics.
 
 - Identify the first received/converted frame and multipart layout, including missing presentation consumers, to distinguish adapter rejection from acquisition failure.

@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -207,6 +209,7 @@ struct Camera::Impl {
   std::uint32_t stream_index = 0;
   std::string stream_id;
   std::optional<Frame::Scan3dGeometry> scan3d_geometry;
+  std::vector<Frame::ComponentIdentity> components;
   std::size_t buffer_capacity = 0;
   bool acquiring = false;
   struct FeatureEvent {
@@ -526,6 +529,27 @@ void Camera::Impl::set_locked(int64_t v) {
 
 void Camera::Impl::snapshot_scan3d_geometry() {
   scan3d_geometry = read_scan3d_geometry(features, "");
+  components.clear();
+  auto selector = features.find("ComponentSelector");
+  auto componentId = features.find("ComponentIDValue");
+  if (!selector.is_readable() || !selector.is_writable()) return;
+  const auto previous = selector.get_enum();
+  try {
+    for (const auto& name : selector.enum_entries()) {
+      try {
+        selector.set_enum(name);
+        if (componentId.is_readable()) {
+          const auto id = componentId.get_int();
+          if (id >= 0) components.push_back({static_cast<std::uint64_t>(id), name});
+        }
+      } catch (...) { /* Unsupported entries do not identify a component. */ }
+    }
+  } catch (...) { components.clear(); }
+  try {
+    selector.set_enum(previous);
+    if (selector.get_enum() != previous) throw Error("ComponentSelector restore mismatch");
+  }
+  catch (...) { throw Error("ComponentSelector could not be restored"); }
 }
 
 void Camera::Impl::stop_acquisition() {
@@ -816,6 +840,7 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   f.stream_index = stream_index;
   f.stream_id = stream_id;
   f.scan3d_geometry = scan3d_geometry;
+  f.components = components;
   if (base && filled && g->DSGetBufferChunkData) {
     size_t chunk_count = 0;
     auto chunk_error = g->DSGetBufferChunkData(hds, data.BufferHandle, nullptr, &chunk_count);
@@ -866,6 +891,61 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
                 }
               }
               f.scan3d_geometry = std::move(geometry);
+            }
+            // Harness-only diagnostics must read chunk nodes while the buffer is attached.
+            if (std::getenv("ONEGEN_SINGLE_DIAGNOSTICS_DIR")) {
+              const auto report = [&](const char* name, std::int64_t part) {
+                try {
+                  auto node = features.find(name);
+                  if (!node.is_readable()) {
+                    std::cerr << "[INFO] chunk metadata: part=" << part << " node=" << name << " readable=false\n";
+                    return;
+                  }
+                  std::string value;
+                  switch (node.kind()) {
+                    case NodeKind::Integer: value = std::to_string(node.get_int()); break;
+                    case NodeKind::Float: { std::ostringstream out; out.precision(17); out << node.get_float(); value = out.str(); break; }
+                    case NodeKind::Boolean: value = node.get_bool() ? "true" : "false"; break;
+                    case NodeKind::Enumeration: value = node.get_enum(); break;
+                    case NodeKind::String: value = node.get_string(); break;
+                    default: value = "unsupported-value-kind"; break;
+                  }
+                  std::cerr << "[INFO] chunk metadata: frame=" << f.frame_id << " part=" << part
+                            << " node=" << name << " value=" << value << "\n";
+                } catch (const std::exception& e) {
+                  std::cerr << "[WARNING] chunk metadata read failed: node=" << name << " reason=" << e.what() << "\n";
+                }
+              };
+              // The consumer supplies vendor diagnostics; acquisition never interprets them.
+              const auto reportList = [&](const char* variable, std::int64_t part) {
+                const auto* configured = std::getenv(variable);
+                if (!configured) return;
+                std::istringstream names(configured);
+                std::string name;
+                while (std::getline(names, name, ','))
+                  if (!name.empty()) report(name.c_str(), part);
+              };
+              reportList("ONEGEN_DIAGNOSTIC_CHUNK_NODES", -1);
+              const auto* selectorName = std::getenv("ONEGEN_DIAGNOSTIC_CHUNK_SELECTOR");
+              const auto* countName = std::getenv("ONEGEN_DIAGNOSTIC_CHUNK_COUNT");
+              auto selector = features.find(selectorName ? selectorName : "");
+              auto count = features.find(countName ? countName : "");
+              if (selector.is_readable() && selector.is_writable() && count.is_readable()
+                  && selector.kind() == NodeKind::Integer && count.kind() == NodeKind::Integer) {
+                const auto original = selector.get_int();
+                try {
+                  const auto parts = count.get_int();
+                  if (parts < 0 || parts > 256) throw Error("Diagnostic chunk part count is outside supported bounds");
+                  for (std::int64_t part = 0; part < parts; ++part) {
+                    selector.set_int(part);
+                    reportList("ONEGEN_DIAGNOSTIC_SELECTED_CHUNK_NODES", part);
+                  }
+                } catch (...) {
+                  selector.set_int(original);
+                  throw;
+                }
+                selector.set_int(original);
+              }
             }
             adapter.DetachBuffer();
           } catch (...) {

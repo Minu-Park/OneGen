@@ -80,6 +80,8 @@ struct Frame {
     double principal_u = std::numeric_limits<double>::quiet_NaN();
     double principal_v = std::numeric_limits<double>::quiet_NaN();
   };
+  /** SFNC component identity copied before acquisition; duplicate IDs remain ambiguous. */
+  struct ComponentIdentity { std::uint64_t id = 0; std::string name; };
   struct Part {
     std::vector<std::uint8_t> payload;
     std::uint32_t width = 0;
@@ -95,6 +97,7 @@ struct Frame {
 
   std::vector<std::uint8_t> payload;
   std::vector<Part> parts;
+  std::vector<ComponentIdentity> components;
   std::vector<Chunk> chunks;
   BufferInfo buffer_info;
   std::optional<Scan3dGeometry> scan3d_geometry;

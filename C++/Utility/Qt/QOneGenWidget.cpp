@@ -1,4 +1,5 @@
 #include "QOneGenWidget.h"
+#include "SingleCaptureDiagnostics.h"
 #include <QElapsedTimer>
 #include "NumericFeatureEditor.h"
 #include "OneGenFeatureTree.h"
@@ -628,7 +629,8 @@ void QOneGenWidget::startGrabOne()
     timing.start();
     AsyncResult result;
     try {
-      controller_->grabOne();
+      const auto directory = onegen::diagnostics::beforeSingle(*lease_);
+      controller_->grabOne(directory);
     } catch (const std::exception& error) {
       result.error = QString::fromLocal8Bit(error.what());
     }

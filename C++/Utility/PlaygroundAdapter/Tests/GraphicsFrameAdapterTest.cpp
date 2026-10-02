@@ -23,6 +23,35 @@ int main()
   assert(frame->images.front().payload.stride == 4);
   assert(frame->images.front().payload.frameSequence == 7);
 
+  onegen::Frame multipleImages;
+  onegen::Frame::Part imagePart;
+  imagePart.width = 2; imagePart.height = 2; imagePart.stride = 2;
+  imagePart.data_type = 1; imagePart.data_format = 0x01080001;
+  imagePart.payload = {1, 2, 3, 4};
+  multipleImages.parts = {imagePart, imagePart, imagePart};
+  const auto labeled = oneGenGraphicsFrame(multipleImages, 7);
+  assert(labeled && labeled->images.size() == 3);
+  for (std::size_t i = 0; i < 3; ++i) {
+    assert(labeled->images[i].descriptor.displayName == "Image " + std::to_string(i + 1));
+    assert(labeled->images[i].descriptor.id == "image.0:0." + std::to_string(i));
+  }
+  multipleImages.parts[0].purpose_id = 1;
+  multipleImages.parts[1].purpose_id = 65281;
+  multipleImages.parts[2].purpose_id = 5;
+  multipleImages.components = {{1, "Intensity"}, {65281, "Phase"}, {5, "Reflectance"}};
+  const auto named = oneGenGraphicsFrame(multipleImages, 7);
+  assert(named && named->images[0].descriptor.displayName == "Intensity");
+  assert(named->images[1].descriptor.displayName == "Phase");
+  assert(named->images[2].descriptor.displayName == "Reflectance");
+  multipleImages.components.push_back({1, "Ambiguous"});
+  const auto ambiguousNames = oneGenGraphicsFrame(multipleImages, 7);
+  assert(ambiguousNames && ambiguousNames->images[0].descriptor.displayName == "Image 1");
+  assert(ambiguousNames->images[1].descriptor.displayName == "Phase");
+  multipleImages.components.clear();
+  multipleImages.parts.resize(1);
+  const auto singleImage = oneGenGraphicsFrame(multipleImages, 7);
+  assert(singleImage && singleImage->images.front().descriptor.displayName == "Image");
+
   source.width = 4;
   source.height = 1;
   source.stride = 8;

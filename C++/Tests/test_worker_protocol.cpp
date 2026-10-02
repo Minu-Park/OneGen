@@ -50,6 +50,7 @@ int main()
   assert(feature_copy.unit == feature.unit && feature_copy.float_inc == feature.float_inc);
   assert(feature_copy.register_length == 4 && feature_copy.children.size() == 1);
   onegen::Frame source;
+  source.components = {{1, "Intensity"}, {65281, "Phase"}};
   source.payload = {1, 2, 3, 4};
   source.width = 2;
   source.height = 2;
@@ -68,6 +69,8 @@ int main()
   const auto bytes = writer.take();
   onegen::worker::Reader reader(bytes);
   const auto copy = onegen::worker::readFrame(reader);
+  assert(copy.components.size() == 2 && copy.components[0].id == 1);
+  assert(copy.components[1].id == 65281 && copy.components[1].name == "Phase");
 
   assert(reader.empty());
   assert(copy.payload == source.payload);

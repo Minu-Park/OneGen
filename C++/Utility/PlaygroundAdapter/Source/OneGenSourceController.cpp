@@ -1,4 +1,5 @@
 #include "OneGenSourceController.h"
+#include "../../Qt/SingleCaptureDiagnostics.h"
 
 #include "OneGenCoordinator.h"
 #include "OneGenGraphicsFrameAdapter.h"
@@ -6,6 +7,8 @@
 
 #include <QDebug>
 #include <QString>
+#include <QStringList>
+#include <functional>
 #include <exception>
 
 OneGenSourceController::OneGenSourceController(QObject* parent)
@@ -104,6 +107,41 @@ void OneGenSourceController::bindLease()
   const auto token = callback_gate_->token();
   const auto& info = lease_->info();
   const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
+  // Inspect the copied node tree without changing selectors or acquisition settings.
+  try {
+    std::size_t componentNodes = 0;
+    const std::function<void(const onegen::FeatureNode&, const std::string&)> inspect =
+        [&](const onegen::FeatureNode& node, const std::string& module) {
+      const auto name = QString::fromStdString(node.name);
+      if (name.contains(QStringLiteral("Component"), Qt::CaseInsensitive)) {
+        ++componentNodes;
+        QString value;
+        if (node.readable) switch (node.kind) {
+          case onegen::NodeKind::Integer: value = QString::number(node.int_value); break;
+          case onegen::NodeKind::Float: value = QString::number(node.float_value, 'g', 17); break;
+          case onegen::NodeKind::Boolean: value = node.bool_value ? "true" : "false"; break;
+          case onegen::NodeKind::Enumeration: value = QString::fromStdString(node.enum_value); break;
+          case onegen::NodeKind::String: value = QString::fromStdString(node.string_value); break;
+          default: break;
+        }
+        QStringList entries;
+        for (const auto& entry : node.enum_entries) entries.push_back(QString::fromStdString(entry));
+        qInfo().noquote() << "[GenICam] component node: camera=" << QString::fromStdString(sourceName)
+            << "module=" << QString::fromStdString(module) << "node=" << name
+            << "label=" << QString::fromStdString(node.display_name)
+            << "readable=" << node.readable << "writable=" << node.writable
+            << "value=" << value << "entries=" << entries.join(',')
+            << "description=" << QString::fromStdString(node.description);
+      }
+      for (const auto& child : node.children) inspect(child, module);
+    };
+    for (const auto& [module, root] : lease_->describe_features()) inspect(root, module);
+    qInfo() << "[GenICam] component inventory: nodes=" << componentNodes
+            << "selectorUnchanged=true; selected values do not map every multipart sibling";
+  } catch (const std::exception& error) {
+    qWarning() << "[GenICam] component inventory unavailable:" << error.what();
+  }
+
   lease_->set_frame_callback(
       [this, sourceName, token](const onegen::Frame& source) {
         GraphicsFrameCallbackGate::Lease callback(token);
@@ -160,7 +198,7 @@ bool OneGenSourceController::isGrabbing() const {
   return grabbing_;
 }
 
-void OneGenSourceController::grabOne()
+void OneGenSourceController::grabOne(const QString& diagnosticDirectory)
 {
   onegen::worker::Lease* lease = nullptr;
   std::string sourceName;
@@ -174,7 +212,10 @@ void OneGenSourceController::grabOne()
   }
   if (!lease) return;
   lease->grab_one(
-      [this, sourceName](const onegen::Frame& source) { deliver(source, sourceName); });
+      [this, sourceName, diagnosticDirectory](const onegen::Frame& source) {
+        deliver(source, sourceName);
+        onegen::diagnostics::delivered(source, diagnosticDirectory);
+      });
 }
 
 void OneGenSourceController::trigger()
@@ -194,10 +235,25 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
           .arg(QString::fromStdString(sourceName)).arg(source.frame_id).arg(source.payload_type)
           .arg(QString::number(source.pixel_format, 16)).arg(source.width).arg(source.height)
           .arg(source.payload.size()).arg(source.parts.size()).arg(source.scan3d_geometry.has_value());
+      qInfo() << "[GenICam] first frame chunk count:" << source.chunks.size()
+              << "(presence does not establish Scan3d chunk overrides)";
+      if (source.scan3d_geometry) {
+        const auto& g = *source.scan3d_geometry;
+        qInfo().noquote() << "[GenICam] effective Scan3d: mode=" << QString::fromStdString(g.output_mode)
+            << "system=" << QString::fromStdString(g.coordinate_system)
+            << "unit=" << QString::fromStdString(g.distance_unit);
+        for (std::size_t axis = 0; axis < 3; ++axis)
+          qInfo() << "[GenICam] effective Scan3d axis:" << axis
+              << "calibrated=" << g.calibrated_axes[axis] << "scale=" << g.scale[axis]
+              << "offset=" << g.offset[axis] << "invalidEnabled=" << g.invalid_enabled[axis]
+              << "invalidValue=" << g.invalid_value[axis];
+      }
+      std::size_t partIndex = 0;
       for (const auto& part : source.parts)
-        qInfo().noquote() << QStringLiteral("[GenICam] first frame part: type=%1 PFNC=0x%2 %3x%4 stride=%5 bytes=%6 source=%7 region=%8")
+        qInfo().noquote() << QStringLiteral("[GenICam] first frame part: type=%1 PFNC=0x%2 %3x%4 stride=%5 bytes=%6 source=%7 region=%8 purpose=%9")
             .arg(part.data_type).arg(QString::number(part.data_format, 16)).arg(part.width).arg(part.height)
-            .arg(part.stride).arg(part.payload.size()).arg(part.source_id).arg(part.region_id);
+            .arg(part.stride).arg(part.payload.size()).arg(part.source_id).arg(part.region_id).arg(part.purpose_id)
+            << "partIndex=" << partIndex++;
     }
     if (source.buffer_info.incomplete) {
       incomplete_frames_.fetch_add(1, std::memory_order_relaxed);
