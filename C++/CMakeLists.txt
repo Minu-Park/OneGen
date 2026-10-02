@@ -164,6 +164,9 @@ if(ONEGEN_BUILD_QT_WIDGET)
   if(NOT TARGET Playground::DevicePlugin)
     message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires Playground::DevicePlugin.")
   endif()
+  if(NOT TARGET Resources::Widgets)
+    message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires the Qt-only Resources::Widgets target.")
+  endif()
   add_library(OneGenQtWidget STATIC
     Utility/Qt/QOneGenDeviceWidget.cpp
     Utility/Qt/QOneGenDeviceWidget.h
@@ -184,6 +187,7 @@ if(ONEGEN_BUILD_QT_WIDGET)
     PUBLIC
       OneGen::WorkerClient
       Playground::DevicePlugin
+      Resources::Widgets
       Qt6::Widgets
       Qt6::Concurrent)
   if(ONEGEN_BUILD_TESTS AND TARGET Qt6::Test AND ONEGEN_BUILD_PLAYGROUND_ADAPTER)

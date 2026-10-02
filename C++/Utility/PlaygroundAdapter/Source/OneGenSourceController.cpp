@@ -29,6 +29,9 @@ OneGenSourceController* OneGenSourceController::cameraController(const std::stri
     if (const auto found = children_.find(id); found != children_.end()) return found->second.controller.get();
     const auto index = next_source_index_++;
     auto child = std::make_unique<OneGenSourceController>();
+    connect(child.get(), &AbstractSourceController::diagnosticAcquisitionChanged, this,
+        [this, id](bool active, const QString&) { emit diagnosticAcquisitionChanged(active, QString::fromStdString(id)); },
+        Qt::DirectConnection);
     child->setFrameConsumer([this, index](SessionFrame&& frame, unsigned int) {
       FrameConsumer consumer;
       { std::lock_guard lock(mutex_); consumer = consumer_; }
@@ -166,7 +169,9 @@ void OneGenSourceController::start()
     lease = lease_;
   }
   if (!lease) return;
-  lease->live();
+  emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
+  try { lease->live(); }
+  catch (...) { emit diagnosticAcquisitionChanged(false, QStringLiteral("camera")); throw; }
   grabbing_.store(true, std::memory_order_relaxed);
 }
 
@@ -184,11 +189,14 @@ void OneGenSourceController::stop()
   if (!lease) return;
   try {
     lease->stop();
+    emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
   } catch (const std::exception& error) {
     qWarning().noquote() << QStringLiteral("[GenICam] live stop failed: %1")
                                .arg(QString::fromLocal8Bit(error.what()));
+    emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
   } catch (...) {
     qWarning() << "[GenICam] live stop failed with an unknown exception.";
+    emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
   }
 }
 
@@ -211,6 +219,11 @@ void OneGenSourceController::grabOne(const QString& diagnosticDirectory)
     }
   }
   if (!lease) return;
+  emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
+  struct DiagnosticEnd {
+    OneGenSourceController* controller;
+    ~DiagnosticEnd() { emit controller->diagnosticAcquisitionChanged(false, QStringLiteral("camera")); }
+  } diagnosticEnd{this};
   lease->grab_one(
       [this, sourceName, diagnosticDirectory](const onegen::Frame& source) {
         deliver(source, sourceName);

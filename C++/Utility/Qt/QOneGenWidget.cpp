@@ -12,6 +12,29 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDebug>
+#include <QLoggingCategory>
+#include <QJsonDocument>
+#include <QJsonArray>
+
+Q_LOGGING_CATEGORY(onegenDiagnosticLog, "diagnostics.OneGen", QtInfoMsg)
+
+namespace {
+/** @brief Retains all exposed feature maps at their current selector state after acquisition. */
+template <typename Maps>
+void logOneGenSnapshot(const onegen::worker::Lease& lease, const Maps& features, const QString& reason) {
+    if (!onegenDiagnosticLog().isDebugEnabled()) return;
+    QJsonArray maps;
+    for (const auto& [module, tree] : features)
+        maps.append(QJsonObject{{"module", QString::fromStdString(module)}, {"tree", onegen::diagnostics::nodeRecord(tree)}});
+    const auto& info = lease.info();
+    qCDebug(onegenDiagnosticLog).noquote() << "@diagnostic " + QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"event", "feature_snapshot"}, {"fields", QJsonObject{{"reason", reason},
+        {"deviceId", QString::fromStdString(info.id)}, {"model", QString::fromStdString(info.model)},
+        {"serial", QString::fromStdString(info.serial)}, {"cti", QString::fromStdString(info.cti_path)},
+        {"coverage", "all-exposed-maps/current-selector-state"}, {"complete", !features.empty()}, {"maps", maps}}}})
+        .toJson(QJsonDocument::Compact));
+}
+}
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -145,7 +168,7 @@ QOneGenWidget::QOneGenWidget(
     const auto nodeName = item->data(0, Qt::UserRole).toString();
     QMenu menu(this);
     QAction* favorite = nullptr;
-    if (item->data(0, OneGenFeatureTree::LeafRole).toBool()) {
+    if (item->data(0, SearchableTreeWidget::FavoritableRole).toBool()) {
       favorite = menu.addAction(features_->isFavorite(item)
           ? tr("Remove from favorites") : tr("Add to favorites"));
       favorite->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
@@ -494,6 +517,12 @@ void QOneGenWidget::finishOperation()
   const auto result = operation_watcher_.result();
   const auto operation = operation_;
   operation_ = Operation::None;
+  if (operation == Operation::Write)
+    qCDebug(onegenDiagnosticLog).noquote() << "@diagnostic " + QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"event", "parameter_result"}, {"fields", QJsonObject{{"module", result.writeMap},
+        {"node", result.writeNode}, {"operation", result.writeOp}, {"requestedValue", result.writeValue},
+        {"accepted", result.error.isEmpty()}, {"error", result.error}, {"elapsedMs", result.elapsedMs}}}})
+        .toJson(QJsonDocument::Compact));
   if (!result.error.isEmpty()) {
     const auto action = operation == Operation::GrabOne ? QStringLiteral("single acquisition")
         : operation == Operation::Start ? QStringLiteral("live start")
@@ -569,6 +598,7 @@ void QOneGenWidget::finishOperation()
   } else if (operation == Operation::Start || operation == Operation::Stop) {
     setFeatureGrabbing(operation == Operation::Start);
     if (!result.features.empty()) setFeatureSnapshot(result.features);
+    if (operation == Operation::Stop && lease_) logOneGenSnapshot(*lease_, result.features, "acquisition-stopped");
     qInfo().noquote() << QStringLiteral("[GenICam] live %1: camera=%2 serial=%3 stream=%4 elapsed_ms=%5")
         .arg(operation == Operation::Start ? QStringLiteral("started") : QStringLiteral("stopped"),
              QString::fromStdString(lease_->info().model), QString::fromStdString(lease_->info().serial), streams_box_->currentText())
@@ -659,6 +689,7 @@ void QOneGenWidget::finishGrabOne()
   } else if (lease_) {
     // The complete snapshot supersedes every invalidation queued during Single.
     if (!result.features.empty()) setFeatureSnapshot(result.features);
+    logOneGenSnapshot(*lease_, result.features, "single-completed");
     qInfo().noquote() << QStringLiteral("[GenICam] single acquisition completed: camera=%1 serial=%2 elapsed_ms=%3")
         .arg(QString::fromStdString(lease_->info().model), QString::fromStdString(lease_->info().serial))
         .arg(result.elapsedMs);

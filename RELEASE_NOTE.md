@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Report acquisition lifecycle to consumers and retain opt-in stopped-device feature snapshots at the current selector state; expose parameter requests and operation outcomes through diagnostics without changing capture policy.
+
+- Use the shared Resources::Widgets search/favorites browser through a thin GenICam identity adapter. Keep existing favorite identities and consumer-selected stores; anchor the search surface independently of scrollbars. Remove implicit import between standalone and consumer favorite stores.
+
 - Label multipart images using unique SFNC ComponentIDValue identities matched to GenTL data-purpose IDs; retain numbered fallbacks for unavailable or ambiguous identities.
 
 - Number unidentified multipart images in delivered image order to distinguish sibling channels without assuming component semantics.
@@ -28,7 +32,7 @@
 
 - Support consumer-requested GenTL path reconfiguration while disconnected, releasing idle workers and refreshing device inventories without restarting the consumer.
 
-- Accept consumer-provided favorite storage, import the legacy list only into an absent destination key, and preserve standalone storage and unrelated settings.
+- Accept consumer-provided favorite storage and preserve standalone storage and unrelated settings.
 
 - Use canonical temporary producer paths in worker regression fixtures, keeping pinned Interface identities consistent with discovery on symlinked temporary directories.
 

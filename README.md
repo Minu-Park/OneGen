@@ -175,3 +175,14 @@ identity independent.
 
 The Playground session contract is documented in
 [Multi-Vendor CTI Runtime](docs/MULTI_VENDOR_CTI_WORKERS.md).
+
+## Qt feature browsing
+
+`OneGenFeatureTree` derives from the Qt-only `SearchableTreeWidget` in
+`Resources::Widgets`. Enable the widget target only after the consumer has made
+that target available (for example with `add_subdirectory(path/to/Resources)`).
+No theme installation is required; GenTL/core-only builds do not depend on it.
+OneGen provides internal node search text, snapshot row identities and the
+unchanged node-map/internal-name favorite identities. It uses the consumer's
+explicit settings file/key or `OneGenFeatures.ini` for standalone widgets;
+these stores remain independent and no legacy list is imported implicitly.

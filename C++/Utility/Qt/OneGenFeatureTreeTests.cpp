@@ -87,7 +87,7 @@ private slots:
     settings.sync();
   }
 
-  void consumerSettingsMigrateOnceAndPreserveOtherKeys() {
+  void consumerSettingsAreIndependentAndPreserveOtherKeys() {
     OneGenFeatureTree standalone;
     configure(standalone);
     auto* oldRoot = new QTreeWidgetItem(&standalone, {QStringLiteral("Legacy")});
@@ -108,14 +108,16 @@ private slots:
       auto* root = new QTreeWidgetItem(&hosted, {QStringLiteral("Hosted")});
       auto* node = leaf(hosted, root, QStringLiteral("ExposureTime"),
                          QStringLiteral("Exposure"), QStringLiteral("Remote Device"));
-      QVERIFY(hosted.isFavorite(node));
+      QVERIFY(!hosted.isFavorite(node));
       settings.sync();
-      QVERIFY(settings.contains(key));
+      QVERIFY(!settings.contains(key));
+      hosted.toggleFavorite(node);
+      QVERIFY(hosted.isFavorite(node));
       hosted.toggleFavorite(node);
       QVERIFY(!hosted.isFavorite(node));
       QVERIFY(standalone.isFavorite(oldNode));
     }
-    // An explicitly empty destination must not resurrect legacy favorites.
+    // An explicitly empty destination remains independent of standalone favorites.
     OneGenFeatureTree reopened(nullptr, file, key);
     configure(reopened);
     auto* root = new QTreeWidgetItem(&reopened, {QStringLiteral("Reopened")});
@@ -522,8 +524,8 @@ private slots:
       QVERIFY(!clear->icon().isNull());
       const QString capturePath = qEnvironmentVariable("ONEGEN_FEATURE_CLEAR_CAPTURE");
       if (!capturePath.isEmpty() && width == 460) {
-        const QRect region = bubble->geometry().adjusted(-12, -12, 12, 12).intersected(tree.viewport()->rect());
-        QVERIFY(tree.viewport()->grab(region).save(capturePath));
+        const QRect region = bubble->geometry().adjusted(-12, -12, 12, 12).intersected(tree.rect());
+        QVERIFY(tree.grab(region).save(capturePath));
       }
       QTest::mouseClick(clear, Qt::LeftButton);
       QVERIFY(input->text().isEmpty());
@@ -533,6 +535,39 @@ private slots:
       QVERIFY(!exposure->isHidden());
       QCOMPARE(tree.itemWidget(exposure, 1), editor);
     }
+  }
+
+  void searchGeometryIgnoresBothScrollbars() {
+    OneGenFeatureTree tree;
+    configure(tree);
+    auto* root = new QTreeWidgetItem(&tree, {QStringLiteral("Camera")});
+    for (int i = 0; i < 80; ++i)
+      leaf(tree, root, QStringLiteral("Exposure%1").arg(i),
+           QStringLiteral("Exposure %1").arg(i), QStringLiteral("Remote Device"));
+    root->setExpanded(true);
+    tree.header()->setStretchLastSection(false);
+    tree.header()->setSectionResizeMode(QHeaderView::Fixed);
+    tree.header()->resizeSection(0, 100);
+    tree.header()->resizeSection(1, 100);
+    tree.show();
+    auto* bubble = tree.findChild<QFrame*>(QStringLiteral("DeviceFeatureSearchBubble"));
+    auto* input = tree.findChild<QLineEdit*>(QStringLiteral("DeviceFeatureSearchInput"));
+    QTRY_VERIFY(tree.verticalScrollBar()->isVisible());
+    const QRect stable = bubble->geometry();
+    // The installed feature theme stretches Value; force overflow after polish for this case.
+    tree.header()->setSectionResizeMode(QHeaderView::Fixed);
+    tree.header()->resizeSection(1, 1000);
+    QTRY_VERIFY(tree.horizontalScrollBar()->isVisible());
+    QTRY_COMPARE(bubble->geometry(), stable);
+    input->setText(QStringLiteral("Exposure79"));
+    QTRY_VERIFY(!tree.verticalScrollBar()->isVisible());
+    QTRY_COMPARE(bubble->geometry(), stable);
+    tree.header()->resizeSection(1, 100);
+    QTRY_VERIFY(!tree.horizontalScrollBar()->isVisible());
+    QTRY_COMPARE(bubble->geometry(), stable);
+    input->clear();
+    QTRY_VERIFY(tree.verticalScrollBar()->isVisible());
+    QTRY_COMPARE(bubble->geometry(), stable);
   }
 
   void overlayClearanceAndScrollRestoration() {
@@ -554,11 +589,12 @@ private slots:
       tree.refreshFilter();
       QCOMPARE(tree.verticalScrollBar()->value(), bottomScroll);
       auto* bubble = tree.findChild<QFrame*>(QStringLiteral("DeviceFeatureSearchBubble"));
-      QVERIFY2(tree.viewport()->rect().contains(bubble->geometry()),
+      const QRect overlayInViewport(tree.viewport()->mapFrom(&tree, bubble->pos()), bubble->size());
+      QVERIFY2(tree.viewport()->rect().contains(overlayInViewport),
           qPrintable(QStringLiteral("Viewport %1x%2, bubble %3,%4 %5x%6")
           .arg(tree.viewport()->width()).arg(tree.viewport()->height())
           .arg(bubble->x()).arg(bubble->y()).arg(bubble->width()).arg(bubble->height())));
-      QVERIFY2(tree.visualItemRect(last).bottom() < bubble->y(), "Final feature obscured by search bubble");
+      QVERIFY2(tree.visualItemRect(last).bottom() < overlayInViewport.top(), "Final feature obscured by search bubble");
       QVERIFY(!tree.findChild<QLabel*>(QStringLiteral("DeviceFeatureSearchBackdrop")));
 #ifdef ONEGEN_FEATURE_THEME
       if (!qEnvironmentVariableIsSet("ONEGEN_FEATURE_PLAIN")) {
