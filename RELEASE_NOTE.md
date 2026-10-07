@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Preserve producer queue failures with stream identity, payload/announced capacity, buffer index/count and readable streaming/GenDC mode observations. Diagnostic failure never replaces the original backend error.
+
+- Expose declared producer-scoped device discovery, connection, single-acquisition and Live tools on the source controller with connection-generation fences and explicit busy/failure outcomes. Consumer views observe copied controller state and share the existing Coordinator/Lease commands.
+- Own device leases in the source controller; drain accepted external work before view/controller teardown, close channels explicitly, and reject RPCs through closed leases even after reconnect. Preserve connection/Live state when native close/stop is refused.
+- Cover standard tool schema/invocation, GUI command parity, stale generations, single/Live exclusion, callback completion and failure recovery with isolated test peers.
+
 - Report acquisition lifecycle to consumers and retain opt-in stopped-device feature snapshots at the current selector state; expose parameter requests and operation outcomes through diagnostics without changing capture policy.
 
 - Use the shared Resources::Widgets search/favorites browser through a thin GenICam identity adapter. Keep existing favorite identities and consumer-selected stores; anchor the search surface independently of scrollbars. Remove implicit import between standalone and consumer favorite stores.

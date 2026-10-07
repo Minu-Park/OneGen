@@ -682,7 +682,22 @@ void Camera::Impl::prepare_stream() {
   for (size_t i = 0; i < nbuf; ++i) {
     GenTL::BUFFER_HANDLE b = nullptr;
     g->check(g->DSAllocAndAnnounceBuffer(hds, payload, nullptr, &b), "DSAllocAndAnnounceBuffer");
-    g->check(g->DSQueueBuffer(hds, b), "DSQueueBuffer");
+    try { g->check(g->DSQueueBuffer(hds, b), "DSQueueBuffer"); }
+    catch (const Error& error) {
+      // Preserve the producer error before any diagnostic query replaces its last-error slot.
+      const auto observed_mode = [this](const char* name) {
+        try {
+          const auto mode = features.find(name);
+          if (mode.valid() && mode.kind() == NodeKind::Enumeration && mode.is_readable())
+            return mode.get_enum();
+        } catch (...) { /* Observation must not replace the queue failure. */ }
+        return std::string("unknown");
+      };
+      throw Error(std::string(error.what()) + " payload=" + std::to_string(payload) + " index=" + std::to_string(i)
+                  + " count=" + std::to_string(nbuf) + " announced=" + std::to_string(buffer_info(g, hds, b, GenTL::BUFFER_INFO_SIZE))
+                  + " stream=" + stream_id + " streamingMode=" + observed_mode("GevStreamingMode")
+                  + " genDC=" + observed_mode("GenDCStreamingStatus"));
+    }
   }
   timing.mark("buffer-allocation-and-queue");
 

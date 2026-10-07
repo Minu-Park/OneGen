@@ -252,7 +252,7 @@ QOneGenWidget::QOneGenWidget(
     } else {
       run(Operation::Stop, [this] {
         AsyncResult result;
-        controller_->stop();
+        controller_->stopLive();
         return result;
       });
     }
@@ -261,6 +261,8 @@ QOneGenWidget::QOneGenWidget(
           this, &QOneGenWidget::finishOperation);
   connect(&grab_watcher_, &QFutureWatcher<AsyncResult>::finished,
           this, &QOneGenWidget::finishGrabOne);
+  if (controller_) connect(controller_, &OneGenSourceController::controlChanged, this,
+      &QOneGenWidget::syncController, Qt::QueuedConnection);
   connect(&discovery_watcher_, &QFutureWatcher<AsyncResult>::finished, this, [this] {
     if (shutting_down_) return;
     const auto result = discovery_watcher_.result();
@@ -304,7 +306,8 @@ void QOneGenWidget::setTabbedCamera()
 
 bool QOneGenWidget::cameraInUse() const
 {
-  return lease_ || operation_ != Operation::None || operation_watcher_.isRunning() || grab_watcher_.isRunning();
+  return lease_ || (controller_ && (controller_->externalBusy() || controller_->deviceLease()))
+      || operation_ != Operation::None || operation_watcher_.isRunning() || grab_watcher_.isRunning();
 }
 
 void QOneGenWidget::setFeaturePanelOnly()
@@ -359,7 +362,7 @@ void QOneGenWidget::prepareForShutdown()
   clearFeatureCallback();
   discovery_watcher_.waitForFinished();
   operation_watcher_.waitForFinished();
-  if (controller_) controller_->stop();
+  if (controller_) { try { controller_->stop(); } catch (...) {} }
   grab_watcher_.waitForFinished();
   const QSignalBlocker blocker(connect_button_);
   connect_button_->setChecked(false);
@@ -369,6 +372,7 @@ void QOneGenWidget::prepareForShutdown()
     } catch (...) {
     }
     controller_->setLease(nullptr);
+    try { controller_->closeDevice(); } catch (...) {}
     controller_ = nullptr;
   }
   setFeatureModules({}, {}, {}, {});
@@ -442,15 +446,15 @@ void QOneGenWidget::connectCamera()
             qInfo().noquote() << QStringLiteral("[GenICam] connect timing: scope=host stage=%1 duration=%2 ms camera=%3")
                 .arg(QLatin1String(stage)).arg(elapsed).arg(QString::fromStdString(selected.id));
         };
-        result.lease = std::shared_ptr<onegen::worker::Lease>(coordinator_->open(selected).release());
+        result.lease = controller_->openDevice(coordinator_, selected);
         mark("open-worker-roundtrip");
         const auto& info = result.lease->info();
         const auto name = info.display_name.empty() ? info.id : info.display_name;
         result.title = QString::fromStdString(name);
-        result.streams = result.lease->data_streams();
+        result.streams = controller_->controlStreams();
         mark("list-streams-roundtrip");
         try {
-          result.features = result.lease->describe_features();
+          result.features = controller_->controlFeatures();
           mark("feature-snapshot-roundtrip");
         } catch (const std::exception& error) {
           qWarning().noquote() << QStringLiteral("[GenICam] feature tree: %1")
@@ -469,7 +473,7 @@ void QOneGenWidget::disconnectCamera()
         if (controller_) {
           controller_->stop();
           pendingGrab.waitForFinished();
-          controller_->setLease(nullptr);
+          controller_->closeDevice();
         }
         return AsyncResult{};
       })) {
@@ -480,11 +484,12 @@ void QOneGenWidget::disconnectCamera()
 
 bool QOneGenWidget::run(Operation operation, std::function<AsyncResult()> work)
 {
-  if (shutting_down_ || operation_watcher_.isRunning()) {
+  if (shutting_down_ || operation_watcher_.isRunning() || (controller_ && controller_->externalBusy())) {
     qDebug().noquote() << QStringLiteral("[GenICam] operation skipped: another control operation is running or shutdown is in progress");
     return false;
   }
   operation_ = operation;
+  if (controller_) controller_->setGuiBusy(true);
   setOperationActive(true);
   operation_watcher_.setFuture(QtConcurrent::run([this, operation, work = std::move(work)] {
     QElapsedTimer timing;
@@ -511,12 +516,80 @@ bool QOneGenWidget::run(Operation operation, std::function<AsyncResult()> work)
   return true;
 }
 
+void QOneGenWidget::adoptConnection(const AsyncResult& result)
+{
+    {
+      const QSignalBlocker blocker(streams_box_);
+      streams_box_->clear();
+      for (const auto& stream : result.streams)
+        streams_box_->addItem(QString::fromStdString(stream.id), stream.index);
+      if (streams_box_->count() > 0) streams_box_->setCurrentIndex(0);
+    }
+    lease_ = result.lease;
+    if (controller_) controller_->setLease(lease_.get());
+    const auto& info = lease_->info();
+    auto camera_name = info.model.empty() ? result.title.toStdString() : info.model;
+    if (!info.serial.empty()) camera_name += " (" + info.serial + ")";
+    QElapsedTimer tree_timing;
+    tree_timing.start();
+    setFeatureModules(
+        result.features,
+        [this](const int module, const std::string_view name) {
+          return lease_->read_node(module, name);
+        },
+        [this](const int module, const std::string_view name, const std::string_view op,
+               const std::string_view value) {
+          return lease_->write_node(module, name, op, value);
+        },
+        camera_name);
+    if (qEnvironmentVariableIntValue("ONEGEN_TRACE_CONNECT") == 1)
+      qInfo().noquote() << QStringLiteral("[GenICam] connect timing: scope=host stage=feature-tree-build duration=%1 ms camera=%2")
+          .arg(tree_timing.elapsed()).arg(result.title);
+    invalidation_gate_ = std::make_unique<GraphicsFrameCallbackGate>();
+    lease_->set_invalidate_callback([this, token = invalidation_gate_->token()](const int module, const std::string_view name) {
+      GraphicsFrameCallbackGate::Lease callback(token);
+      if (callback) invalidateFeature(module, name);
+    });
+    qInfo().noquote() << QStringLiteral("[GenICam] connected: camera=%1 elapsed_ms=%2")
+        .arg(result.title).arg(result.elapsedMs + tree_timing.elapsed());
+    if (title_callback_) title_callback_(result.title);
+}
+
+void QOneGenWidget::syncController()
+{
+  if (shutting_down_ || !controller_) return;
+  if (controller_->externalBusy()) {
+    feature_drain_timer_->stop();
+    setFeatureGrabbing(true);
+    setOperationActive(true);
+    return;
+  }
+  if (operation_watcher_.isRunning() || grab_watcher_.isRunning()) return;
+  const auto current = controller_->deviceLease();
+  if (current && current != lease_) {
+    clearFeatureCallback();
+    AsyncResult result;
+    result.lease = current;
+    result.title = QString::fromStdString(current->info().display_name.empty() ? current->info().id : current->info().display_name);
+    result.streams = controller_->controlStreams();
+    result.features = controller_->controlFeatures();
+    adoptConnection(result);
+  } else if (!current && lease_) dropLease();
+  const bool live = controller_->isGrabbing();
+  { const QSignalBlocker blocker(connect_button_); connect_button_->setChecked(bool(current)); }
+  { const QSignalBlocker blocker(grab_live_button_); grab_live_button_->setChecked(live); }
+  setFeatureGrabbing(live);
+  if (current) setFeatureSnapshot(controller_->controlFeatures());
+  setOperationActive(false);
+}
+
 void QOneGenWidget::finishOperation()
 {
   if (shutting_down_) return;
   const auto result = operation_watcher_.result();
   const auto operation = operation_;
   operation_ = Operation::None;
+  if (controller_) controller_->setGuiBusy(grab_watcher_.isRunning());
   if (operation == Operation::Write)
     qCDebug(onegenDiagnosticLog).noquote() << "@diagnostic " + QString::fromUtf8(QJsonDocument(QJsonObject{
         {"event", "parameter_result"}, {"fields", QJsonObject{{"module", result.writeMap},
@@ -557,41 +630,7 @@ void QOneGenWidget::finishOperation()
   }
 
   if (operation == Operation::Connect) {
-    {
-      const QSignalBlocker blocker(streams_box_);
-      streams_box_->clear();
-      for (const auto& stream : result.streams)
-        streams_box_->addItem(QString::fromStdString(stream.id), stream.index);
-      if (streams_box_->count() > 0) streams_box_->setCurrentIndex(0);
-    }
-    lease_ = result.lease;
-    if (controller_) controller_->setLease(lease_.get());
-    const auto& info = lease_->info();
-    auto camera_name = info.model.empty() ? result.title.toStdString() : info.model;
-    if (!info.serial.empty()) camera_name += " (" + info.serial + ")";
-    QElapsedTimer tree_timing;
-    tree_timing.start();
-    setFeatureModules(
-        result.features,
-        [this](const int module, const std::string_view name) {
-          return lease_->read_node(module, name);
-        },
-        [this](const int module, const std::string_view name, const std::string_view op,
-               const std::string_view value) {
-          return lease_->write_node(module, name, op, value);
-        },
-        camera_name);
-    if (qEnvironmentVariableIntValue("ONEGEN_TRACE_CONNECT") == 1)
-      qInfo().noquote() << QStringLiteral("[GenICam] connect timing: scope=host stage=feature-tree-build duration=%1 ms camera=%2")
-          .arg(tree_timing.elapsed()).arg(result.title);
-    invalidation_gate_ = std::make_unique<GraphicsFrameCallbackGate>();
-    lease_->set_invalidate_callback([this, token = invalidation_gate_->token()](const int module, const std::string_view name) {
-      GraphicsFrameCallbackGate::Lease callback(token);
-      if (callback) invalidateFeature(module, name);
-    });
-    qInfo().noquote() << QStringLiteral("[GenICam] connected: camera=%1 elapsed_ms=%2")
-        .arg(result.title).arg(result.elapsedMs + tree_timing.elapsed());
-    if (title_callback_) title_callback_(result.title);
+    adoptConnection(result);
   } else if (operation == Operation::Disconnect) {
     dropLease();
     qInfo() << "[GenICam] disconnected";
@@ -621,7 +660,7 @@ void QOneGenWidget::finishOperation()
 void QOneGenWidget::dropLease()
 {
   clearFeatureCallback();
-  if (controller_) controller_->setLease(nullptr);
+  if (controller_) { try { controller_->closeDevice(); } catch (...) { return; } }
   setFeatureModules({}, {}, {}, {});
   streams_box_->clear();
   lease_.reset();
@@ -647,7 +686,8 @@ void QOneGenWidget::clearFeatureCallback()
 
 void QOneGenWidget::startGrabOne()
 {
-  if (!controller_ || !lease_ || shutting_down_ || grab_watcher_.isRunning()) return;
+  if (!controller_ || !lease_ || shutting_down_ || grab_watcher_.isRunning() || controller_->externalBusy()) return;
+  controller_->setGuiBusy(true);
   // Single uses a dedicated watcher instead of operation_watcher_. Keep feature
   // invalidations queued for its complete lifetime so the GUI thread never
   // performs synchronous NodeRead RPCs while acquisition owns the producer.
@@ -682,6 +722,7 @@ void QOneGenWidget::finishGrabOne()
 {
   if (shutting_down_) return;
   const auto result = grab_watcher_.result();
+  if (controller_) controller_->setGuiBusy(operation_watcher_.isRunning());
   if (!result.error.isEmpty()) {
     qWarning().noquote() << QStringLiteral("[GenICam] single acquisition failed: camera=%1 stream=%2; cause=%3")
         .arg(devices_box_->currentText(), streams_box_->currentText(), result.error);
@@ -700,14 +741,15 @@ void QOneGenWidget::finishGrabOne()
 
 void QOneGenWidget::setOperationActive(bool active)
 {
+  active = active || (controller_ && controller_->externalBusy());
   if (active) feature_drain_timer_->stop();
   else if (operation_ == Operation::None && !feature_grabbing_ && !pending_features_.empty()
            && !feature_drain_timer_->isActive()) feature_drain_timer_->start();
   const bool connected = static_cast<bool>(lease_);
   const bool grabbing = grab_watcher_.isRunning();
-  const bool blocking = active
+  const bool blocking = (controller_ && controller_->externalBusy()) || (active
       && (operation_ == Operation::Connect || operation_ == Operation::Disconnect
-          || operation_ == Operation::Restore || operation_ == Operation::SelectStream);
+          || operation_ == Operation::Restore || operation_ == Operation::SelectStream));
   devices_box_->setEnabled(!active && !connected);
   streams_box_->setVisible(connected && streams_box_->count() > 1);
   streams_box_->setEnabled(!active && connected && !grabbing && !grab_live_button_->isChecked()

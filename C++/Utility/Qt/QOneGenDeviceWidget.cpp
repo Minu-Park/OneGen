@@ -86,6 +86,18 @@ QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordin
   connect(&watcher_, &QFutureWatcher<Result>::finished, this, [this] { finish(); });
   connect(&discovery_watcher_, &QFutureWatcher<Result>::finished, this, [this] { finishDiscovery(); });
   interfaces_ = coordinator_->interfaces();
+  controller_->configureControl(coordinator_, devices_);
+  connect(controller_, &OneGenSourceController::presentDevice, this, [this](const QString& key) {
+    const auto index = devices_box_->findData(key);
+    if (index >= 0) devices_box_->setCurrentIndex(index);
+  });
+  connect(controller_, &OneGenSourceController::controlChanged, this, [this] { updateControls(); }, Qt::QueuedConnection);
+  connect(controller_, &OneGenSourceController::inventoryChanged, this, [this] {
+    if (shutting_down_) return;
+    devices_ = controller_->devices();
+    interfaces_ = coordinator_->interfaces();
+    updateTargets();
+  }, Qt::QueuedConnection);
   updateTargets();
   if (discover_) {
     discovery_pending_ = true;
@@ -106,6 +118,7 @@ void QOneGenDeviceWidget::setTitleCallback(std::function<void(const QString&)> c
 void QOneGenDeviceWidget::prepareForShutdown() {
   if (shutting_down_) return;
   shutting_down_ = true;
+  controller_->drainControl();
   title_callback_ = {};
   watcher_.waitForFinished();
   discovery_watcher_.waitForFinished();
@@ -233,6 +246,7 @@ void QOneGenDeviceWidget::finishDiscovery() {
 }
 
 void QOneGenDeviceWidget::updateTargets(bool complete) {
+  controller_->setDevices(devices_);
   const auto selected = devices_box_->currentData().toString();
   std::optional<Target> retained;
   if (!complete) {
@@ -272,7 +286,7 @@ void QOneGenDeviceWidget::updateTargets(bool complete) {
 }
 
 void QOneGenDeviceWidget::selectTarget() {
-  if (interface_ || operation_pending_) return;
+  if (interface_ || operation_pending_ || controller_->externalBusy()) return;
   const auto index = devices_box_->currentIndex();
   const auto key = index >= 0 ? targets_[index].key : std::string{};
   if ((direct_camera_ || interface_settings_) && displayed_target_ == key) {
@@ -440,6 +454,7 @@ void QOneGenDeviceWidget::showInterface(const Result& result) {
 
 void QOneGenDeviceWidget::updateControls() {
   if (shutting_down_) return;
+  controller_->setControlBlocked(operation_pending_ || discovery_pending_ || interface_.has_value());
   const bool busy = operation_pending_ || (interface_settings_ && interface_settings_->cameraInUse());
   const bool cameraBusy = std::any_of(cameras_.begin(), cameras_.end(),
       [](const auto& item) { return item.second->cameraInUse(); });

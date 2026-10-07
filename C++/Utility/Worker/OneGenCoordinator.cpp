@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <QDebug>
 
 namespace onegen::worker {
@@ -57,6 +58,7 @@ Lease::Lease(std::shared_ptr<Connection> connection, DeviceInfo device, std::str
 
 Lease::~Lease()
 {
+  if (closed_) return;
   bool reusable = false;
   try {
     if (connection_ && connection_->alive()) {
@@ -77,21 +79,41 @@ Lease::~Lease()
   if (owner) owner->release(key, cti, reusable, dying.get(), session_);
 }
 
+void Lease::close()
+{
+  if (closed_) return;
+  // Refuse to claim disconnection when the owning worker rejects Close.
+  if (connection_ && connection_->alive())
+    connection_->request(Operation::Close, {}, std::chrono::seconds{2}, session_);
+  closed_ = true;
+  connection_->set_frame_callback({}, session_);
+  connection_->set_error_callback({}, session_);
+  connection_->set_invalidate_callback({}, session_);
+  auto* owner = std::exchange(owner_, nullptr);
+  if (owner) owner->release(identity_, device_.cti_path, connection_->alive(), connection_.get(), session_);
+}
+
+Connection& Lease::openConnection() const
+{
+  if (closed_.load() || !connection_) throw std::runtime_error("Device lease is closed.");
+  return *connection_;
+}
+
 std::vector<DataStreamInfo> Lease::data_streams() const
 {
-  return readVector<DataStreamInfo>(connection_->request(Operation::ListStreams, {}, std::chrono::seconds{30}, session_), readDataStreamInfo);
+  return readVector<DataStreamInfo>(openConnection().request(Operation::ListStreams, {}, std::chrono::seconds{30}, session_), readDataStreamInfo);
 }
 
 void Lease::select_data_stream(std::uint32_t index)
 {
   Writer out;
   out.scalar(index);
-  connection_->request(Operation::SelectStream, out.take(), std::chrono::seconds{30}, session_);
+  openConnection().request(Operation::SelectStream, out.take(), std::chrono::seconds{30}, session_);
 }
 
 std::vector<std::pair<std::string, FeatureNode>> Lease::describe_features() const
 {
-  const auto payload = connection_->request(Operation::DescribeFeatures, {}, std::chrono::seconds{30}, session_);
+  const auto payload = openConnection().request(Operation::DescribeFeatures, {}, std::chrono::seconds{30}, session_);
   Reader input(payload);
   const auto count = input.scalar<std::uint32_t>();
   std::vector<std::pair<std::string, FeatureNode>> modules;
@@ -110,7 +132,7 @@ FeatureNode Lease::read_node(int module, std::string_view name) const
   Writer out;
   out.scalar(module);
   out.string(name);
-  const auto payload = connection_->request(Operation::NodeRead, out.take(), std::chrono::seconds{30}, session_);
+  const auto payload = openConnection().request(Operation::NodeRead, out.take(), std::chrono::seconds{30}, session_);
   Reader input(payload);
   return readFeatureNode(input);
 }
@@ -123,29 +145,29 @@ FeatureNode Lease::write_node(int module, std::string_view name, std::string_vie
   out.string(name);
   out.string(operation);
   out.string(value);
-  const auto payload = connection_->request(Operation::NodeWrite, out.take(), std::chrono::seconds{30}, session_);
+  const auto payload = openConnection().request(Operation::NodeWrite, out.take(), std::chrono::seconds{30}, session_);
   Reader input(payload);
   return readFeatureNode(input);
 }
 
 void Lease::grab_one(const FrameFn& deliver)
 {
-  const auto payload = connection_->request(Operation::GrabOne, {}, std::chrono::seconds{60}, session_);
+  const auto payload = openConnection().request(Operation::GrabOne, {}, std::chrono::seconds{60}, session_);
   Reader input(payload);
   if (deliver) deliver(readFrame(input));
 }
 
-void Lease::live() { connection_->request(Operation::StartLive, {}, std::chrono::seconds{30}, session_); }
+void Lease::live() { openConnection().request(Operation::StartLive, {}, std::chrono::seconds{30}, session_); }
 void Lease::poll_features(std::uint32_t elapsed_ms) {
   Writer out;
   out.scalar(elapsed_ms);
-  connection_->request(Operation::PollFeatures, out.take(), std::chrono::seconds{2}, session_);
+  openConnection().request(Operation::PollFeatures, out.take(), std::chrono::seconds{2}, session_);
 }
 std::vector<std::uint8_t> Lease::read_register(int module, std::string_view name) {
   Writer out;
   out.scalar(module);
   out.string(name);
-  const auto payload = connection_->request(Operation::RegisterRead, out.take(), std::chrono::seconds{30}, session_);
+  const auto payload = openConnection().request(Operation::RegisterRead, out.take(), std::chrono::seconds{30}, session_);
   Reader input(payload);
   return readBytes(input);
 }
@@ -154,12 +176,12 @@ void Lease::write_register(int module, std::string_view name, const std::vector<
   out.scalar(module);
   out.string(name);
   writeBytes(out, bytes);
-  connection_->request(Operation::RegisterWrite, out.take(), std::chrono::seconds{30}, session_);
+  openConnection().request(Operation::RegisterWrite, out.take(), std::chrono::seconds{30}, session_);
 }
 std::string Lease::save_features(int module) {
   Writer out;
   out.scalar(module);
-  const auto payload = connection_->request(Operation::SaveFeatures, out.take(), std::chrono::seconds{30}, session_);
+  const auto payload = openConnection().request(Operation::SaveFeatures, out.take(), std::chrono::seconds{30}, session_);
   Reader input(payload);
   return input.string();
 }
@@ -167,15 +189,15 @@ void Lease::load_features(int module, std::string_view contents) {
   Writer out;
   out.scalar(module);
   out.string(contents);
-  connection_->request(Operation::LoadFeatures, out.take(), std::chrono::seconds{30}, session_);
+  openConnection().request(Operation::LoadFeatures, out.take(), std::chrono::seconds{30}, session_);
 }
-void Lease::trigger() { connection_->request(Operation::Trigger, {}, std::chrono::seconds{30}, session_); }
-void Lease::stop() { connection_->request(Operation::StopLive, {}, std::chrono::seconds{30}, session_); }
-void Lease::set_frame_callback(FrameFn callback) { connection_->set_frame_callback(std::move(callback), session_); }
-void Lease::set_error_callback(ErrorFn callback) { connection_->set_error_callback(std::move(callback), session_); }
+void Lease::trigger() { openConnection().request(Operation::Trigger, {}, std::chrono::seconds{30}, session_); }
+void Lease::stop() { openConnection().request(Operation::StopLive, {}, std::chrono::seconds{30}, session_); }
+void Lease::set_frame_callback(FrameFn callback) { if (!closed_) connection_->set_frame_callback(std::move(callback), session_); }
+void Lease::set_error_callback(ErrorFn callback) { if (!closed_) connection_->set_error_callback(std::move(callback), session_); }
 void Lease::set_invalidate_callback(InvalidateFn callback)
-{ connection_->set_invalidate_callback(std::move(callback), session_); }
-bool Lease::alive() const { return connection_ && connection_->alive(); }
+{ if (!closed_) connection_->set_invalidate_callback(std::move(callback), session_); }
+bool Lease::alive() const { return !closed_ && connection_ && connection_->alive(); }
 
 Coordinator::Coordinator(std::filesystem::path worker_executable,
                          std::filesystem::path cti_root,

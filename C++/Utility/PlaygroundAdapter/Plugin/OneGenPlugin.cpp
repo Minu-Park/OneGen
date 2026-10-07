@@ -137,7 +137,7 @@ public:
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
         startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
         controller_(std::make_unique<OneGenSourceController>()), register_widget_(std::move(registerWidget)),
-        retain_scan_(std::move(retain)) {}
+        retain_scan_(std::move(retain)) { controller_->configureControl(coordinator_, devices_); }
 
   ~OneGenPluginSession() override
   {

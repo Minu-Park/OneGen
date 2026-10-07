@@ -91,6 +91,8 @@ private:
   void disconnectCamera();
   bool run(Operation operation, std::function<AsyncResult()> work);
   void finishOperation();
+  void syncController();
+  void adoptConnection(const AsyncResult& result);
   void startGrabOne();
   void finishGrabOne();
   void dropLease();

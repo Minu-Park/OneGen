@@ -37,6 +37,19 @@ Interfaces share one worker with their independent Device/DataStream sessions.
 Physical-board equivalence across producers or SDKs is not inferred; native
 Producer/SDK resource arbitration determines whether a connection is available.
 
+The optional consumer adapter's `OneGenSourceController` owns Device leases and
+declares `device.targets`, `device.connection`, `device.discover`, `device.connect`,
+`device.disconnect`, `device.single`, `device.live-start` and `device.live-stop`.
+Consumers discover schemas through `IToolProvider`; views borrow lease references
+and use the same module commands. A target retains producer, Interface and Device
+identity; each connection gets a fresh UUID. Pending GUI/API/discovery or Interface
+work is refused as Busy, and accepted external work drains before teardown.
+Explicit close and Live stop retain state on backend refusal. Closed leases reject
+RPCs even when their worker is reused. Single completes after frame conversion;
+consumer presentation and artifact export remain separate authorities. Typed
+feature tools, Interface/multiple-connection API control and cancellation of
+pending Single are not part of this initial lifecycle contract.
+
 GenTL 1.5 multipart buffers are retained without a vendor SDK. The Playground
 adapter assembles standard PFNC `Coord3D_ABC32f` and `Coord3D_C16` range data
 with matching mono intensity and confidence parts. SFNC coordinate scale,

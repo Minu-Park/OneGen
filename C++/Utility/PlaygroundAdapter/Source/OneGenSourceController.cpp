@@ -10,15 +10,74 @@
 #include <QStringList>
 #include <functional>
 #include <exception>
+#include <QtConcurrent>
+#include <QJsonArray>
+#include <QThread>
+#include <QUuid>
 
 OneGenSourceController::OneGenSourceController(QObject* parent)
     : AbstractSourceController(parent) {}
 
 OneGenSourceController::~OneGenSourceController()
 {
-  stop();
+  tool_work_.waitForFinished();
+  try { closeDevice(); } catch (...) {}
+  try { stop(); } catch (...) {}
   setLease(nullptr);
   for (auto& [id, child] : children_) child.controller->setLease(nullptr);
+  children_.clear();
+  owned_lease_.reset();
+}
+
+void OneGenSourceController::configureControl(std::shared_ptr<onegen::worker::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices) {
+  coordinator_ = std::move(coordinator);
+  setDevices(std::move(devices));
+}
+void OneGenSourceController::setDevices(std::vector<onegen::DeviceInfo> devices) {
+  Q_ASSERT(QThread::currentThread() == thread());
+  std::lock_guard lock(mutex_);
+  devices_ = std::move(devices);
+}
+std::shared_ptr<onegen::worker::Lease> OneGenSourceController::deviceLease() const {
+  std::lock_guard lock(mutex_);
+  return owned_lease_;
+}
+std::vector<onegen::DeviceInfo> OneGenSourceController::devices() const {
+  std::lock_guard lock(mutex_); return devices_;
+}
+std::vector<std::pair<std::string, onegen::FeatureNode>> OneGenSourceController::controlFeatures() const {
+  std::lock_guard lock(mutex_); return control_features_;
+}
+std::vector<onegen::DataStreamInfo> OneGenSourceController::controlStreams() const {
+  std::lock_guard lock(mutex_); return control_streams_;
+}
+void OneGenSourceController::refreshControlSnapshot() {
+  const auto lease = deviceLease();
+  if (!lease || !lease->alive()) return;
+  auto streams = lease->data_streams();
+  auto features = lease->describe_features();
+  std::lock_guard lock(mutex_);
+  control_streams_ = std::move(streams); control_features_ = std::move(features);
+}
+std::shared_ptr<onegen::worker::Lease> OneGenSourceController::openDevice(
+    std::shared_ptr<onegen::worker::Coordinator> coordinator, const onegen::DeviceInfo& device) {
+  if (deviceLease()) throw std::runtime_error("Disconnect the current device before connecting.");
+  auto opened = std::shared_ptr<onegen::worker::Lease>(coordinator->open(device).release());
+  { std::lock_guard lock(mutex_); owned_lease_ = opened; connection_id_ = QUuid::createUuid().toString(QUuid::WithoutBraces); }
+  try { setLease(opened.get()); }
+  catch (...) { closeDevice(); throw; }
+  try { refreshControlSnapshot(); } catch (const std::exception& error) { qWarning() << "[GenICam] feature observation failed:" << error.what(); }
+  emit controlChanged();
+  return opened;
+}
+void OneGenSourceController::closeDevice() {
+  const auto lease = deviceLease();
+  if (!lease) return;
+  stopLive();
+  lease->close();
+  setLease(nullptr);
+  { std::lock_guard lock(mutex_); owned_lease_.reset(); connection_id_.clear(); control_features_.clear(); control_streams_.clear(); }
+  emit controlChanged();
 }
 
 OneGenSourceController* OneGenSourceController::cameraController(const std::string& id, const std::string& label)
@@ -160,6 +219,7 @@ void OneGenSourceController::bindLease()
 
 void OneGenSourceController::start()
 {
+  if (QThread::currentThread() == thread() && external_busy_.load()) throw std::runtime_error("Device control is busy.");
   std::vector<OneGenSourceController*> children;
   { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
   for (auto* child : children) child->start();
@@ -177,26 +237,34 @@ void OneGenSourceController::start()
 
 void OneGenSourceController::stop()
 {
+  try { stopLive(); }
+  catch (const std::exception& error) { qWarning() << "[GenICam] stop unavailable:" << error.what(); }
+  catch (...) { qWarning() << "[GenICam] stop failed."; }
+}
+
+void OneGenSourceController::stopLive()
+{
+  if (QThread::currentThread() == thread() && external_busy_.load()) throw std::runtime_error("Device control is busy.");
   std::vector<OneGenSourceController*> children;
   { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
-  for (auto* child : children) child->stop();
+  for (auto* child : children) child->stopLive();
   onegen::worker::Lease* lease = nullptr;
   {
     std::lock_guard lock(mutex_);
     lease = lease_;
-    grabbing_.store(false, std::memory_order_relaxed);
   }
   if (!lease) return;
   try {
     lease->stop();
+    grabbing_.store(false, std::memory_order_relaxed);
     emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
   } catch (const std::exception& error) {
     qWarning().noquote() << QStringLiteral("[GenICam] live stop failed: %1")
                                .arg(QString::fromLocal8Bit(error.what()));
-    emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
+    throw;
   } catch (...) {
     qWarning() << "[GenICam] live stop failed with an unknown exception.";
-    emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
+    throw;
   }
 }
 
@@ -336,4 +404,150 @@ void OneGenSourceController::setFrameConsumer(FrameConsumer consumer)
 {
   std::lock_guard lock(mutex_);
   consumer_ = std::move(consumer);
+}
+
+namespace {
+std::string deviceKey(const onegen::DeviceInfo& device) {
+  return device.cti_path + '\0' + device.interface_id + '\0' + device.id;
+}
+QString targetId(const std::string& key) {
+  return QString::fromLatin1(QByteArray(key.data(), qsizetype(key.size())).toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+}
+QJsonObject schema(QJsonObject properties, QJsonArray required) {
+  return {{"type", "object"}, {"properties", properties}, {"required", required}, {"additionalProperties", false}};
+}
+QJsonObject stateSchema() {
+  const QJsonObject text{{"type", "string"}}, flag{{"type", "boolean"}};
+  return schema({{"connected", flag}, {"live", flag}, {"connectionId", text}, {"targetId", text},
+      {"convertedFrames", text}}, {"connected", "live", "connectionId", "targetId", "convertedFrames"});
+}
+QJsonObject targets(const std::vector<onegen::DeviceInfo>& inventory) {
+  QJsonArray values;
+  for (const auto& d : inventory) values.append(QJsonObject{{"targetId", targetId(deviceKey(d))},
+      {"title", QString::fromStdString(d.display_name.empty() ? d.id : d.display_name)},
+      {"deviceId", QString::fromStdString(d.id)}, {"producer", QString::fromStdString(d.cti_path)},
+      {"interfaceId", QString::fromStdString(d.interface_id)}});
+  return {{"targets", values}};
+}
+}
+
+QJsonObject OneGenSourceController::controlState() const {
+  std::lock_guard lock(mutex_);
+  if (owned_lease_) return {{"connected", owned_lease_->alive()}, {"live", grabbing_.load()},
+      {"connectionId", connection_id_}, {"targetId", targetId(deviceKey(owned_lease_->info()))},
+      {"convertedFrames", QString::number(converted_frames_.load())}};
+  for (const auto& [id, child] : children_) {
+    const auto state = child.controller->controlState();
+    if (state.value("connected").toBool()) return state;
+  }
+  return {{"connected", false}, {"live", false}, {"connectionId", ""}, {"targetId", ""}, {"convertedFrames", "0"}};
+}
+
+QList<ToolDescriptor> OneGenSourceController::toolDescriptors() const {
+  const QJsonObject text{{"type", "string"}, {"minLength", 1}};
+  const auto empty = schema({}, {});
+  const auto connection = schema({{"connectionId", text}}, {"connectionId"});
+  const auto entry = schema({{"targetId", text}, {"title", QJsonObject{{"type", "string"}}},
+      {"deviceId", text}, {"producer", text}, {"interfaceId", QJsonObject{{"type", "string"}}}},
+      {"targetId", "title", "deviceId", "producer", "interfaceId"});
+  QList<ToolDescriptor> result{
+      {"device.targets", 1, "Device targets", "Copy exact producer/interface/device targets.", ToolEffect::Observe, true, {}, empty,
+          schema({{"targets", QJsonObject{{"type", "array"}, {"items", entry}}}}, {"targets"})},
+      {"device.connection", 1, "Device connection", "Observe the module-owned connection and converted-frame count, not presentation completion.", ToolEffect::Observe, true, {}, empty, stateSchema()},
+      {"device.discover", 1, "Discover devices", "Run existing isolated producer discovery while disconnected and idle.", ToolEffect::Device, true, {}, empty,
+          schema({{"targets", QJsonObject{{"type", "array"}, {"items", entry}}}}, {"targets"})},
+      {"device.connect", 1, "Connect device", "Open an exact declared Device; implicit switching and Interface mode are refused.", ToolEffect::Device, true, {}, schema({{"targetId", text}}, {"targetId"}), stateSchema()},
+      {"device.disconnect", 1, "Disconnect device", "Close the exact connection generation.", ToolEffect::Device, true, {}, connection, stateSchema()},
+      {"device.single", 1, "Acquire one image", "Wait for native single acquisition and conversion; query the viewer separately for presentation evidence.", ToolEffect::Pipeline, true, {}, connection, stateSchema()},
+      {"device.live-start", 1, "Start Live", "Start existing acquisition on the exact connection; completion is worker acknowledgement.", ToolEffect::Pipeline, true, {}, connection, stateSchema()},
+      {"device.live-stop", 1, "Stop Live", "Stop existing acquisition on the exact connection.", ToolEffect::Pipeline, true, {}, connection, stateSchema()}};
+  if (!coordinator_) for (auto& descriptor : result) {
+    descriptor.available = false; descriptor.unavailableReason = "Device control has no coordinator.";
+  }
+  return result;
+}
+
+ApiResult<void> OneGenSourceController::requestTool(const QString& name, int version, QJsonObject arguments, Completion completion) {
+  Q_ASSERT(QThread::currentThread() == thread());
+  using Result = ApiResult<QJsonValue>;
+  if (!completion) return ApiResult<void>::failure(ApiErrorCode::InvalidArgument, "Completion is required.");
+  bool known = false;
+  for (const auto& descriptor : toolDescriptors()) if (descriptor.name == name) known = true;
+  if (!known) return ApiResult<void>::failure(ApiErrorCode::NotFound, "Tool is not declared.");
+  if (version != 1) return ApiResult<void>::failure(ApiErrorCode::Unsupported, "Unsupported tool version.");
+  if (!coordinator_) return ApiResult<void>::failure(ApiErrorCode::Unavailable, "Device control has no coordinator.");
+  const bool observe = name == "device.targets" || name == "device.connection";
+  const bool discover = name == "device.discover";
+  const QString field = name == "device.connect" ? "targetId" : "connectionId";
+  if (((observe || discover) && !arguments.isEmpty()) || (!observe && !discover && (arguments.size() != 1 || !arguments.value(field).isString()
+      || arguments.value(field).toString().isEmpty() || arguments.value(field).toString().contains(QChar::Null))))
+    return ApiResult<void>::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
+  const auto deliver = [completion = std::move(completion)](Result result) noexcept {
+    try { completion(std::move(result)); } catch (...) { qWarning() << "[GenICam] tool consumer callback threw."; }
+  };
+  if (observe) {
+    if (name == "device.targets") { QJsonObject value; { std::lock_guard lock(mutex_); value = targets(devices_); } deliver(Result::success(value)); }
+    else deliver(Result::success(controlState()));
+    return ApiResult<void>::success();
+  }
+  if (external_busy_.load() || (tool_work_.isStarted() && !tool_work_.isFinished()) || control_blocked_ || gui_busy_.load())
+    return ApiResult<void>::failure(ApiErrorCode::Busy, "Discovery, Interface or control work is active.");
+  std::vector<OneGenSourceController*> children;
+  { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
+  for (auto* child : children) if (child->gui_busy_.load() || child->external_busy_.load())
+    return ApiResult<void>::failure(ApiErrorCode::Busy, "A GUI control operation is active.");
+  auto state = controlState();
+  OneGenSourceController* target = nullptr;
+  onegen::DeviceInfo selected;
+  if (discover) {
+    if (state.value("connected").toBool()) return ApiResult<void>::failure(ApiErrorCode::Busy, "Disconnect before discovery.");
+    target = this;
+  } else if (name == "device.connect") {
+    if (state.value("connected").toBool()) return ApiResult<void>::failure(ApiErrorCode::Conflict, "Disconnect before connecting another device.");
+    { std::lock_guard lock(mutex_);
+      for (const auto& device : devices_) if (targetId(deviceKey(device)) == arguments.value(field).toString()) selected = device; }
+    if (selected.id.empty()) return ApiResult<void>::failure(ApiErrorCode::NotFound, "Exact declared target was not found.");
+    // Presentation observers may select/create their view; they do not execute the command.
+    emit presentDevice(QString::fromStdString("Device|" + deviceKey(selected)));
+    target = cameraController(deviceKey(selected), selected.display_name.empty() ? selected.id : selected.display_name);
+  } else {
+    if (!state.value("connected").toBool()) return ApiResult<void>::failure(ApiErrorCode::Unavailable, "Device is disconnected.");
+    if (state.value("connectionId").toString() != arguments.value(field).toString())
+      return ApiResult<void>::failure(ApiErrorCode::Conflict, "Connection generation changed.");
+    for (auto* child : children) if (child->controlState().value("connectionId") == state.value("connectionId")) target = child;
+    if (!target) return ApiResult<void>::failure(ApiErrorCode::NotFound, "Connection controller ended.");
+    if (name == "device.single" && state.value("live").toBool())
+      return ApiResult<void>::failure(ApiErrorCode::Busy, "Stop Live explicitly before single acquisition.");
+  }
+  external_busy_.store(true);
+  target->external_busy_.store(true);
+  emit target->controlChanged();
+  tool_work_ = QtConcurrent::run([this, target, selected, name, deliver] {
+    Result result = Result::failure(ApiErrorCode::Internal, "Device operation did not complete.");
+    try {
+      if (name == "device.discover") {
+        const auto inventory = coordinator_->discover();
+        if (!inventory.completed) throw std::runtime_error("Discovery did not complete; previous inventory is preserved.");
+        { std::lock_guard lock(mutex_); devices_ = inventory.devices; }
+        result = Result::success(targets(inventory.devices));
+        emit inventoryChanged();
+      } else if (name == "device.connect") target->openDevice(coordinator_, selected);
+      else if (name == "device.disconnect") target->closeDevice();
+      else if (name == "device.single") {
+        const auto before = target->converted_frames_.load();
+        target->grabOne();
+        if (target->converted_frames_.load() != before + 1) throw std::runtime_error("Acquired frame was not converted to a supported resource.");
+      } else if (name == "device.live-start") target->start();
+      else target->stopLive();
+      if (name != "device.disconnect" && name != "device.discover" && name != "device.connect") try { target->refreshControlSnapshot(); } catch (const std::exception& error) { qWarning() << "[GenICam] feature refresh failed:" << error.what(); }
+      if (name != "device.discover") result = Result::success(controlState());
+    } catch (const std::exception& error) { result = Result::failure(ApiErrorCode::Unavailable, QString::fromLocal8Bit(error.what())); }
+    catch (...) { result = Result::failure(ApiErrorCode::Internal, "Unexpected device backend failure."); }
+    target->external_busy_.store(false);
+    external_busy_.store(false);
+    emit target->controlChanged();
+    emit controlChanged();
+    deliver(std::move(result));
+  });
+  return ApiResult<void>::success();
 }

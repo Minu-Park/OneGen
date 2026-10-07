@@ -5,6 +5,7 @@
 #include "OneGenTypes.h"
 
 #include <chrono>
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -37,6 +38,8 @@ public:
   Lease(std::shared_ptr<Connection> connection, DeviceInfo device, std::string identity,
         Coordinator* owner, std::uint32_t session = 0);
   ~Lease();
+  /** @brief Closes this device channel while copied consumer references remain safe. */
+  void close();
   Lease(const Lease&) = delete;
   Lease& operator=(const Lease&) = delete;
 
@@ -68,11 +71,13 @@ public:
   void load_features(int module, std::string_view contents);
 
 private:
+  Connection& openConnection() const;
   std::shared_ptr<Connection> connection_;
   DeviceInfo device_;
   std::string identity_;
   Coordinator* owner_ = nullptr;
   std::uint32_t session_ = 0;
+  std::atomic<bool> closed_{false};
 };
 
 class Coordinator {

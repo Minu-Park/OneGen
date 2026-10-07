@@ -36,6 +36,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
   };
   int probes = 0;
   int interface_closes = 0;
+  bool close_failure_delivered = false, stop_failure_delivered = false;
   bool interface_value = false;
   std::map<std::uint32_t, unsigned int> frame_counts;
   const auto frame = [&streams, &cti, &frame_counts](std::uint32_t session) {
@@ -60,6 +61,16 @@ inline int fakeWorker(const std::filesystem::path& cti)
     std::vector<std::byte> bytes(size);
     if (!std::cin.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) return 1;
     const auto request = decode(bytes);
+    if (request.operation == Operation::Close && cti.stem() == "ApiCloseFailBoard" && !close_failure_delivered) {
+      close_failure_delivered = true;
+      transmit({request.operation, request.id, false, "Close: test refusal", {}, request.session});
+      continue;
+    }
+    if (request.operation == Operation::StopLive && cti.stem() == "ApiStopFailBoard" && live.count(request.session) && !stop_failure_delivered) {
+      stop_failure_delivered = true;
+      transmit({request.operation, request.id, false, "StopLive: test refusal", {}, request.session});
+      continue;
+    }
     Writer payload;
     auto& opened_device = opened[request.session];
     if (request.operation == Operation::NodeRead) {
@@ -139,8 +150,11 @@ inline int fakeWorker(const std::filesystem::path& cti)
     }
     if (request.operation == Operation::StartLive) live.insert(request.session);
     if (request.operation == Operation::GrabOne) {
-      pending_single[request.session] = request;
-      continue; // Explicit triggering or cancellation completes Single.
+      if (cti.stem() == "ApiBoard") write(payload, frame(request.session));
+      else {
+        pending_single[request.session] = request;
+        continue; // Explicit triggering or cancellation completes Single.
+      }
     }
     if (request.operation == Operation::StopLive || request.operation == Operation::Close) {
       if (const auto found = pending_single.find(request.session); found != pending_single.end()) {
