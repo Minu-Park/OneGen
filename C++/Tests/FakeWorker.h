@@ -1,5 +1,6 @@
 #pragma once
 #include "OneGenWorkerMessages.h"
+#include "OneGenParameterMessages.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -29,6 +30,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
   std::set<std::uint32_t> live;
   std::map<std::uint32_t, Message> pending_single;
   std::map<std::uint32_t, std::uint32_t> streams;
+  std::map<std::uint32_t, std::uint64_t> stream_generations;
   std::map<std::uint32_t, std::map<std::string, onegen::FeatureNode>> parameter_nodes;
   std::map<std::uint32_t, int> parameter_writes;
   std::set<std::pair<std::uint32_t, std::string>> post_write_read_failures;
@@ -45,6 +47,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
           {"NonFinite", onegen::NodeKind::Float},
           {"StreamCount", onegen::NodeKind::Integer}, {"DeviceCount", onegen::NodeKind::Integer},
           {"Prepared", onegen::NodeKind::Integer}, {"PostReadFailure", onegen::NodeKind::Integer},
+          {"WorkerRace", onegen::NodeKind::Integer},
           {"Unreadable", onegen::NodeKind::Integer}, {"Writes", onegen::NodeKind::Integer},
           {"FailWrite", onegen::NodeKind::Integer}, {"FailReadback", onegen::NodeKind::Integer},
           {"Unavailable", onegen::NodeKind::Boolean}, {"Raw", onegen::NodeKind::Register},
@@ -71,6 +74,25 @@ inline int fakeWorker(const std::filesystem::path& cti)
     if (name == "SelectorError") node.selecting_features = {nodes["Unreadable"]};
     if (name == "Cyclic") node.selecting_features = {nodes["Cyclic"]};
     return node;
+  };
+  const auto observeParameter = [&](std::uint32_t session, int module, const std::string& name) {
+    NodeObservation result; result.stream_index = streams[session]; result.stream_generation = stream_generations[session] + 1;
+    result.node = parameterNode(session, name);
+    if (module != 0 && !(module == 1 && name == "StreamCount") && !(module == 2 && name == "DeviceCount")) result.node = {};
+    std::map<std::string, onegen::FeatureNode> selectors;
+    std::set<std::string> active{name};
+    std::function<void(const onegen::FeatureNode&)> collect = [&](const auto& current) {
+      for (const auto& relation : current.selecting_features) {
+        if (active.count(relation.name)) { result.node.observation_error = "Cyclic selector context"; continue; }
+        if (selectors.count(relation.name)) continue;
+        const auto selected = parameterNode(session, relation.name);
+        active.insert(relation.name); collect(selected); active.erase(relation.name);
+        auto copied = selected; copied.selecting_features.clear(); selectors.emplace(relation.name, copied);
+      }
+    };
+    collect(result.node); result.node.selecting_features.clear();
+    for (auto& [key, selector] : selectors) result.node.selecting_features.push_back(selector);
+    return result;
   };
   const auto transmit = [](Message response) {
     const auto body = encode(std::move(response));
@@ -117,6 +139,43 @@ inline int fakeWorker(const std::filesystem::path& cti)
       continue;
     }
     Writer payload;
+    if (request.operation == Operation::ObserveNode || request.operation == Operation::WriteNodeChecked) {
+      Reader input(request.payload); const auto module = input.scalar<std::int32_t>(); const auto name = input.string();
+      auto current = observeParameter(request.session, module, name);
+      if (request.operation == Operation::ObserveNode) write(payload, current);
+      else {
+        const auto operation = input.string(); const auto value = input.string();
+        const auto expected = readNodeObservation(input); const auto compareValue = input.scalar<bool>();
+        if (name == "WorkerRace") { ++parameter_nodes[request.session][name].int_inc; current = observeParameter(request.session, module, name); }
+        NodeWriteResult result;
+        if ((module == 1 && (current.stream_index != expected.stream_index || current.stream_generation != expected.stream_generation))
+            || !onegen::same_parameter_context(current.node, expected.node, compareValue)) {
+          result.status = NodeWriteStatus::Conflict;
+        } else {
+          std::this_thread::sleep_for(std::chrono::milliseconds{35}); ++parameter_writes[request.session];
+          auto& node = parameter_nodes[request.session][name];
+          if (operation == "int") node.int_value = std::stoll(value);
+          else if (operation == "float") node.float_value = std::floor(std::stod(value) * 10) / 10;
+          else if (operation == "bool") node.bool_value = value == "1";
+          else if (operation == "string") node.string_value = value;
+          else if (operation == "enum") node.enum_value = value;
+          if (name == "Prepared") ++node.int_value;
+          if (name == "TriggerSoftware" && operation == "execute" && live.count(request.session)) {
+            Writer framePayload; write(framePayload, frame(request.session));
+            transmit({Operation::Frame, 0, true, {}, framePayload.take(), request.session});
+          }
+          result.effect = NodeWriteEffect::Applied;
+          if (name == "FailWrite") { result.status = NodeWriteStatus::BackendFailure; result.effect = NodeWriteEffect::Unknown; }
+          else if (name == "PostReadFailure") result.status = NodeWriteStatus::BackendFailure;
+          else {
+            result.observation = observeParameter(request.session, module, name);
+            if (name == "FailReadback") { result.status = NodeWriteStatus::BackendFailure; result.observation->node.observation_error = "Readback failure"; }
+          }
+        }
+        write(payload, result);
+      }
+      transmit({request.operation, request.id, true, {}, payload.take(), request.session}); continue;
+    }
     if (cti.stem() == "ApiBoard" && (request.operation == Operation::NodeRead || request.operation == Operation::NodeWrite)) {
       Reader input(request.payload); const auto module = input.scalar<std::int32_t>();
       const auto name = input.string();
@@ -180,6 +239,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
       std::this_thread::sleep_for(std::chrono::milliseconds{150});
       Reader input(request.payload);
       streams[request.session] = input.scalar<std::uint32_t>();
+      ++stream_generations[request.session];
     }
     if (request.operation == Operation::DescribeFeatures) {
       payload.scalar(std::uint32_t{5});
@@ -198,7 +258,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
               if (name != "StreamCount" && name != "DeviceCount") root.children.push_back(parameterNode(request.session, name));
           }
         }
-        if (cti.stem() == "ApiBoard" && (module == 1 || module == 2))
+        if ((cti.stem() == "ApiBoard" || cti.stem() == "MultiStreamBoard") && (module == 1 || module == 2))
           root.children.push_back(parameterNode(request.session, module == 1 ? "StreamCount" : "DeviceCount"));
         write(payload, root);
       }

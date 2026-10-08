@@ -14,6 +14,24 @@ using Error = DeviceParameterError;
 using Kind = DeviceParameterKind;
 using NodeKind = onegen::NodeKind;
 constexpr std::array<const char*, 3> scopes{"RemoteDevice", "DataStream", "Device"};
+std::string parameterScope(int module, const onegen::worker::NodeObservation& observed) {
+  return module == 1 ? "DataStream:" + std::to_string(observed.stream_index) + ":" + std::to_string(observed.stream_generation) : scopes.at(module);
+}
+int parameterModule(const std::string& scope) {
+  if (scope == "RemoteDevice") return 0;
+  if (scope == "Device") return 2;
+  if (scope.starts_with("DataStream:")) {
+    const auto split = scope.find(':', 11);
+    if (split == std::string::npos) return -1;
+    std::uint32_t index; std::uint64_t generation;
+    const auto first = std::from_chars(scope.data()+11, scope.data()+split, index);
+    const auto second = std::from_chars(scope.data()+split+1, scope.data()+scope.size(), generation);
+    if (first.ec == std::errc{} && first.ptr == scope.data()+split && second.ec == std::errc{}
+        && second.ptr == scope.data()+scope.size() && generation
+        && scope == "DataStream:"+std::to_string(index)+":"+std::to_string(generation)) return 1;
+  }
+  return -1;
+}
 
 DeviceParameterResult failure(Error error, std::string message) {
   DeviceParameterResult result; result.error = error; result.message = std::move(message); return result;
@@ -96,9 +114,9 @@ DeviceParameterResult OneGenSourceController::parameterAdmission() {
 }
 DeviceParameterDescriptor OneGenSourceController::observeParameter(
     const std::shared_ptr<onegen::worker::Lease>& lease, const std::string& connection,
-    int module, const onegen::FeatureNode& node) {
+    int module, const onegen::FeatureNode& node, bool completeContext, const std::string& scopeOverride) {
   DeviceParameterDescriptor result;
-  result.target = {connection, scopes.at(module), node.name, {}};
+  result.target = {connection, scopeOverride.empty() ? scopes.at(module) : scopeOverride, node.name, {}};
   result.kind = kind(node.kind).value();
   result.displayName = node.display_name; result.description = node.description; result.unit = node.unit;
   result.available = node.readable || node.writable;
@@ -125,6 +143,11 @@ DeviceParameterDescriptor OneGenSourceController::observeParameter(
   std::set<std::string> active{node.name};
   std::function<void(const onegen::FeatureNode&)> collect = [&](const auto& selected) {
     for (const auto& relation : selected.selecting_features) {
+      if (completeContext) {
+        const auto value = scalar(relation);
+        if (!value) throw std::runtime_error("Selecting feature cannot be observed: " + relation.name);
+        selectors.emplace(relation.name, *value); continue;
+      }
       if (active.count(relation.name)) throw std::runtime_error("Cyclic selector context.");
       if (selectors.count(relation.name)) continue;
       if (selectors.size() + active.size() > 128) throw std::runtime_error("Selector context exceeds the observation bound.");
@@ -145,6 +168,11 @@ DeviceParameterDescriptor OneGenSourceController::observeParameter(
   }
   for (auto& [name, value] : selectors) result.target.selectors.push_back({name, value});
   const auto key = connection + "/" + result.target.scope + "/" + node.name;
+  if (module == 1) for (auto it = parameter_observations_.begin(); it != parameter_observations_.end();) {
+    if (it->second.target.connectionId == connection && it->second.target.scope.starts_with("DataStream:")
+        && it->second.target.scope != result.target.scope) it = parameter_observations_.erase(it);
+    else ++it;
+  }
   const auto previous = parameter_observations_.find(key);
   result.revision = previous != parameter_observations_.end() && sameObservation(previous->second, result)
       ? previous->second.revision : ++parameter_revision_;
@@ -170,13 +198,17 @@ DeviceParameterResult OneGenSourceController::requestParameters(InventoryComplet
     try {
       for (const auto& [lease, connection] : connections) {
         const auto modules = lease->describe_features();
-        const bool singleStream = lease->data_streams().size() == 1;
         std::function<void(int, const onegen::FeatureNode&)> flatten = [&](int module, const auto& node) {
-          if (kind(node.kind)) result.parameters.push_back(observeParameter(lease, connection, module, node));
+          if (kind(node.kind)) {
+            if (module == 1) {
+              const auto observed = lease->observe_node(module, node.name);
+              result.parameters.push_back(observeParameter(lease, connection, module, observed.node, true, parameterScope(module, observed)));
+            } else result.parameters.push_back(observeParameter(lease, connection, module, node));
+          }
           for (const auto& child : node.children) flatten(module, child);
         };
         for (int module = 0; module < std::min<int>(3, modules.size()); ++module)
-          if (module != 1 || singleStream) flatten(module, modules[module].second);
+          flatten(module, modules[module].second);
       }
     } catch (const std::exception& error) { result.result = failure(Error::BackendFailure, error.what()); result.parameters.clear(); }
     catch (...) { result.result = failure(Error::BackendFailure, "Unexpected feature inventory failure."); result.parameters.clear(); }
@@ -204,9 +236,8 @@ DeviceParameterResult OneGenSourceController::requestParameter(DeviceParameterTa
   if (admission.error != Error::None) return admission;
   for (const auto* text : {&target.connectionId, &target.scope, &target.name})
     if (text->empty() || text->find('\0') != std::string::npos) return failure(Error::InvalidArgument, "Exact target fields are required.");
-  const auto scope = std::find(scopes.begin(), scopes.end(), target.scope);
-  if (scope == scopes.end()) return failure(Error::Unsupported, "Only device-owned RemoteDevice, DataStream and Device maps are supported.");
-  const int module = int(scope - scopes.begin());
+  const int module = parameterModule(target.scope);
+  if (module < 0) return failure(Error::Unsupported, "Exact RemoteDevice, Device or qualified DataStream scope required.");
   OneGenSourceController* selected = nullptr;
   std::shared_ptr<onegen::worker::Lease> lease;
   bool connected = false;
@@ -223,45 +254,38 @@ DeviceParameterResult OneGenSourceController::requestParameter(DeviceParameterTa
     DeviceParameterResult result;
     bool dispatched = false;
     try {
-      // The existing lease does not expose the selected stream's identity. Do not
-      // let an old DataStream target silently bind a different stream after GUI selection.
-      if (module == 1 && lease->data_streams().size() != 1) {
-        result = failure(Error::Unsupported, "DataStream parameters require one unambiguous stream.");
-      } else {
-        const auto node = lease->read_node(module, target.name);
-        if (node.name != target.name) result = failure(Error::NotFound, "Parameter was not found.");
-        else if (!kind(node.kind)) result = failure(Error::Unsupported, "Category, raw register and other nodes are not typed parameters.");
-        else {
-          auto current = observeParameter(lease, target.connectionId, module, node);
-          result.descriptor = current;
-          if (mutate) {
-            result.error = validateDeviceParameterWrite(current, target, value, revision);
-            if (result.error == Error::None) {
-              auto operation = value ? setter(current.kind, *value) : std::pair<std::string, std::string>{"execute", ""};
-              dispatched = true;
-              if (module == 0 && target.name == "TriggerSoftware" && !value) {
-                selected->trigger(); // Preserve the existing acquisition command path and pending receive ordering.
-              } else {
-                const auto actual = lease->write_node(module, target.name, operation.first, operation.second);
-                result.effect = DeviceParameterEffect::Applied;
-                result.descriptor.reset();
-                // NodeWrite snapshots before its existing preparation step. Observe
-                // after the setter completes, preserving any explicit snapshot failure.
-                const auto readback = actual.observation_error.empty()
-                    ? lease->read_node(module, target.name) : actual;
-                result.descriptor = observeParameter(lease, target.connectionId, module, readback);
-                selected->refreshControlSnapshot();
-              }
-              result.effect = DeviceParameterEffect::Applied;
-              if (!result.descriptor->observationError.empty()) result.error = Error::BackendFailure;
-            }
-          } else if (current.target.selectors != target.selectors) result.error = Error::Conflict;
-          else if (!current.available) result.error = Error::Unavailable;
-          else if (!current.observationError.empty()) result.error = Error::BackendFailure;
-          else if (!current.readable) result.error = Error::Unreadable;
-          if (result.error != Error::None) result.message = "Feature access, value, selector context or revision validation failed.";
-        }
-        }
+      const auto observed = lease->observe_node(module, target.name);
+      const auto& node = observed.node;
+      if (node.name != target.name) result = failure(Error::NotFound, "Parameter was not found.");
+      else if (!kind(node.kind)) result = failure(Error::Unsupported, "Node is not a typed parameter.");
+      else {
+        auto current = observeParameter(lease, target.connectionId, module, node, true, parameterScope(module, observed));
+        result.descriptor = current;
+        if (target.scope != current.target.scope || target.selectors != current.target.selectors) result.error = Error::Conflict;
+        else if (mutate) {
+          result.error = validateDeviceParameterWrite(current, target, value, revision);
+          if (result.error == Error::None) {
+            const auto operation = value ? setter(current.kind, *value) : std::pair<std::string, std::string>{"execute", ""};
+            dispatched = true;
+            const auto written = lease->write_node_checked(module, target.name, operation.first, operation.second, observed, revision.has_value());
+            using Status = onegen::worker::NodeWriteStatus;
+            using Effect = onegen::worker::NodeWriteEffect;
+            result.effect = written.effect == Effect::Applied ? DeviceParameterEffect::Applied
+                : written.effect == Effect::Unknown ? DeviceParameterEffect::Unknown : DeviceParameterEffect::None;
+            result.error = written.status == Status::Success ? Error::None : written.status == Status::Conflict ? Error::Conflict
+                : written.status == Status::Unavailable ? Error::Unavailable : Error::BackendFailure;
+            result.message = written.message;
+            result.descriptor.reset();
+            if (written.observation) result.descriptor = observeParameter(lease, target.connectionId, module,
+                written.observation->node, true, parameterScope(module, *written.observation));
+            // The worker retains trigger/receive ordering; acquisition commands have no extra feature reads.
+            if (result.effect == DeviceParameterEffect::Applied && !(module == 0 && target.name == "TriggerSoftware" && !value)) selected->refreshControlSnapshot();
+          }
+        } else if (!current.available) result.error = Error::Unavailable;
+        else if (!current.observationError.empty()) result.error = Error::BackendFailure;
+        else if (!current.readable) result.error = Error::Unreadable;
+        if (result.error != Error::None && result.message.empty()) result.message = "Feature access, value, selector context or revision validation failed.";
+      }
     } catch (const std::exception& error) {
       result.error = Error::BackendFailure; result.message = error.what();
       if (dispatched && result.effect != DeviceParameterEffect::Applied) {

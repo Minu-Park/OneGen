@@ -2,6 +2,7 @@
 
 #include "OneGenWorkerClient.h"
 #include "OneGenNode.h"
+#include "OneGenParameterMessages.h"
 #include "OneGenTypes.h"
 
 #include <chrono>
@@ -48,6 +49,11 @@ public:
   void select_data_stream(std::uint32_t index);
   std::vector<std::pair<std::string, FeatureNode>> describe_features() const;
   FeatureNode read_node(int module, std::string_view name) const;
+  /** @brief Observes a scalar feature and complete selectors on the owning worker. */
+  NodeObservation observe_node(int module, std::string_view name) const;
+  /** @brief Revalidates and mutates within one worker request, with post-preparation readback. */
+  NodeWriteResult write_node_checked(int module, std::string_view name, std::string_view operation,
+      std::string_view value, const NodeObservation& expected, bool compareValue);
   FeatureNode write_node(int module, std::string_view name, std::string_view op,
                          std::string_view value);
   void grab_one(const FrameFn& deliver);

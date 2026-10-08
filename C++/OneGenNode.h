@@ -118,6 +118,11 @@ public:
   void set(const char* v) { set(std::string_view(v ? v : "")); }
 
   bool valid() const { return inode_ != nullptr; }
+  /** @brief Observes complete parameter context under the owning node-map authority. */
+  FeatureNode parameter_snapshot() const;
+  /** @brief Holds the existing node-map lock across context validation and the SDK setter. */
+  bool apply_checked(std::string_view operation, std::string_view value,
+      const FeatureNode& expected, bool compareValue);
 
 private:
   friend class NodeMap;
@@ -169,6 +174,10 @@ private:
 
 /** Copy one node, including category children. */
 FeatureNode snapshot(const Node& node);
+/** @brief Copies a scalar feature and its sorted transitive selecting context without mutation. */
+FeatureNode snapshot_parameter(const Node& node);
+/** @brief Compares current access, constraints and complete selectors before a worker mutation. */
+bool same_parameter_context(const FeatureNode& current, const FeatureNode& expected, bool compareValue);
 /** Apply a copied write: int, float, bool, string, enum, or execute. */
 void apply_feature(Node node, std::string_view op, std::string_view value);
 

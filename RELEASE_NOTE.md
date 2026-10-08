@@ -2,10 +2,11 @@
 
 ## Unreleased
 
+- Qualify DataStream parameter targets with selected-stream index and generation, rejecting stale targets after selection changes and return-to-original selection. Revalidate complete selector/access/constraint context under the existing node-map lock through the SDK setter; return actual post-preparation observations and explicit effect outcomes in matching worker/client protocol 13. Preserve the existing software-trigger receive path.
 - Connect the source controller to the optional typed parameter capability through existing Lease getters/setters. Preserve exact integers, current transitive selector context, observed revisions, actual readback and none/applied/unknown outcomes; share GUI/API admission and drain accepted feature work before teardown. Cover feature-widget parity and malformed, stale, inaccessible and uncertain-effect requests with isolated peers. Core node and worker interfaces are unchanged by this adapter integration.
 - Read actual state through the existing getter after setter preparation completes; preserve applied effects when the subsequent observation fails.
 
-- Copy GenApi-declared selecting-feature state, including hidden/unreadable selectors, through node observations, worker responses and diagnostics without losing signed 64-bit precision. Report value/constraint observation errors explicitly; require matching worker/client protocol version 12.
+- Copy GenApi-declared selecting-feature state, including hidden/unreadable selectors, through node observations, worker responses and diagnostics without losing signed 64-bit precision. Report value/constraint observation errors explicitly.
 
 - Preserve producer queue failures with stream identity, payload/announced capacity, buffer index/count and readable streaming/GenDC mode observations. Diagnostic failure never replaces the original backend error.
 

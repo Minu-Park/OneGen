@@ -150,6 +150,19 @@ FeatureNode Lease::write_node(int module, std::string_view name, std::string_vie
   return readFeatureNode(input);
 }
 
+NodeObservation Lease::observe_node(int module, std::string_view name) const {
+  Writer out; out.scalar(module); out.string(name);
+  const auto payload = openConnection().request(Operation::ObserveNode, out.take(), std::chrono::seconds{30}, session_);
+  Reader in(payload); return readNodeObservation(in);
+}
+NodeWriteResult Lease::write_node_checked(int module, std::string_view name, std::string_view operation,
+    std::string_view value, const NodeObservation& expected, bool compareValue) {
+  Writer out; out.scalar(module); out.string(name); out.string(operation); out.string(value);
+  write(out, expected); out.scalar(compareValue);
+  const auto payload = openConnection().request(Operation::WriteNodeChecked, out.take(), std::chrono::seconds{30}, session_);
+  Reader in(payload); return readNodeWriteResult(in);
+}
+
 void Lease::grab_one(const FrameFn& deliver)
 {
   const auto payload = openConnection().request(Operation::GrabOne, {}, std::chrono::seconds{60}, session_);

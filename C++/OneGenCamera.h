@@ -29,6 +29,8 @@ public:
   const DeviceInfo& info() const;
   std::vector<DataStreamInfo> data_streams() const;
   void select_data_stream(std::uint32_t index);
+  /** @brief Copies the currently selected stream index without changing acquisition. */
+  std::uint32_t selected_data_stream() const;
 
   /** Reopens the selected GenTL stream and allocates buffers for the current feature state. */
   void prepare();

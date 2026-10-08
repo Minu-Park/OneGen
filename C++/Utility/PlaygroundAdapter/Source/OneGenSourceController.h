@@ -127,7 +127,8 @@ private:
   DeviceParameterResult parameterAdmission();
   std::vector<OneGenSourceController*> parameterControllers() const;
   DeviceParameterDescriptor observeParameter(const std::shared_ptr<onegen::worker::Lease>& lease,
-      const std::string& connection, int module, const onegen::FeatureNode& node);
+      const std::string& connection, int module, const onegen::FeatureNode& node,
+      bool completeContext = false, const std::string& scopeOverride = {});
   DeviceParameterResult requestParameter(DeviceParameterTarget target,
       std::optional<DeviceParameterValue> value, std::optional<std::uint64_t> revision,
       bool mutate, IDeviceParameterControl::Completion completion);

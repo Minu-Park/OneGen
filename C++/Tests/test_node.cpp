@@ -211,6 +211,10 @@ int main(int argc, char** argv) try {
       <EnumEntry Name="B"><Value>1</Value></EnumEntry>
       <Value>0</Value><pSelected>Gain</pSelected>
     </Enumeration>
+    <Enumeration Name="GainParent">
+      <EnumEntry Name="A"><Value>0</Value></EnumEntry><EnumEntry Name="B"><Value>1</Value></EnumEntry>
+      <Value>0</Value><pSelected>GainSelector</pSelected>
+    </Enumeration>
     <Integer Name="IndexSelector">
       <Value>9223372036854775807</Value>
       <Min>-9223372036854775808</Min><Max>9223372036854775807</Max>
@@ -233,7 +237,23 @@ int main(int argc, char** argv) try {
   assert(selectedGain.selecting_features[0].enum_value == "A");
   assert(!selectedGain.selecting_features[0].visible);
   assert(selectedGain.selecting_features[0].selecting_features.empty());
+  const auto guardedGain = selectors.find("Gain").parameter_snapshot();
+  assert(guardedGain.selecting_features.size() == 2);
+  assert(guardedGain.selecting_features[0].name == "GainParent");
+  const auto originalGain = selectors.find("Gain").get_float();
   selectors.find("GainSelector").set_enum("B");
+  assert(!selectors.find("Gain").apply_checked("float", "2", guardedGain, false));
+  assert(selectors.find("Gain").get_float() == originalGain);
+  const auto currentGain = selectors.find("Gain").parameter_snapshot();
+  assert(selectors.find("Gain").apply_checked("float", "2", currentGain, true));
+  assert(selectors.find("Gain").get_float() == 2);
+  assert(!selectors.find("Gain").apply_checked("float", "3", currentGain, true));
+  assert(selectors.find("Gain").get_float() == 2);
+  assert(selectors.find("Gain").apply_checked("float", "3", currentGain, false));
+  assert(selectors.find("Gain").get_float() == 3);
+  selectors.find("GainParent").set_enum("B");
+  assert(!selectors.find("Gain").apply_checked("float", "4", currentGain, false));
+  assert(selectors.find("Gain").get_float() == 3);
   assert(onegen::snapshot(selectors.find("Gain")).selecting_features[0].enum_value == "B");
   assert(selectedGain.selecting_features[0].enum_value == "A");
   const auto selectedWidth = onegen::snapshot(selectors.find("Width"));
@@ -244,6 +264,7 @@ int main(int argc, char** argv) try {
   const auto unreadableSelector = onegen::snapshot(selectors.find("ReverseX"));
   assert(unreadableSelector.selecting_features.size() == 1);
   assert(!unreadableSelector.selecting_features[0].readable);
+  assert(!selectors.find("ReverseX").apply_checked("bool", "1", selectors.find("ReverseX").parameter_snapshot(), false));
   assert(!onegen::snapshot(selectors.find("ReadFailure")).observation_error.empty());
   assert(onegen::snapshot(selectors.find("DeviceUserID")).selecting_features.empty());
   assert(gain_metadata.unit == "dB" && gain_metadata.representation == "Linear");

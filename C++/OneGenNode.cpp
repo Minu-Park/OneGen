@@ -21,6 +21,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -866,6 +868,69 @@ static FeatureNode snapshotNode(const Node& node, bool relations)
 }
 
 FeatureNode snapshot(const Node& node) { return snapshotNode(node, true); }
+
+FeatureNode snapshot_parameter(const Node& node) {
+  auto result = snapshotNode(node, false);
+  std::map<std::string, FeatureNode> selectors;
+  std::set<std::string> active{node.name()};
+  std::function<void(const Node&)> collect = [&](const Node& selected) {
+    for (const auto& selector : selected.selecting_features()) {
+      const auto name = selector.name();
+      if (active.count(name)) throw Error("Cyclic selecting-feature context.");
+      if (selectors.count(name)) continue;
+      if (selectors.size() + active.size() > 128) throw Error("Selecting-feature context exceeds observation limit.");
+      active.insert(name); collect(selector); active.erase(name);
+      selectors.emplace(name, snapshotNode(selector, false));
+    }
+  };
+  try { collect(node); }
+  catch (const std::exception& error) { result.observation_error += std::string("; selector context: ") + error.what(); }
+  for (auto& [name, selector] : selectors) result.selecting_features.push_back(std::move(selector));
+  return result;
+}
+
+bool same_parameter_context(const FeatureNode& current, const FeatureNode& expected, bool compareValue) {
+  const auto scalarEqual = [](const FeatureNode& a, const FeatureNode& b) {
+    if (a.name != b.name || a.kind != b.kind || a.readable != b.readable
+        || !a.observation_error.empty() || !b.observation_error.empty()) return false;
+    if (!a.readable) return true;
+    switch (a.kind) {
+      case NodeKind::Integer: return a.int_value == b.int_value;
+      case NodeKind::Float: return a.float_value == b.float_value;
+      case NodeKind::Boolean: return a.bool_value == b.bool_value;
+      case NodeKind::Enumeration: return a.enum_value == b.enum_value;
+      case NodeKind::String: return a.string_value == b.string_value;
+      case NodeKind::Command: return true;
+      default: return false;
+    }
+  };
+  if (current.name != expected.name || current.kind != expected.kind || current.readable != expected.readable
+      || current.writable != expected.writable || !current.observation_error.empty() || !expected.observation_error.empty()) return false;
+  if (current.display_name != expected.display_name || current.description != expected.description || current.unit != expected.unit) return false;
+  if (current.kind == NodeKind::Integer && (current.int_min != expected.int_min || current.int_max != expected.int_max || current.int_inc != expected.int_inc)) return false;
+  if (current.kind == NodeKind::Float && (current.float_min != expected.float_min || current.float_max != expected.float_max || current.float_inc != expected.float_inc)) return false;
+  if (current.kind == NodeKind::Enumeration && current.enum_entries != expected.enum_entries) return false;
+  if (compareValue && !scalarEqual(current, expected)) return false;
+  if (current.selecting_features.size() != expected.selecting_features.size()) return false;
+  for (std::size_t i = 0; i < current.selecting_features.size(); ++i)
+    if (!current.selecting_features[i].readable || !scalarEqual(current.selecting_features[i], expected.selecting_features[i])) return false;
+  return true;
+}
+
+FeatureNode Node::parameter_snapshot() const {
+  if (!valid()) return {};
+  std::lock_guard<std::recursive_mutex> lock(map_->impl_->mu);
+  return snapshot_parameter(*this);
+}
+bool Node::apply_checked(std::string_view operation, std::string_view value,
+    const FeatureNode& expected, bool compareValue) {
+  if (!valid()) return false;
+  std::lock_guard<std::recursive_mutex> lock(map_->impl_->mu);
+  const auto current = snapshot_parameter(*this);
+  if (!current.writable || !same_parameter_context(current, expected, compareValue)) return false;
+  apply_feature(*this, operation, value);
+  return true;
+}
 
 void apply_feature(Node node, std::string_view op, std::string_view value)
 {

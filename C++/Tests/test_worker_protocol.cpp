@@ -1,4 +1,5 @@
 #include "OneGenWorkerMessages.h"
+#include "OneGenParameterMessages.h"
 #include "../Internal/FramePayload.h"
 
 #include <cassert>
@@ -15,6 +16,16 @@ int main()
   try { onegen::worker::decode(old_protocol); }
   catch (const std::runtime_error&) { old_protocol_rejected = true; }
   assert(old_protocol_rejected);
+  onegen::worker::NodeWriteResult outcome;
+  outcome.effect = onegen::worker::NodeWriteEffect::Applied;
+  outcome.observation = onegen::worker::NodeObservation{};
+  outcome.observation->stream_index = 7; outcome.observation->stream_generation = UINT64_MAX;
+  outcome.observation->node.name = "Width"; outcome.observation->node.int_value = INT64_MIN;
+  onegen::worker::Writer encodedOutcome; onegen::worker::write(encodedOutcome, outcome);
+  const auto outcomeBytes = encodedOutcome.take(); onegen::worker::Reader outcomeReader(outcomeBytes);
+  const auto decodedOutcome = onegen::worker::readNodeWriteResult(outcomeReader);
+  assert(decodedOutcome.effect == outcome.effect && decodedOutcome.observation->stream_generation == UINT64_MAX);
+  assert(decodedOutcome.observation->node.int_value == INT64_MIN);
   onegen::InterfaceInfo iface{"id", "producer", "display", "vendor", "CXP"};
   onegen::worker::Writer interface_writer;
   onegen::worker::write(interface_writer, iface);

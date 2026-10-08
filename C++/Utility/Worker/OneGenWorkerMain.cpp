@@ -1,4 +1,5 @@
 #include "OneGenWorkerMessages.h"
+#include "OneGenParameterMessages.h"
 
 #include "OneGen.h"
 #include "Internal/ConnectTiming.h"
@@ -76,6 +77,7 @@ struct CameraSession {
   std::condition_variable ack_ready;
   bool frame_acked = false;
   bool stopping = false;
+  std::uint64_t stream_generation = 1;
   void stop() {
     { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
     std::exception_ptr error;
@@ -287,6 +289,7 @@ int main(int argc, char** argv)
             selected.interface_id = input.string();
             selected.cti_path = std::filesystem::weakly_canonical(cti).string();
             opened.open(selected);
+            ++channel.stream_generation;
             timing.mark("camera-open");
             opened.prepare();
             timing.mark("camera-prepare");
@@ -317,10 +320,68 @@ int main(int argc, char** argv)
           case Operation::ListStreams:
             writeVector(output, ensureCamera().data_streams());
             break;
-          case Operation::SelectStream:
-            ensureCamera().select_data_stream(input.scalar<std::uint32_t>());
+          case Operation::SelectStream: {
+            const auto index = input.scalar<std::uint32_t>();
+            const auto before = ensureCamera().selected_data_stream();
+            ensureCamera().select_data_stream(index);
+            if (before != index) ++channel.stream_generation;
             ensureCamera().prepare();
             break;
+          }
+          case Operation::ObserveNode: {
+            const auto module = moduleFromIndex(input.scalar<std::int32_t>());
+            auto& opened = ensureCamera();
+            const auto name = input.string();
+            onegen::worker::write(output, onegen::worker::NodeObservation{
+                opened.features(module).find(name).parameter_snapshot(),
+                opened.selected_data_stream(), channel.stream_generation});
+            break;
+          }
+          case Operation::WriteNodeChecked: {
+            const auto module = moduleFromIndex(input.scalar<std::int32_t>());
+            const auto name = input.string(); const auto operation = input.string(); const auto value = input.string();
+            const auto expected = onegen::worker::readNodeObservation(input);
+            const auto compareValue = input.scalar<bool>();
+            using Status = onegen::worker::NodeWriteStatus;
+            using Effect = onegen::worker::NodeWriteEffect;
+            onegen::worker::NodeWriteResult result;
+            try {
+              auto& opened = ensureCamera();
+              if (module == onegen::Camera::Module::Interface || module == onegen::Camera::Module::System) {
+                result.status = Status::Unavailable; result.message = "Shared maps are not device parameter targets.";
+              } else {
+                auto node = opened.features(module).find(name);
+                auto current = onegen::worker::NodeObservation{node.parameter_snapshot(),
+                    opened.selected_data_stream(), channel.stream_generation};
+                if (!current.node.writable || !current.node.observation_error.empty()) {
+                  result.status = Status::Unavailable; result.message = "Parameter is not writable or cannot be observed.";
+                } else if ((module == onegen::Camera::Module::DataStream &&
+                    (current.stream_index != expected.stream_index || current.stream_generation != expected.stream_generation))
+                    || !onegen::same_parameter_context(current.node, expected.node, compareValue)) {
+                  result.status = Status::Conflict; result.message = "Parameter or selected stream changed before worker mutation.";
+                } else {
+                  result.effect = Effect::Unknown;
+                  const bool trigger = module == onegen::Camera::Module::RemoteDevice && name == "TriggerSoftware" && operation == "execute";
+                  if (trigger) opened.trigger();
+                  else if (!node.apply_checked(operation, value, expected.node, compareValue)) {
+                    result.effect = Effect::None; result.status = Status::Conflict;
+                    result.message = "Node-map context changed before SDK setter.";
+                    onegen::worker::write(output, result); break;
+                  }
+                  result.effect = Effect::Applied;
+                  if (module == onegen::Camera::Module::RemoteDevice && operation != "execute" && !opened.is_live() && !opened.is_acquiring()) opened.prepare();
+                  result.observation = trigger ? current : onegen::worker::NodeObservation{
+                      opened.features(module).find(name).parameter_snapshot(), opened.selected_data_stream(), channel.stream_generation};
+                  if (!result.observation->node.observation_error.empty()) {
+                    result.status = Status::BackendFailure; result.message = result.observation->node.observation_error;
+                  }
+                }
+              }
+            } catch (const std::exception& error) { result.status = Status::BackendFailure; result.message = error.what(); }
+            catch (...) { result.status = Status::BackendFailure; result.message = "Unexpected checked-write failure."; }
+            onegen::worker::write(output, result);
+            break;
+          }
           case Operation::DescribeFeatures: {
             onegen::ConnectTiming timing("describe-features");
             output.scalar(std::uint32_t{5});

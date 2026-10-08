@@ -312,6 +312,11 @@ void Camera::select_data_stream(const std::uint32_t index) {
   impl_->stream_id = streams[index].id;
 }
 
+std::uint32_t Camera::selected_data_stream() const {
+  std::lock_guard<std::mutex> lock(impl_->acq_mu);
+  return impl_->stream_index;
+}
+
 void Camera::set_frame_callback(FrameFn cb) {
   std::lock_guard<std::mutex> lk(impl_->callback_mu);
   impl_->on_frame = std::move(cb);
