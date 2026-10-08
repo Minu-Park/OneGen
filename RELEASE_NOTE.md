@@ -7,6 +7,9 @@
 - Expose declared producer-scoped device discovery, connection, single-acquisition and Live tools on the source controller with connection-generation fences and explicit busy/failure outcomes. Consumer views observe copied controller state and share the existing Coordinator/Lease commands.
 - Own device leases in the source controller; drain accepted external work before view/controller teardown, close channels explicitly, and reject RPCs through closed leases even after reconnect. Preserve connection/Live state when native close/stop is refused.
 - Cover standard tool schema/invocation, GUI command parity, stale generations, single/Live exclusion, callback completion and failure recovery with isolated test peers.
+## v0.2.0 (2026-10-08)
+
+- Expose copied discovery phases and failure details independently of start admission. Preserve partial producer results, distinguish failed enumeration from successful empty inventories, and log scan transitions through the consumer adapter. Join stopping scans without allowing late completion to revive them; keep standalone discovery tests independent of consumer SDK headers.
 
 - Report acquisition lifecycle to consumers and retain opt-in stopped-device feature snapshots at the current selector state; expose parameter requests and operation outcomes through diagnostics without changing capture policy.
 
