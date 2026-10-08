@@ -17,6 +17,32 @@
 
 namespace {
 
+/** @brief Translates module-owned scan outcomes into copied consumer diagnostics. */
+GenTLDiscoverySnapshot consumerStatus(const onegen::worker::StartupDiscovery::Status& status) {
+  using Phase = onegen::worker::StartupDiscovery::Phase;
+  GenTLDiscoveryPhase phase = GenTLDiscoveryPhase::Waiting;
+  switch (status.phase) {
+  case Phase::Waiting: break;
+  case Phase::Running: phase = GenTLDiscoveryPhase::Running; break;
+  case Phase::Succeeded: phase = GenTLDiscoveryPhase::Succeeded; break;
+  case Phase::Partial: phase = GenTLDiscoveryPhase::Partial; break;
+  case Phase::Failed: phase = GenTLDiscoveryPhase::Failed; break;
+  case Phase::Stopping: phase = GenTLDiscoveryPhase::Stopping; break;
+  case Phase::Stopped: phase = GenTLDiscoveryPhase::Stopped; break;
+  }
+  return {phase, status.scan, QString::fromStdString(status.detail)};
+}
+
+/** @brief Logs lifecycle transitions without exposing scan ownership or updating UI. */
+void logDiscoveryState(const onegen::worker::StartupDiscovery::Status& before,
+                       const onegen::worker::StartupDiscovery::Status& after) {
+  const auto old_state = consumerStatus(before);
+  const auto state = consumerStatus(after);
+  qInfo().noquote() << QStringLiteral("[GenTL] consumer=onegen scan=%1 %2 -> %3 reason=%4")
+      .arg(state.generation).arg(QLatin1String(GenTLDiscoveryState::name(old_state.phase)))
+      .arg(QLatin1String(GenTLDiscoveryState::name(state.phase)), state.detail);
+}
+
 QVariantList toDiscoveryData(const std::vector<onegen::DeviceInfo>& devices)
 {
   QVariantList values;
@@ -122,7 +148,7 @@ QOneGenWidget::DiscoverFn cachedDiscovery(
       (onegen::worker::Coordinator::ProgressFn progress) mutable {
     if (auto scan = std::exchange(*initial, {})) return scan->finish(std::move(progress));
     auto scan = std::make_shared<onegen::worker::StartupDiscovery>(
-        [coordinator](auto update) { return discover(coordinator, std::move(update)); });
+        [coordinator](auto update) { return discover(coordinator, std::move(update)); }, logDiscoveryState);
     retain(scan);
     return scan->finish(std::move(progress));
   };
@@ -187,10 +213,10 @@ private:
 } // namespace
 
 class OneGenPlugin final : public DevicePluginTemplate, public IDevicePluginSettings,
-    public IDevicePluginGenTLPaths, public IDevicePluginGenTLProducers {
+    public IDevicePluginGenTLPaths, public IDevicePluginGenTLProducers, public IDevicePluginGenTLDiscoveryStatus {
   Q_OBJECT
   Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
-  Q_INTERFACES(IDevicePlugin IDevicePluginSettings IDevicePluginGenTLPaths IDevicePluginGenTLProducers)
+  Q_INTERFACES(IDevicePlugin IDevicePluginSettings IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus)
 public:
   /** Selects consumer settings without coupling the reusable UI to host paths. */
   void setSettingsFile(const QString& fileName) override { settings_file_ = fileName; }
@@ -211,14 +237,23 @@ public:
       }
       if (!worker_coordinator || !worker_coordinator->set_producer_files(std::move(producers)))
         throw std::runtime_error("Release idle GenICam workers before changing producer files.");
-      { std::lock_guard lock(mutex_); producers_configured_ = true; }
+      { std::lock_guard lock(mutex_); producers_configured_ = true; discovery_state_.transition(GenTLDiscoveryEvent::Reset); }
       qDebug().noquote() << QStringLiteral("[GenICam] consumer producer inventory: %1")
           .arg(files.isEmpty() ? QStringLiteral("(none)") : files.join(QLatin1Char('\n')));
       return true;
     } catch (const std::exception& exception) {
-      if (error) *error = QString::fromLocal8Bit(exception.what());
+      const auto detail = QString::fromLocal8Bit(exception.what());
+      { std::lock_guard lock(mutex_); discovery_state_.transition(GenTLDiscoveryEvent::Reject, detail); }
+      if (error) *error = detail;
       return false;
     }
+  }
+
+  /** @brief Exposes actual asynchronous completion independently of start admission. */
+  GenTLDiscoverySnapshot genTLDiscoveryStatus() const override {
+    std::lock_guard lock(mutex_);
+    if (shutting_down_ || !startup_) return discovery_state_.snapshot();
+    return consumerStatus(startup_->status());
   }
 
   /** @brief Starts one retained scan shared by startup and later control panels. */
@@ -229,10 +264,12 @@ public:
       if (!worker_coordinator || !producers_configured_)
         throw std::runtime_error("The consumer must provide GenICam producer files before discovery.");
       if (!startup_) startup_ = std::make_shared<onegen::worker::StartupDiscovery>(
-          [worker_coordinator](auto progress) { return discover(worker_coordinator, std::move(progress)); });
+          [worker_coordinator](auto progress) { return discover(worker_coordinator, std::move(progress)); }, logDiscoveryState);
       return true;
     } catch (const std::exception& exception) {
-      if (error) *error = QString::fromLocal8Bit(exception.what());
+      const auto detail = QString::fromLocal8Bit(exception.what());
+      { std::lock_guard lock(mutex_); discovery_state_.transition(GenTLDiscoveryEvent::Reject, detail); }
+      if (error) *error = detail;
       return false;
     }
   }
@@ -299,6 +336,7 @@ public:
       return false;
     }
     startup_.reset();
+    discovery_state_.transition(GenTLDiscoveryEvent::Reset, QStringLiteral("producer inventory changing"));
     return true;
   }
 
@@ -316,9 +354,11 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     shutting_down_ = true;
+    discovery_state_.transition(GenTLDiscoveryEvent::Shutdown, QStringLiteral("consumer shutdown"));
     startup_.reset();
     if (coordinator_) coordinator_->shutdown();
     coordinator_.reset();
+    discovery_state_.transition(GenTLDiscoveryEvent::Joined);
   }
 
 private:
@@ -344,6 +384,7 @@ private:
   mutable std::mutex mutex_;
   std::shared_ptr<onegen::worker::Coordinator> coordinator_;
   std::shared_ptr<onegen::worker::StartupDiscovery> startup_;
+  GenTLDiscoveryState discovery_state_;
   bool shutting_down_ = false;
   bool producers_configured_ = false;
 };

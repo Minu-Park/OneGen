@@ -137,10 +137,12 @@ int main(int argc, char** argv)
     return update.devices;
   });
   assert(startup.waitForCamera(1s).size() == 1);
+  assert(startup.status().phase == onegen::worker::StartupDiscovery::Phase::Running);
   continue_scan.set_value();
   assert(startup.finish({}).size() == 2);
   assert(startup.finish({}).size() == 2); // Reusable by another session.
   assert(!startup.running());
+  assert(startup.status().phase == onegen::worker::StartupDiscovery::Phase::Succeeded);
 
   // Multiple consumers wait on one in-flight result; cached exceptions reach each reader.
   {
@@ -169,6 +171,8 @@ int main(int argc, char** argv)
         rejected = std::string_view(error.what()) == "Synthetic startup failure";
       }
       assert(rejected);
+      assert(failed.status().phase == onegen::worker::StartupDiscovery::Phase::Failed);
+      assert(failed.status().detail == "Synthetic startup failure");
     }
   }
 
@@ -180,6 +184,54 @@ int main(int argc, char** argv)
   assert(empty.waitForCamera().empty());
   assert(std::chrono::steady_clock::now() - empty_start < 1s);
   assert(empty.finish({}).empty());
+
+  // Producer failures preserve partial devices; all failures remain distinguishable
+  // from a successful empty inventory. State callbacks do not depend on a host SDK.
+  using Scan = onegen::worker::StartupDiscovery;
+  for (bool partial : {false, true}) {
+    std::vector<Scan::Phase> phases;
+    {
+      Scan scan([&](auto progress) {
+        onegen::worker::DiscoveryResult update;
+        update.total_producers = partial ? 2 : 1;
+        update.finished_producers = update.total_producers;
+        update.failures = {"synthetic producer failure"};
+        if (partial) update.devices.push_back(onegen::DeviceInfo{});
+        progress(update);
+        return update.devices;
+      }, [&](const auto&, const auto& after) { phases.push_back(after.phase); });
+      scan.finish({});
+      const auto result = scan.status();
+      assert(result.phase == (partial ? Scan::Phase::Partial : Scan::Phase::Failed));
+      assert(result.detail == "synthetic producer failure");
+    }
+    assert(phases == std::vector<Scan::Phase>({Scan::Phase::Running,
+        partial ? Scan::Phase::Partial : Scan::Phase::Failed, Scan::Phase::Stopping, Scan::Phase::Stopped}));
+  }
+  assert(empty.status().phase == Scan::Phase::Succeeded);
+
+  // Joining an in-flight scan suppresses its late terminal state before unload.
+  {
+    std::promise<void> stopping;
+    auto stopped_signal = stopping.get_future();
+    std::promise<void> release;
+    auto release_signal = release.get_future();
+    std::vector<Scan::Phase> phases;
+    auto scan = std::make_unique<Scan>([&](auto) {
+      release_signal.wait();
+      return std::vector<onegen::DeviceInfo>{};
+    }, [&](const auto&, const auto& after) {
+      phases.push_back(after.phase);
+      if (after.phase == Scan::Phase::Stopping) stopping.set_value();
+    });
+    auto joining = std::async(std::launch::async, [scan = std::move(scan)]() mutable { scan.reset(); });
+    assert(stopped_signal.wait_for(1s) == std::future_status::ready);
+    assert(joining.wait_for(20ms) == std::future_status::timeout);
+    release.set_value();
+    joining.get();
+    assert(phases == std::vector<Scan::Phase>({Scan::Phase::Running, Scan::Phase::Stopping, Scan::Phase::Stopped}));
+  }
+
 
   // A camera arriving after the deadline is still delivered without a second scan.
   std::promise<void> late_camera;
