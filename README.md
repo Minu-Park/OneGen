@@ -46,9 +46,28 @@ identity; each connection gets a fresh UUID. Pending GUI/API/discovery or Interf
 work is refused as Busy, and accepted external work drains before teardown.
 Explicit close and Live stop retain state on backend refusal. Closed leases reject
 RPCs even when their worker is reused. Single completes after frame conversion;
-consumer presentation and artifact export remain separate authorities. Typed
-feature tools, Interface/multiple-connection API control and cancellation of
-pending Single are not part of this initial lifecycle contract.
+consumer presentation and artifact export remain separate authorities.
+
+The source controller also implements the consumer's optional
+`IDeviceParameterControl` contract. Existing `Lease::describe_features`,
+`read_node` and `write_node` provide typed inventory, reads, writes and commands
+for `RemoteDevice`, single-stream `DataStream` and `Device` scopes. Multi-stream
+DataStream parameters are refused because the existing Lease cannot expose the
+selected stream identity needed to fence GUI selection changes. Connection UUIDs, current
+transitive selector values and query-observed revisions qualify targets. Integer
+values remain signed 64-bit; SDK readback may differ from a requested value.
+After the existing setter completes preparation, the adapter reads again through
+the existing getter. Failed post-write observation retains an applied effect
+and explicitly unavailable readback.
+Unreadable values are absent and incomplete selector observations refuse writes.
+GUI operations and external requests share control admission; raw-register modal
+inspection also holds that admission. Writes never select a context or stop Live
+implicitly. TriggerSoftware retains the existing trigger/receive path.
+Read and write are separate existing worker calls: revisions detect observed
+changes, not unobserved changes that return to the same state, and do not provide
+an atomic fence against producer/device changes between calls. Interface/System
+parameters, raw-register API writes, multiple-connection lifecycle control and
+cancellation of pending Single remain outside this contract.
 
 GenTL 1.5 multipart buffers are retained without a vendor SDK. The Playground
 adapter assembles standard PFNC `Coord3D_ABC32f` and `Coord3D_C16` range data

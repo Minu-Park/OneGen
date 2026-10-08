@@ -9,6 +9,8 @@
 #include <map>
 #include <set>
 #include <thread>
+#include <limits>
+#include <cmath>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -27,6 +29,49 @@ inline int fakeWorker(const std::filesystem::path& cti)
   std::set<std::uint32_t> live;
   std::map<std::uint32_t, Message> pending_single;
   std::map<std::uint32_t, std::uint32_t> streams;
+  std::map<std::uint32_t, std::map<std::string, onegen::FeatureNode>> parameter_nodes;
+  std::map<std::uint32_t, int> parameter_writes;
+  std::set<std::pair<std::uint32_t, std::string>> post_write_read_failures;
+  const auto parameterNode = [&](std::uint32_t session, const std::string& name) {
+    auto& nodes = parameter_nodes[session];
+    if (nodes.empty()) {
+      for (const auto& [key, kind] : std::vector<std::pair<std::string, onegen::NodeKind>>{
+          {"Count", onegen::NodeKind::Integer}, {"Gain", onegen::NodeKind::Float},
+          {"Enabled", onegen::NodeKind::Boolean}, {"Label", onegen::NodeKind::String},
+          {"Selector", onegen::NodeKind::Enumeration}, {"ParentSelector", onegen::NodeKind::Enumeration},
+          {"SelectedCount", onegen::NodeKind::Integer}, {"ReadOnly", onegen::NodeKind::Integer},
+          {"SelectorError", onegen::NodeKind::Integer}, {"Cyclic", onegen::NodeKind::Integer},
+          {"Increment", onegen::NodeKind::Integer},
+          {"NonFinite", onegen::NodeKind::Float},
+          {"StreamCount", onegen::NodeKind::Integer}, {"DeviceCount", onegen::NodeKind::Integer},
+          {"Prepared", onegen::NodeKind::Integer}, {"PostReadFailure", onegen::NodeKind::Integer},
+          {"Unreadable", onegen::NodeKind::Integer}, {"Writes", onegen::NodeKind::Integer},
+          {"FailWrite", onegen::NodeKind::Integer}, {"FailReadback", onegen::NodeKind::Integer},
+          {"Unavailable", onegen::NodeKind::Boolean}, {"Raw", onegen::NodeKind::Register},
+          {"Reset", onegen::NodeKind::Command}, {"TriggerSoftware", onegen::NodeKind::Command}}) {
+        onegen::FeatureNode node; node.name = node.display_name = key; node.kind = kind;
+        node.visible = node.readable = node.writable = true;
+        node.int_min = std::numeric_limits<std::int64_t>::min();
+        node.int_max = std::numeric_limits<std::int64_t>::max(); node.int_inc = 1;
+        node.float_min = 0; node.float_max = 10; node.float_inc = .1; node.float_value = 1;
+        node.enum_entries = {"A", "B"}; node.enum_value = "A";
+        if (key == "ReadOnly" || key == "Writes") node.writable = false;
+        if (key == "Unreadable" || kind == onegen::NodeKind::Command) node.readable = false;
+        if (key == "Unavailable") node.readable = node.writable = false;
+        if (key == "Increment") { node.int_min = 0; node.int_max = 10; node.int_inc = 2; }
+        if (key == "NonFinite") node.float_value = std::numeric_limits<double>::quiet_NaN();
+        if (key == "Raw") { node.readable = false; node.register_length = 4; }
+        nodes.emplace(key, node);
+      }
+    }
+    auto node = nodes[name];
+    if (name == "Writes") node.int_value = parameter_writes[session];
+    if (name == "SelectedCount") node.selecting_features = {nodes["Selector"]};
+    if (name == "Selector") node.selecting_features = {nodes["ParentSelector"]};
+    if (name == "SelectorError") node.selecting_features = {nodes["Unreadable"]};
+    if (name == "Cyclic") node.selecting_features = {nodes["Cyclic"]};
+    return node;
+  };
   const auto transmit = [](Message response) {
     const auto body = encode(std::move(response));
     const auto header = frameSize(static_cast<std::uint32_t>(body.size()));
@@ -72,6 +117,34 @@ inline int fakeWorker(const std::filesystem::path& cti)
       continue;
     }
     Writer payload;
+    if (cti.stem() == "ApiBoard" && (request.operation == Operation::NodeRead || request.operation == Operation::NodeWrite)) {
+      Reader input(request.payload); const auto module = input.scalar<std::int32_t>();
+      const auto name = input.string();
+      if (request.operation == Operation::NodeRead && post_write_read_failures.erase({request.session, name})) {
+        transmit({request.operation, request.id, false, "Observation failed after setter completion", {}, request.session}); continue;
+      }
+      auto node = parameterNode(request.session, name);
+      if (module != 0 && !(module == 1 && name == "StreamCount") && !(module == 2 && name == "DeviceCount")) node = {};
+      if (request.operation == Operation::NodeWrite) {
+        const auto operation = input.string(); const auto value = input.string();
+        std::this_thread::sleep_for(std::chrono::milliseconds{35});
+        ++parameter_writes[request.session];
+        if (operation == "int") node.int_value = std::stoll(value);
+        else if (operation == "float") node.float_value = std::floor(std::stod(value) * 10) / 10;
+        else if (operation == "bool") node.bool_value = value == "1";
+        else if (operation == "string") node.string_value = value;
+        else if (operation == "enum") node.enum_value = value;
+        parameter_nodes[request.session][name] = node;
+        if (name == "Prepared") ++parameter_nodes[request.session][name].int_value;
+        if (name == "PostReadFailure") post_write_read_failures.emplace(request.session, name);
+        if (name == "FailWrite") {
+          transmit({request.operation, request.id, false, "Failure after mutation", {}, request.session}); continue;
+        }
+        if (name == "FailReadback") node.observation_error = "Readback failed after mutation";
+      }
+      write(payload, node);
+      transmit({request.operation, request.id, true, {}, payload.take(), request.session}); continue;
+    }
     auto& opened_device = opened[request.session];
     if (request.operation == Operation::NodeRead) {
       Reader input(request.payload);
@@ -119,7 +192,14 @@ inline int fakeWorker(const std::filesystem::path& cti)
           trigger.name = trigger.display_name = "TriggerSoftware";
           trigger.visible = trigger.writable = true;
           root.children.push_back(trigger);
+          if (cti.stem() == "ApiBoard") {
+            parameterNode(request.session, "Count"); root.children.clear();
+            for (const auto& [name, node] : parameter_nodes[request.session])
+              if (name != "StreamCount" && name != "DeviceCount") root.children.push_back(parameterNode(request.session, name));
+          }
         }
+        if (cti.stem() == "ApiBoard" && (module == 1 || module == 2))
+          root.children.push_back(parameterNode(request.session, module == 1 ? "StreamCount" : "DeviceCount"));
         write(payload, root);
       }
     }

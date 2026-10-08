@@ -107,6 +107,7 @@ OneGenSourceController* OneGenSourceController::cameraController(const std::stri
 
 void OneGenSourceController::removeCameraController(const std::string& id)
 {
+  drainControl();
   std::unique_ptr<OneGenSourceController> removed;
   {
     std::lock_guard lock(mutex_);
@@ -122,6 +123,7 @@ void OneGenSourceController::removeCameraController(const std::string& id)
 
 void OneGenSourceController::clearCameraControllers()
 {
+  drainControl();
   std::map<std::string, Child> removed;
   {
     std::lock_guard lock(mutex_);
@@ -467,7 +469,7 @@ QList<ToolDescriptor> OneGenSourceController::toolDescriptors() const {
   return result;
 }
 
-ApiResult<void> OneGenSourceController::requestTool(const QString& name, int version, QJsonObject arguments, Completion completion) {
+ApiResult<void> OneGenSourceController::requestTool(const QString& name, int version, QJsonObject arguments, IToolProvider::Completion completion) {
   Q_ASSERT(QThread::currentThread() == thread());
   using Result = ApiResult<QJsonValue>;
   if (!completion) return ApiResult<void>::failure(ApiErrorCode::InvalidArgument, "Completion is required.");

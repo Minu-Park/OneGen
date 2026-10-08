@@ -195,6 +195,7 @@ if(ONEGEN_BUILD_QT_WIDGET)
     qt_add_executable(OneGenFeatureTreeTests
       Utility/Qt/OneGenFeatureTreeTests.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
+      Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
     target_link_libraries(OneGenFeatureTreeTests PRIVATE OneGen::QtWidget OneGen::PlaygroundAdapter Qt6::Test)
     if(TARGET Resources::Resources)
@@ -243,6 +244,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
   add_library(OneGenPlugin MODULE
     Utility/PlaygroundAdapter/Plugin/OneGenPlugin.cpp
     Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
+    Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
     Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
   set_target_properties(OneGenPlugin PROPERTIES
     PREFIX "" OUTPUT_NAME OneGenPlugin AUTOMOC ON

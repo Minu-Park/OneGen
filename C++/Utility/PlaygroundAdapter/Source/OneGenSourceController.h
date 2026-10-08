@@ -3,6 +3,7 @@
 #include "AbstractSourceController.h"
 #include "engine/GraphicsFrameAdapter.h"
 #include "ToolProvider.h"
+#include "DeviceParameterControl.h"
 #include "OneGenTypes.h"
 #include "OneGenNode.h"
 #include <QFuture>
@@ -23,9 +24,9 @@ class Coordinator;
 }
 
 /** Owns OneGen live acquisition and delivers SessionFrame values synchronously. */
-class OneGenSourceController final : public AbstractSourceController, public IToolProvider {
+class OneGenSourceController final : public AbstractSourceController, public IToolProvider, public IDeviceParameterControl {
   Q_OBJECT
-  Q_INTERFACES(IToolProvider)
+  Q_INTERFACES(IToolProvider IDeviceParameterControl)
 public:
   explicit OneGenSourceController(QObject* parent = nullptr);
   ~OneGenSourceController() override;
@@ -75,7 +76,17 @@ public:
   /** @brief Declares neutral device commands independently of visible controls. */
   QList<ToolDescriptor> toolDescriptors() const override;
   /** @brief Admits one bounded external command and drains it before destruction. */
-  ApiResult<void> requestTool(const QString& name, int version, QJsonObject arguments, Completion completion) override;
+  ApiResult<void> requestTool(const QString& name, int version, QJsonObject arguments, IToolProvider::Completion completion) override;
+  /** @brief Copies typed device features using the existing lease authority. */
+  DeviceParameterResult requestParameters(InventoryCompletion completion) override;
+  /** @brief Reads one exact current connection and selector context. */
+  DeviceParameterResult requestReadParameter(DeviceParameterTarget target, IDeviceParameterControl::Completion completion) override;
+  /** @brief Validates and writes through the same lease used by GUI controls. */
+  DeviceParameterResult requestWriteParameter(DeviceParameterTarget target, DeviceParameterValue value,
+      std::optional<std::uint64_t> revision, IDeviceParameterControl::Completion completion) override;
+  /** @brief Executes an existing command without implicit acquisition changes. */
+  DeviceParameterResult requestExecuteParameter(DeviceParameterTarget target,
+      std::optional<std::uint64_t> revision, IDeviceParameterControl::Completion completion) override;
 
 signals:
   /** @brief Publishes domain state; consumer views refresh on their owning thread. */
@@ -113,4 +124,13 @@ private:
   std::vector<onegen::DataStreamInfo> control_streams_;
   void refreshControlSnapshot();
   QJsonObject controlState() const;
+  DeviceParameterResult parameterAdmission();
+  std::vector<OneGenSourceController*> parameterControllers() const;
+  DeviceParameterDescriptor observeParameter(const std::shared_ptr<onegen::worker::Lease>& lease,
+      const std::string& connection, int module, const onegen::FeatureNode& node);
+  DeviceParameterResult requestParameter(DeviceParameterTarget target,
+      std::optional<DeviceParameterValue> value, std::optional<std::uint64_t> revision,
+      bool mutate, IDeviceParameterControl::Completion completion);
+  std::map<std::string, DeviceParameterDescriptor> parameter_observations_;
+  std::uint64_t parameter_revision_ = 0;
 };

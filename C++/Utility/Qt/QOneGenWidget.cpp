@@ -10,6 +10,7 @@
 #include <QAbstractItemView>
 #include <QAbstractSpinBox>
 #include <QCheckBox>
+#include <QScopeGuard>
 #include <QComboBox>
 #include <QDebug>
 #include <QLoggingCategory>
@@ -191,6 +192,9 @@ QOneGenWidget::QOneGenWidget(
       if (!hits.isEmpty()) features_->toggleFavorite(hits.front());
       return;
     }
+    // The menu runs a nested event loop: recheck the shared authority after selection.
+    if (!lease_ || operation_watcher_.isRunning() || grab_watcher_.isRunning()
+        || (controller_ && controller_->externalBusy())) return;
     try {
       if (chosen == copy) {
         QApplication::clipboard()->setText(QString::fromStdString(lease_->save_features(module)));
@@ -1163,7 +1167,12 @@ QWidget* QOneGenWidget::createFeatureEditor(const onegen::FeatureNode& n, const 
         auto* button = new QPushButton(QStringLiteral("Inspect register…"));
         w = button;
         connect(button, &QPushButton::clicked, this, [this, nodeName, map_index] {
-          if (!lease_ || operation_watcher_.isRunning()) return;
+          if (!lease_ || operation_watcher_.isRunning() || grab_watcher_.isRunning()
+              || (controller_ && controller_->externalBusy())) return;
+          if (controller_) controller_->setGuiBusy(true);
+          const auto admission = qScopeGuard([this] {
+            if (controller_) controller_->setGuiBusy(operation_watcher_.isRunning() || grab_watcher_.isRunning());
+          });
           const auto n = resolveFeature(nodeName, map_index);
           try {
             if (!n.register_length || n.register_length > 65536)
