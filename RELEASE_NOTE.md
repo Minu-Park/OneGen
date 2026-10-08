@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Copy GenApi-declared selecting-feature state, including hidden/unreadable selectors, through node observations, worker responses and diagnostics without losing signed 64-bit precision. Report value/constraint observation errors explicitly; require matching worker/client protocol version 12.
+
 - Preserve producer queue failures with stream identity, payload/announced capacity, buffer index/count and readable streaming/GenDC mode observations. Diagnostic failure never replaces the original backend error.
 
 - Expose declared producer-scoped device discovery, connection, single-acquisition and Live tools on the source controller with connection-generation fences and explicit busy/failure outcomes. Consumer views observe copied controller state and share the existing Coordinator/Lease commands.

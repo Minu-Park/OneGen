@@ -120,7 +120,16 @@ bounded to 64 KiB and registers are not read eagerly during tree snapshots.
 The feature-tree context menu copies/restores the selected module's GenApi feature
 bag through the clipboard. Restoration uses selector state and verifies values.
 A failed restore can have applied earlier entries; it is not transactional.
-The worker and client must both use protocol version 6.
+The worker and client must both use protocol version 12.
+
+Copied `FeatureNode` observations include direct GenApi selecting features,
+including hidden or unreadable selectors. Selector records are shallow copies;
+their readable flags and observation errors determine whether a value is known.
+Integer values retain signed 64-bit precision through the worker protocol and
+diagnostic JSON. Value/constraint observation failures are explicit rather than
+successful default values. These observations do not change selectors or provide
+an atomic write-validation/acquisition fence; consumer feature commands must
+revalidate connection and selector context at their owning execution boundary.
 
 Single-image payloads are copied from the producer's image offset using the
 declared row stride and delivered height; prefix bytes, Y padding and trailing

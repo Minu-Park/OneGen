@@ -46,6 +46,10 @@ struct FeatureNode {
   std::string representation;
   double float_inc = 0;
   std::uint64_t register_length = 0;
+  /** @brief Copies direct selecting features at their observed state; entries do not recursively expand relations. */
+  std::vector<FeatureNode> selecting_features;
+  /** @brief Reports an incomplete value/constraint observation instead of implying default values are valid. */
+  std::string observation_error;
 };
 
 class NodeMap;
@@ -64,6 +68,8 @@ public:
   bool is_visible() const;
 
   std::vector<Node> children() const;
+  /** @brief Returns GenApi-declared direct selecting features without changing selector values or filtering hidden nodes. */
+  std::vector<Node> selecting_features() const;
 
   std::int64_t get_int() const;
   void set_int(std::int64_t v);

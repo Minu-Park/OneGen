@@ -110,6 +110,9 @@ inline void write(Writer& out, const FeatureNode& value)
   out.string(value.representation);
   out.scalar(value.float_inc);
   out.scalar(value.register_length);
+  out.scalar(static_cast<std::uint32_t>(value.selecting_features.size()));
+  for (const auto& selector : value.selecting_features) write(out, selector);
+  out.string(value.observation_error);
 }
 
 inline FeatureNode readFeatureNode(Reader& in)
@@ -142,6 +145,10 @@ inline FeatureNode readFeatureNode(Reader& in)
   value.representation = in.string();
   value.float_inc = in.scalar<double>();
   value.register_length = in.scalar<std::uint64_t>();
+  const auto selectors = in.scalar<std::uint32_t>();
+  for (std::uint32_t index = 0; index < selectors; ++index)
+    value.selecting_features.push_back(readFeatureNode(in));
+  value.observation_error = in.string();
   return value;
 }
 

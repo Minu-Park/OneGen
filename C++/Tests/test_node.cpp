@@ -203,6 +203,49 @@ int main(int argc, char** argv) try {
   onegen::apply_feature(map.find("WriteOnly"), "int", "3");
   auto gain = map.find("Gain");
   const auto gain_metadata = onegen::snapshot(gain);
+  std::string selectorXml = kXml;
+  selectorXml.insert(selectorXml.find("</RegisterDescription>"), R"(
+    <Enumeration Name="GainSelector">
+      <Visibility>Invisible</Visibility>
+      <EnumEntry Name="A"><Value>0</Value></EnumEntry>
+      <EnumEntry Name="B"><Value>1</Value></EnumEntry>
+      <Value>0</Value><pSelected>Gain</pSelected>
+    </Enumeration>
+    <Integer Name="IndexSelector">
+      <Value>9223372036854775807</Value>
+      <Min>-9223372036854775808</Min><Max>9223372036854775807</Max>
+      <pSelected>Width</pSelected>
+    </Integer>
+    <Integer Name="UnreadableSelector">
+      <ImposedAccessMode>WO</ImposedAccessMode><Value>7</Value>
+      <pSelected>ReverseX</pSelected>
+    </Integer>
+    <Integer Name="ReadFailure"><pValue>ReadFailureReg</pValue></Integer>
+    <IntReg Name="ReadFailureReg">
+      <Address>64</Address><Length>8</Length><AccessMode>RO</AccessMode>
+      <pPort>Device</pPort><Sign>Signed</Sign><Endianess>LittleEndian</Endianess>
+    </IntReg>
+  )");
+  onegen::NodeMap selectors; onegen::load_string_nodemap(selectors, selectorXml.c_str());
+  const auto selectedGain = onegen::snapshot(selectors.find("Gain"));
+  assert(selectedGain.selecting_features.size() == 1);
+  assert(selectedGain.selecting_features[0].name == "GainSelector");
+  assert(selectedGain.selecting_features[0].enum_value == "A");
+  assert(!selectedGain.selecting_features[0].visible);
+  assert(selectedGain.selecting_features[0].selecting_features.empty());
+  selectors.find("GainSelector").set_enum("B");
+  assert(onegen::snapshot(selectors.find("Gain")).selecting_features[0].enum_value == "B");
+  assert(selectedGain.selecting_features[0].enum_value == "A");
+  const auto selectedWidth = onegen::snapshot(selectors.find("Width"));
+  assert(selectedWidth.selecting_features.size() == 1);
+  assert(selectedWidth.selecting_features[0].int_value == INT64_MAX);
+  assert(selectedWidth.selecting_features[0].int_min == INT64_MIN);
+  assert(selectedWidth.observation_error.empty());
+  const auto unreadableSelector = onegen::snapshot(selectors.find("ReverseX"));
+  assert(unreadableSelector.selecting_features.size() == 1);
+  assert(!unreadableSelector.selecting_features[0].readable);
+  assert(!onegen::snapshot(selectors.find("ReadFailure")).observation_error.empty());
+  assert(onegen::snapshot(selectors.find("DeviceUserID")).selecting_features.empty());
   assert(gain_metadata.unit == "dB" && gain_metadata.representation == "Linear");
   assert(gain_metadata.float_inc == 0.0000001);
   assert(!onegen::snapshot(map.find("Blocked")).writable);

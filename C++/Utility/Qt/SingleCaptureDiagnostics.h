@@ -13,9 +13,10 @@
 namespace onegen::diagnostics {
 /** @brief Serializes copied feature metadata without losing integer precision. */
 inline QJsonObject nodeRecord(const FeatureNode& n) {
-  QJsonArray entries, children;
+  QJsonArray entries, children, selectors;
   for (const auto& e : n.enum_entries) entries.append(QString::fromStdString(e));
   for (const auto& c : n.children) children.append(nodeRecord(c));
+  for (const auto& selector : n.selecting_features) selectors.append(nodeRecord(selector));
   return {{"name", QString::fromStdString(n.name)}, {"label", QString::fromStdString(n.display_name)},
     {"description", QString::fromStdString(n.description)}, {"tooltip", QString::fromStdString(n.tooltip)},
     {"kind", static_cast<int>(n.kind)}, {"readable", n.readable}, {"writable", n.writable},
@@ -23,7 +24,8 @@ inline QJsonObject nodeRecord(const FeatureNode& n) {
     {"integer", QString::number(n.int_value)}, {"integerMin", QString::number(n.int_min)},
     {"integerMax", QString::number(n.int_max)}, {"float", n.float_value}, {"floatMin", n.float_min},
     {"floatMax", n.float_max}, {"boolean", n.bool_value}, {"string", QString::fromStdString(n.string_value)},
-    {"enum", QString::fromStdString(n.enum_value)}, {"entries", entries}, {"children", children}};
+    {"enum", QString::fromStdString(n.enum_value)}, {"entries", entries}, {"children", children},
+    {"selectingFeatures", selectors}, {"observationError", QString::fromStdString(n.observation_error)}};
 }
 /** @brief Writes a complete artifact or fails before capture rather than silently truncating it. */
 inline void write(const QString& path, const QByteArray& bytes) {

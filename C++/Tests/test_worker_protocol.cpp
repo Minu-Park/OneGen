@@ -40,6 +40,11 @@ int main()
   feature.representation = "Linear";
   feature.float_inc = 0.0000001;
   feature.register_length = 4;
+  onegen::FeatureNode selector;
+  selector.name = "Selector"; selector.kind = onegen::NodeKind::Integer;
+  selector.readable = true; selector.int_value = INT64_MAX; selector.int_min = INT64_MIN;
+  feature.selecting_features.push_back(selector);
+  feature.observation_error = "Constraint read failed";
   feature.children.push_back(feature);
   onegen::worker::Writer feature_writer;
   onegen::worker::write(feature_writer, feature);
@@ -49,6 +54,11 @@ int main()
   assert(feature_reader.empty());
   assert(feature_copy.unit == feature.unit && feature_copy.float_inc == feature.float_inc);
   assert(feature_copy.register_length == 4 && feature_copy.children.size() == 1);
+  assert(feature_copy.selecting_features.size() == 1);
+  assert(feature_copy.selecting_features[0].int_value == INT64_MAX);
+  assert(feature_copy.selecting_features[0].int_min == INT64_MIN);
+  assert(feature_copy.observation_error == feature.observation_error);
+  assert(feature_copy.children[0].selecting_features[0].name == "Selector");
   onegen::Frame source;
   source.components = {{1, "Intensity"}, {65281, "Phase"}};
   source.payload = {1, 2, 3, 4};

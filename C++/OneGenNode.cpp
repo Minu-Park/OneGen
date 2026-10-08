@@ -522,6 +522,22 @@ std::vector<Node> Node::children() const {
   return out;
 }
 
+std::vector<Node> Node::selecting_features() const {
+  std::vector<Node> out;
+  if (!inode_) return out;
+  std::lock_guard<std::recursive_mutex> lk(map_->impl_->mu);
+  GenApi::CSelectorPtr selector(inode(inode_));
+  if (!selector.IsValid()) return out;
+  GenApi::FeatureList_t features;
+  selector->GetSelectingFeatures(features);
+  for (auto* feature : features) {
+    if (!feature) continue;
+    Node selected; selected.map_ = map_; selected.inode_ = feature->GetNode();
+    if (selected.valid()) out.push_back(selected);
+  }
+  return out;
+}
+
 std::int64_t Node::get_int() const {
   return genapi("get_int", [&] {
     std::lock_guard<std::recursive_mutex> lk(map_->impl_->mu);
@@ -786,7 +802,8 @@ void Node::set(bool v) {
   set_bool(v);
 }
 
-FeatureNode snapshot(const Node& node)
+/** @brief Copies scalar metadata and optionally expands category/selector relations once. */
+static FeatureNode snapshotNode(const Node& node, bool relations)
 {
   FeatureNode out;
   if (!node.valid()) return out;
@@ -833,13 +850,22 @@ FeatureNode snapshot(const Node& node)
         if (out.readable) out.string_value = node.value_text();
         break;
     }
+  } catch (const std::exception& error) {
+    out.observation_error = error.what();
   } catch (...) {
+    out.observation_error = "Feature value or constraint observation failed.";
   }
-  if (out.kind == NodeKind::Category) {
-    for (const auto& child : node.children()) out.children.push_back(snapshot(child));
+  if (relations) {
+    if (out.kind == NodeKind::Category) {
+      for (const auto& child : node.children()) out.children.push_back(snapshotNode(child, true));
+    }
+    for (const auto& selector : node.selecting_features())
+      out.selecting_features.push_back(snapshotNode(selector, false));
   }
   return out;
 }
+
+FeatureNode snapshot(const Node& node) { return snapshotNode(node, true); }
 
 void apply_feature(Node node, std::string_view op, std::string_view value)
 {
