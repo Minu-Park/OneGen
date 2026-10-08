@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(OneGen LANGUAGES CXX)
+project(OneGen VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
