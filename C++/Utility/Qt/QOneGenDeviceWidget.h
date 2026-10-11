@@ -29,6 +29,8 @@ public:
   QString genTLPathChangeBlockReason() const;
   /** @brief Drops old inventories and searches updated paths, optionally reusing a consumer scan. */
   void rescanGenTLPaths(QOneGenWidget::DiscoverFn discover = {});
+  /** @brief Retries an unchanged inventory while retaining available targets during progress. */
+  void retryGenTLDiscovery(QOneGenWidget::DiscoverFn discover);
 
 private:
   struct Target {
@@ -81,6 +83,7 @@ private:
   Operation operation_ = Operation::Discover;
   bool operation_pending_ = false;
   bool discovery_pending_ = false;
+  bool retaining_retry_targets_ = false;
   bool shutting_down_ = false;
   std::function<void(const QString&)> title_callback_;
 };

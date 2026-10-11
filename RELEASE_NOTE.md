@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Retry an unchanged producer inventory through a fresh shared scan without resetting healthy workers. Retain discovered targets during retry progress and preserve connected/busy operation guards and session controls.
+
 - Qualify DataStream parameter targets with selected-stream index and generation, rejecting stale targets after selection changes and return-to-original selection. Revalidate complete selector/access/constraint context under the existing node-map lock through the SDK setter; return actual post-preparation observations and explicit effect outcomes in matching worker/client protocol 13. Preserve the existing software-trigger receive path.
 - Connect the source controller to the optional typed parameter capability through existing Lease getters/setters. Preserve exact integers, current transitive selector context, observed revisions, actual readback and none/applied/unknown outcomes; share GUI/API admission and drain accepted feature work before teardown. Cover feature-widget parity and malformed, stale, inaccessible and uncertain-effect requests with isolated peers. Core node and worker interfaces are unchanged by this adapter integration.
 - Read actual state through the existing getter after setter preparation completes; preserve applied effects when the subsequent observation fails.

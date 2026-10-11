@@ -193,6 +193,13 @@ void QOneGenDeviceWidget::rescanGenTLPaths(QOneGenWidget::DiscoverFn discover) {
   refresh();
 }
 
+void QOneGenDeviceWidget::retryGenTLDiscovery(QOneGenWidget::DiscoverFn discover) {
+  if (!canReconfigureSearch()) return;
+  discover_ = std::move(discover);
+  retaining_retry_targets_ = true;
+  refresh();
+}
+
 void QOneGenDeviceWidget::refresh() {
   if (shutting_down_ || operation_pending_) return;
   if (!interface_ && discovery_pending_) return;
@@ -214,7 +221,12 @@ void QOneGenDeviceWidget::refresh() {
           if (!self) return;
           QMetaObject::invokeMethod(self, [self, update] {
             if (!self || self->shutting_down_) return;
-            self->devices_ = update.devices;
+            auto devices = update.devices;
+            if (self->retaining_retry_targets_)
+              for (const auto& retained : self->devices_)
+                if (std::none_of(devices.begin(), devices.end(), [&](const auto& device) {
+                      return cameraKey(device) == cameraKey(retained); })) devices.push_back(retained);
+            self->devices_ = std::move(devices);
             self->interfaces_ = self->coordinator_->interfaces();
             if (!self->interface_ && !self->operation_pending_
                 && std::none_of(self->cameras_.begin(), self->cameras_.end(),
@@ -235,6 +247,7 @@ void QOneGenDeviceWidget::finishDiscovery() {
   if (shutting_down_) return;
   const auto result = discovery_watcher_.result();
   discovery_pending_ = false;
+  retaining_retry_targets_ = false;
   if (!result.error.isEmpty()) qWarning().noquote() << "[GenICam] discovery failed:" << result.error;
   else {
     devices_ = result.devices;

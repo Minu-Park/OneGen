@@ -213,10 +213,10 @@ private:
 } // namespace
 
 class OneGenPlugin final : public DevicePluginTemplate, public IDevicePluginSettings,
-    public IDevicePluginGenTLPaths, public IDevicePluginGenTLProducers, public IDevicePluginGenTLDiscoveryStatus {
+    public IDevicePluginGenTLPaths, public IDevicePluginGenTLProducers, public IDevicePluginGenTLDiscoveryStatus, public IDevicePluginGenTLRetry {
   Q_OBJECT
   Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
-  Q_INTERFACES(IDevicePlugin IDevicePluginSettings IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus)
+  Q_INTERFACES(IDevicePlugin IDevicePluginSettings IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus IDevicePluginGenTLRetry)
 public:
   /** Selects consumer settings without coupling the reusable UI to host paths. */
   void setSettingsFile(const QString& fileName) override { settings_file_ = fileName; }
@@ -324,6 +324,31 @@ public:
       if (widget && !widget->canReconfigureSearch())
         return widget->genTLPathChangeBlockReason();
     return {};
+  }
+
+  /** @brief Retries the retained inventory without retiring successful producer workers. */
+  bool retryGenTLDiscovery(QString* error) override {
+    const auto reason = genTLPathChangeBlockReason();
+    if (!reason.isEmpty()) { if (error) *error = reason; return false; }
+    std::shared_ptr<onegen::worker::StartupDiscovery> scan;
+    std::shared_ptr<onegen::worker::Coordinator> worker_coordinator;
+    try {
+      worker_coordinator = coordinator();
+      std::lock_guard lock(mutex_);
+      if (!worker_coordinator || !producers_configured_)
+        throw std::runtime_error("The consumer must provide GenICam producer files before discovery.");
+      scan = std::make_shared<onegen::worker::StartupDiscovery>(
+          [worker_coordinator](auto progress) { return discover(worker_coordinator, std::move(progress)); }, logDiscoveryState);
+      startup_ = scan;
+    } catch (const std::exception& exception) {
+      if (error) *error = QString::fromLocal8Bit(exception.what());
+      return false;
+    }
+    std::erase_if(widgets_, [](const auto& widget) { return widget.isNull(); });
+    for (const auto& widget : widgets_) if (widget)
+      widget->retryGenTLDiscovery(cachedDiscovery(worker_coordinator, scan,
+          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); }));
+    return true;
   }
 
   /** @brief Retires disconnected producer workers without unloading the plugin. */
