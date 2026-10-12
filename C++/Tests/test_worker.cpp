@@ -144,6 +144,28 @@ int main(int argc, char** argv)
   assert(!startup.running());
   assert(startup.status().phase == onegen::worker::StartupDiscovery::Phase::Succeeded);
 
+  // Cancelling one consumer wait does not cancel or destroy the reusable scan.
+  {
+    std::promise<void> release;
+    auto signal = release.get_future();
+    std::atomic<bool> cancelled{false};
+    onegen::worker::StartupDiscovery scan([&](auto) {
+      signal.wait();
+      onegen::DeviceInfo device; device.id = "after-cancel";
+      return std::vector<onegen::DeviceInfo>{device};
+    });
+    auto waiter = std::async(std::launch::async, [&] {
+      try { scan.waitForCamera(10s, [&] { return cancelled.load(); }); }
+      catch (const std::runtime_error&) { return true; }
+      return false;
+    });
+    cancelled = true;
+    const auto returned = waiter.wait_for(500ms) == std::future_status::ready;
+    release.set_value(); // Drain even when the assertion below fails.
+    assert(returned && waiter.get());
+    assert(scan.waitForCamera(1s).front().id == "after-cancel");
+  }
+
   // Multiple consumers wait on one in-flight result; cached exceptions reach each reader.
   {
     std::promise<void> complete_scan;

@@ -8,6 +8,8 @@
 #include <condition_variable>
 #include <future>
 #include <utility>
+#include <algorithm>
+#include <stdexcept>
 
 namespace onegen::worker {
 
@@ -71,9 +73,17 @@ public:
 
   /** Returns the first available snapshot, waiting at most ten seconds for a camera. */
   std::vector<DeviceInfo> waitForCamera(
-      std::chrono::milliseconds timeout = std::chrono::seconds{10}) {
+      std::chrono::milliseconds timeout = std::chrono::seconds{10},
+      std::function<bool()> cancelled = {}) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::unique_lock lock(mutex_);
-    changed_.wait_for(lock, timeout, [this] { return !latest_.devices.empty() || finishedLocked(); });
+    while (latest_.devices.empty() && !finishedLocked()) {
+      if (cancelled && cancelled()) throw std::runtime_error("Device discovery was cancelled.");
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) break;
+      changed_.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds{25}));
+    }
+    if (cancelled && cancelled()) throw std::runtime_error("Device discovery was cancelled.");
     if (finishedLocked()) { lock.unlock(); return task_.get(); }
     return latest_.devices;
   }

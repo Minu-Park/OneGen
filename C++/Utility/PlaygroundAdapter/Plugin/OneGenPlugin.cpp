@@ -5,6 +5,7 @@
 #include "OneGenSourceController.h"
 #include "OneGen.h"
 #include "StartupDiscovery.h"
+#include <QThread>
 
 #include <QDebug>
 #include <QPointer>
@@ -284,7 +285,9 @@ public:
       if (!startGenTLDiscovery(&startup_error)) throw std::runtime_error(startup_error.toStdString());
       std::shared_ptr<onegen::worker::StartupDiscovery> startup;
       { std::lock_guard lock(mutex_); startup = startup_; }
-      const auto devices = startup->waitForCamera();
+      const auto devices = startup->waitForCamera(std::chrono::seconds{10}, [] {
+        return QThread::currentThread()->isInterruptionRequested();
+      });
       qInfo().noquote() << (devices.empty()
           ? QStringLiteral("[GenICam] opening session without a camera; available startup results are reused")
           : QStringLiteral("[GenICam] camera available: opening session with %1 camera(s); remaining producer search continues").arg(devices.size()));
