@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow the consumer's cancelled discovery wait to return promptly without destroying the shared producer scan or publishing a late session result. Producer scan lifetime remains joined before unload.
+
 - Retry an unchanged producer inventory through a fresh shared scan without resetting healthy workers. Retain discovered targets during retry progress and preserve connected/busy operation guards and session controls.
 
 - Qualify DataStream parameter targets with selected-stream index and generation, rejecting stale targets after selection changes and return-to-original selection. Revalidate complete selector/access/constraint context under the existing node-map lock through the SDK setter; return actual post-preparation observations and explicit effect outcomes in matching worker/client protocol 13. Preserve the existing software-trigger receive path.
