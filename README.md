@@ -37,6 +37,9 @@ package and never writes to installed user packages. Use a Release SDK with
 the recorded platform, architecture, compiler and exact Qt version; this first
 consumer gate does not establish Debug or cross-platform binary compatibility.
 For single-configuration generators, configure with `-DCMAKE_BUILD_TYPE=Release`.
+When selecting another SDK in an existing build directory, update
+`PlaygroundPluginSDK_DIR` explicitly or configure a fresh build directory;
+CMake retains discovered package directories in its cache.
 
 ## Runtime
 
