@@ -24,7 +24,7 @@ are needed; no host checkout, renderer, VTK or theme installation is required.
 The plugin switch enables its adapter, Qt widget and isolated worker.
 
 ```sh
-cmake -S . -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DONEGEN_BUILD_PLAYGROUND_PLUGIN=ON -DONEGEN_BUILD_TESTS=ON
+cmake -S . -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DCMAKE_CONFIGURATION_TYPES=Release -DCMAKE_BUILD_TYPE=Release -DONEGEN_BUILD_PLAYGROUND_PLUGIN=ON -DONEGEN_BUILD_TESTS=ON
 cmake --build build/plugin --config Release --parallel 4
 ctest --test-dir build/plugin -C Release --output-on-failure
 cmake --build build/plugin --config Release --target OneGenPluginPackageStage
@@ -35,7 +35,12 @@ for a multi-configuration generator. It contains the module, worker, runtime,
 manifest, icon and SDK build identity. Staging reconciles only this generated
 package and never writes to installed user packages. Use a Release SDK with
 the recorded platform, architecture, compiler and exact Qt version; this first
-consumer gate does not establish Debug or cross-platform binary compatibility.
+consumer gate rejects non-Release configurations and does not establish
+cross-platform binary compatibility. MSVC consumers use a 14.x toolset at least
+as new as the SDK producer; the SDK ships machine code without /GL or LTCG.
+Static support is private to each binary: do not use support-class metaobject
+identity or shared static state across the consumer/plugin boundary. Exchange
+objects through the declared plugin interfaces and Qt base classes.
 For single-configuration generators, configure with `-DCMAKE_BUILD_TYPE=Release`.
 When selecting another SDK in an existing build directory, update
 `PlaygroundPluginSDK_DIR` explicitly or configure a fresh build directory;

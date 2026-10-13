@@ -1,9 +1,7 @@
 #include "OneGenFeatureTree.h"
 #include "QOneGenWidget.h"
 #ifdef ONEGEN_FEATURE_THEME
-#ifdef ONEGEN_FEATURE_THEME
 #include "Resources.h"
-#endif
 #endif
 
 #include <QApplication>

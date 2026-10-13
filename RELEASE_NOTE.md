@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Document Release-only installed SDK configuration and static support boundaries.
 - Build and stage the standalone device plugin against an installed consumer SDK, including its isolated worker and GenICam runtime; keep theme installation in the host.
 
 ## v0.3.0 (2026-10-13)
