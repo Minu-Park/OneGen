@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Build and stage the standalone device plugin against an installed consumer SDK, including its isolated worker and GenICam runtime; keep theme installation in the host.
+
 ## v0.3.0 (2026-10-13)
 
 - Allow the consumer's cancelled discovery wait to return promptly without destroying the shared producer scan or publishing a late session result. Producer scan lifetime remains joined before unload.

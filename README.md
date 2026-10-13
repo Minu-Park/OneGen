@@ -16,6 +16,28 @@ cmake --build build
 cmake --build build --target check
 ```
 
+## Installed consumer SDK plugin build
+
+The standalone plugin consumes `PlaygroundPluginSDK` through `find_package`.
+Only this repository, the installed SDK, Qt and the pinned EMVA GenICam package
+are needed; no host checkout, renderer, VTK or theme installation is required.
+The plugin switch enables its adapter, Qt widget and isolated worker.
+
+```sh
+cmake -S . -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DONEGEN_BUILD_PLAYGROUND_PLUGIN=ON -DONEGEN_BUILD_TESTS=ON
+cmake --build build/plugin --config Release --parallel 4
+ctest --test-dir build/plugin -C Release --output-on-failure
+cmake --build build/plugin --config Release --target OneGenPluginPackageStage
+```
+
+The generated package is `build/plugin/packages/Release/plugins/onegen/current`
+for a multi-configuration generator. It contains the module, worker, runtime,
+manifest, icon and SDK build identity. Staging reconciles only this generated
+package and never writes to installed user packages. Use a Release SDK with
+the recorded platform, architecture, compiler and exact Qt version; this first
+consumer gate does not establish Debug or cross-platform binary compatibility.
+For single-configuration generators, configure with `-DCMAKE_BUILD_TYPE=Release`.
+
 ## Runtime
 
 Pass a vendor CTI file to `OneGen::loadCti()`, then enumerate devices or open a
@@ -221,8 +243,8 @@ The Playground session contract is documented in
 ## Qt feature browsing
 
 `OneGenFeatureTree` derives from the Qt-only `SearchableTreeWidget` in
-`Resources::Widgets`. Enable the widget target only after the consumer has made
-that target available (for example with `add_subdirectory(path/to/Resources)`).
+`Resources::Widgets`. Standalone widgets and adapters resolve their public
+dependencies through the installed consumer SDK.
 No theme installation is required; GenTL/core-only builds do not depend on it.
 OneGen provides internal node search text, snapshot row identities and the
 unchanged node-map/internal-name favorite identities. It uses the consumer's

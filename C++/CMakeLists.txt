@@ -4,6 +4,16 @@ option(ONEGEN_BUILD_QT_WIDGET "Build the optional OneGen Qt widget target." OFF)
 option(ONEGEN_BUILD_PLAYGROUND_ADAPTER "Build the Playground GraphicsFrame adapter" OFF)
 option(ONEGEN_BUILD_PLAYGROUND_PLUGIN "Build the Playground device plugin" OFF)
 
+if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
+  set(ONEGEN_BUILD_WORKER ON)
+  set(ONEGEN_BUILD_QT_WIDGET ON)
+  set(ONEGEN_BUILD_PLAYGROUND_ADAPTER ON)
+endif()
+if(PROJECT_NAME STREQUAL "OneGen" AND PROJECT_IS_TOP_LEVEL AND
+    (ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_ADAPTER OR ONEGEN_BUILD_PLAYGROUND_PLUGIN))
+  find_package(PlaygroundPluginSDK 0.1 CONFIG REQUIRED)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
 include(FetchGenICam)
 
@@ -155,6 +165,9 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
 endif()
 
 if(ONEGEN_BUILD_QT_WIDGET)
+  if(ONEGEN_BUILD_TESTS)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+  endif()
   if(NOT Qt6_FOUND)
     message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires Qt 6.")
   endif()
@@ -197,6 +210,7 @@ if(ONEGEN_BUILD_QT_WIDGET)
       Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
       Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
+    set_target_properties(OneGenFeatureTreeTests PROPERTIES AUTOMOC ON)
     target_link_libraries(OneGenFeatureTreeTests PRIVATE OneGen::QtWidget OneGen::PlaygroundAdapter Qt6::Test)
     if(TARGET Resources::Resources)
       target_link_libraries(OneGenFeatureTreeTests PRIVATE Resources::Resources)
@@ -237,8 +251,8 @@ endif()
 if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
   if(NOT ONEGEN_BUILD_PLAYGROUND_ADAPTER OR NOT ONEGEN_BUILD_QT_WIDGET
       OR NOT TARGET Playground::DevicePlugin
-      OR NOT TARGET Resources::Resources OR NOT Qt6_FOUND)
-    message(FATAL_ERROR "ONEGEN_BUILD_PLAYGROUND_PLUGIN requires the adapter, OneGen::QtWidget, Playground::DevicePlugin, Resources::Resources, and Qt6::Widgets")
+      OR NOT TARGET Resources::Widgets OR NOT Qt6_FOUND)
+    message(FATAL_ERROR "ONEGEN_BUILD_PLAYGROUND_PLUGIN requires the adapter, OneGen::QtWidget, Playground::DevicePlugin, Resources::Widgets, and Qt6::Widgets")
   endif()
   find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
   add_library(OneGenPlugin MODULE
@@ -256,7 +270,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin")
   target_link_libraries(OneGenPlugin PRIVATE
     Playground::DevicePlugin OneGen::PlaygroundAdapter OneGen::QtWidget
-    Resources::Resources Qt6::Widgets Qt6::Concurrent)
+    Resources::Widgets Qt6::Widgets Qt6::Concurrent)
 
   set(_onegen_runtime_payload "${CMAKE_CURRENT_BINARY_DIR}/plugin-runtime")
   file(MAKE_DIRECTORY "${_onegen_runtime_payload}")
@@ -267,5 +281,18 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     PLAYGROUND_PLUGIN_RUNTIME_PAYLOAD_DIR "${_onegen_runtime_payload}"
     PLAYGROUND_PLUGIN_RUNTIME_DEPENDENCY_DEST "runtime"
     PLAYGROUND_PLUGIN_AUXILIARY_TARGETS OneGenWorker)
+  if(PROJECT_NAME STREQUAL "OneGen" AND PROJECT_IS_TOP_LEVEL)
+    if(APPLE)
+      set_target_properties(OneGenPlugin OneGenWorker PROPERTIES
+        BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "@loader_path/runtime;@executable_path/../Frameworks")
+    elseif(UNIX)
+      set_target_properties(OneGenPlugin OneGenWorker PROPERTIES
+        BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "$ORIGIN/runtime")
+    endif()
+    playground_sdk_package_plugin(OneGenPlugin
+      PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
+      ICON "${PlaygroundPluginSDK_ICON_DIR}/genicam.png"
+      AUXILIARY_TARGETS OneGenWorker RUNTIME_FILES ${ONEGEN_GENICAM_RUNTIME_FILES})
+  endif()
   message(STATUS "[OneGen] OneGenPlugin enabled.")
 endif()
