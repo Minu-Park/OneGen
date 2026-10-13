@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.3.0 (2026-10-13)
+
 - Allow the consumer's cancelled discovery wait to return promptly without destroying the shared producer scan or publishing a late session result. Producer scan lifetime remains joined before unload.
 
 - Retry an unchanged producer inventory through a fresh shared scan without resetting healthy workers. Retain discovered targets during retry progress and preserve connected/busy operation guards and session controls.
