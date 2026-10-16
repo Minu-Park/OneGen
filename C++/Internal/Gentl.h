@@ -69,7 +69,8 @@ struct Gentl {
   void load(const std::filesystem::path& cti);
   void close_tl();
   void unload();
-  [[noreturn]] void fail(const char* where) const;
+  /** Reports the failing operation's return code independently of optional SDK detail. */
+  [[noreturn]] void fail(const char* where, GenTL::GC_ERROR result) const;
   void check(GenTL::GC_ERROR err, const char* where) const;
 };
 

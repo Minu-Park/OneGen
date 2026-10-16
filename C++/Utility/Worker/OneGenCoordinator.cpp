@@ -339,6 +339,15 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
       Item item{cti};
       std::shared_ptr<Connection> worker;
       try {
+        // Only a new explicit discovery may replace an inactive or dead worker.
+        std::shared_ptr<Connection> previous;
+        {
+          std::lock_guard lock(mutex_);
+          if (const auto found = connections_.find(cti.string()); found != connections_.end())
+            previous = found->second;
+        }
+        if (previous && (!previous->alive() || previous->inactive()))
+          retire_failed_discovery(cti.string(), previous.get(), false);
         worker = connection(cti.string());
         item.interfaces = readVector<InterfaceInfo>(worker->request(Operation::ListInterfaces), readInterfaceInfo);
         const auto deadline = std::chrono::steady_clock::now() + probe_timeout_;
@@ -410,13 +419,14 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
   return result;
 }
 
-void Coordinator::retire_failed_discovery(const std::string& cti, Connection* expected)
+void Coordinator::retire_failed_discovery(const std::string& cti, Connection* expected, bool preserve_inactive)
 {
   std::shared_ptr<Connection> failed;
   {
     std::lock_guard lock(mutex_);
     const auto found = connections_.find(cti);
     if (found == connections_.end() || found->second.get() != expected) return;
+    if (preserve_inactive && found->second->alive() && found->second->inactive()) return;
     if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
                     [&](const auto& item) { return item.second.cti_path == cti; })
         || std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),

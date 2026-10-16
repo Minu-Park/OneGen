@@ -12,7 +12,7 @@
 
 namespace onegen::worker {
 
-inline constexpr std::uint32_t protocol_version = 13;
+inline constexpr std::uint32_t protocol_version = 14;
 inline constexpr std::uint32_t maximum_message_size = 256U * 1024U * 1024U;
 
 enum class Operation : std::uint8_t {
@@ -22,6 +22,7 @@ enum class Operation : std::uint8_t {
   ListInterfaces, InterfaceFeatures, InterfaceRead, InterfaceWrite, ReleaseInterfaces,
   ClaimInterface, ReleaseInterfaceClaim, OpenInterface, ProbeInterface, CloseInterface,
   ObserveNode, WriteNodeChecked,
+  ProducerInactive,
 };
 
 struct Message {

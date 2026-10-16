@@ -29,6 +29,23 @@ int main(int argc, char** argv)
 {
   QCoreApplication application(argc, argv);
   if (argc == 3 && std::string_view(argv[1]) == "--cti") return fakeWorker(argv[2]);
+  if (argc == 4 && std::string_view(argv[1]) == "--inactive-producer") {
+    onegen::worker::Connection connection(argv[2], argv[3]);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      bool rejected = false;
+      try { connection.request(onegen::worker::Operation::ListInterfaces); }
+      catch (const std::exception& error) {
+        const std::string text = error.what();
+        rejected = text.find("Producer inactive:") != std::string::npos
+            && text.find("GCInitLib failed (-1001)") != std::string::npos;
+      }
+      assert(rejected && connection.alive() && connection.inactive());
+    }
+    connection.close();
+    assert(!connection.alive());
+    std::cout << "Inactive producer: explicit initialization error; worker remained alive for three requests.\n";
+    return 0;
+  }
   const bool profile_producers = argc >= 4 && std::string_view(argv[1]) == "--profile-producers";
   if (profile_producers || ((argc == 4 || argc == 5) && std::string_view(argv[1]) == "--profile-discovery")) {
     try {
@@ -538,6 +555,29 @@ int main(int argc, char** argv)
     for (std::string line; std::getline(file, line);) ++count;
     return count;
   };
+  // Initialization refusal stays inactive; a dead worker also waits for explicit retry.
+  for (const auto name : {"Inactive", "CrashOnce"}) {
+    const auto directory = root / name;
+    std::filesystem::create_directories(directory);
+    const auto cti = directory / (std::string(name) + ".cti");
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator coordinator(argv[0], directory, 100ms);
+    const auto failed = coordinator.discover();
+    assert(failed.completed && failed.failures.size() == 1 && failed.devices.empty());
+    if (std::string_view(name) == "Inactive")
+      assert(failed.failures.front().find("Producer inactive:") != std::string::npos);
+    else assert(failed.failures.front().find("process exit code 71") != std::string::npos);
+    assert(line_count(cti.string() + ".starts") == 1);
+    std::this_thread::sleep_for(100ms);
+    assert(line_count(cti.string() + ".starts") == 1); // No automatic restart.
+    std::ofstream(cti.string() + ".ready").put('\0');
+    const auto recovered = coordinator.discover();
+    assert(recovered.failures.empty() && recovered.devices.size() == 1);
+    assert(line_count(cti.string() + ".starts") == 2);
+    assert(coordinator.discover().failures.empty());
+    assert(line_count(cti.string() + ".starts") == 2); // Healthy worker remains shared.
+    coordinator.shutdown();
+  }
   // Failed Interfaces are reported once without dropping devices from surviving Interfaces.
   for (const auto name : {"ProbeFail", "PartialProbe"}) {
     const auto directory = root / name;

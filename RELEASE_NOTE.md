@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Preserve failed GenTL initialization codes without querying or closing an uninitialized producer runtime; clear loaded symbols before a subsequent attempt.
+- Keep a failed producer's worker alive in an explicit inactive state. Repeated requests report the original initialization error; only explicit discovery retry replaces an inactive or dead worker, without an automatic restart loop.
+- Preserve each failing GenTL operation's returned code separately from optional SDK error detail. Worker failures before an API return report the process exit code instead. Worker/client protocol 14 adds the inactive response and must be staged together.
 
 ## v0.3.1 (2026-10-15)
 

@@ -12,6 +12,7 @@
 #include <thread>
 #include <limits>
 #include <cmath>
+#include <cstdlib>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -20,6 +21,9 @@
 inline int fakeWorker(const std::filesystem::path& cti)
 {
   std::ofstream(cti.string() + ".starts", std::ios::app) << "start\n";
+  const bool inactive = cti.stem() == "Inactive" && !std::filesystem::exists(cti.string() + ".ready");
+  if (cti.stem() == "CrashOnce" && !std::filesystem::exists(cti.string() + ".ready"))
+    std::_Exit(71);
   using namespace onegen::worker;
 #ifdef _WIN32
   _setmode(_fileno(stdin), _O_BINARY);
@@ -128,6 +132,11 @@ inline int fakeWorker(const std::filesystem::path& cti)
     std::vector<std::byte> bytes(size);
     if (!std::cin.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) return 1;
     const auto request = decode(bytes);
+    if (inactive && request.operation != Operation::Shutdown) {
+      transmit({Operation::ProducerInactive, request.id, false,
+                "Producer inactive: GCInitLib failed (-1001)", {}, request.session});
+      continue;
+    }
     if (request.operation == Operation::Close && cti.stem() == "ApiCloseFailBoard" && !close_failure_delivered) {
       close_failure_delivered = true;
       transmit({request.operation, request.id, false, "Close: test refusal", {}, request.session});

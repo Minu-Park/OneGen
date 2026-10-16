@@ -131,7 +131,7 @@ private:
   friend class Lease;
   std::shared_ptr<Connection> connection(const std::string& cti, const std::string& device = {});
   /** Retires a failed discovery worker only when no Interface or Device is using or opening it. */
-  void retire_failed_discovery(const std::string& cti, Connection* expected);
+  void retire_failed_discovery(const std::string& cti, Connection* expected, bool preserve_inactive = true);
   /** Retains successfully closed workers for rediscovery-free reconnects. */
   void release(const std::string& identity, const std::string& cti, bool reusable,
                Connection* dying = nullptr, std::uint32_t session = 0);

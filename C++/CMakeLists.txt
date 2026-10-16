@@ -164,6 +164,8 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
       $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
       $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
     add_test(NAME test_worker COMMAND test_worker $<TARGET_FILE:OneGenWorker>)
+    add_test(NAME test_worker_inactive_producer COMMAND test_worker --inactive-producer
+      $<TARGET_FILE:OneGenWorker> $<TARGET_FILE:FailingInitProducer>)
     add_test(NAME test_worker_package COMMAND ${CMAKE_COMMAND}
       "-DWORKER_FILE=$<TARGET_FILE:OneGenWorker>"
       "-DCMAKE_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
@@ -171,7 +173,7 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
     if(ONEGEN_GENICAM_RUNTIME_FILES)
       list(GET ONEGEN_GENICAM_RUNTIME_FILES 0 _onegen_runtime_file)
       get_filename_component(_onegen_runtime_dir "${_onegen_runtime_file}" DIRECTORY)
-      set_tests_properties(test_worker PROPERTIES ENVIRONMENT_MODIFICATION
+      set_tests_properties(test_worker test_worker_inactive_producer PROPERTIES ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_runtime_dir}")
     endif()
   endif()

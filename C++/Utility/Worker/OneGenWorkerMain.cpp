@@ -146,7 +146,13 @@ int main(int argc, char** argv)
   try {
     const auto cti = ctiArgument(argc, argv);
     onegen::OneGen system;
-    system.loadCti(cti);
+    std::string inactive_error;
+    try { system.loadCti(cti); }
+    catch (const std::exception& error) {
+      inactive_error = std::string("Producer inactive: ") + error.what()
+          + ". Retry discovery explicitly after correcting the producer configuration.";
+      std::cerr << inactive_error << '\n';
+    }
     if (std::any_of(argv + 1, argv + argc, [](const char* arg) {
           return std::string_view(arg) == "--resource-claims";
         })) {
@@ -179,6 +185,14 @@ int main(int argc, char** argv)
       if (!deferred_requests.empty()) {
         request = std::move(deferred_requests.front());
         deferred_requests.pop();
+      }
+      if (!inactive_error.empty()) {
+        if (request.operation == Operation::Shutdown) {
+          send({request.operation, request.id, true, {}, {}, request.session});
+          break;
+        }
+        send({Operation::ProducerInactive, request.id, false, inactive_error, {}, request.session});
+        continue;
       }
       auto& session_ptr = sessions[request.session];
       if (!session_ptr) session_ptr = std::make_unique<CameraSession>();

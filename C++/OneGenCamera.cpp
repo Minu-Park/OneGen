@@ -470,7 +470,7 @@ void Camera::open_impl(std::string_view query, std::string_view producer, std::s
       if (err == GenTL::GC_ERR_SUCCESS) break;
     }
   }
-  if (err != GenTL::GC_ERR_SUCCESS) g.fail("IFOpenDevice");
+  if (err != GenTL::GC_ERR_SUCCESS) g.fail("IFOpenDevice", err);
   timing.mark("IFOpenDevice");
 
   try {
@@ -775,7 +775,7 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   size_t size = sizeof(data);
   auto err = g->EventGetData(hev, &data, &size, timeout_ms);
   if (err == GenTL::GC_ERR_TIMEOUT) throw Error("grab timeout");
-  if (err != GenTL::GC_ERR_SUCCESS) g->fail("EventGetData");
+  if (err != GenTL::GC_ERR_SUCCESS) g->fail("EventGetData", err);
   if (!data.BufferHandle) throw Error("grab: null buffer handle");
   BufferRequeue requeue(g, hds, data.BufferHandle);
 
@@ -1019,7 +1019,7 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   if (f.parts.empty()) copy_single_payload(f, base, filled);
   const auto queue_error = g->DSQueueBuffer(hds, data.BufferHandle);
   requeue.release();
-  if (queue_error != GenTL::GC_ERR_SUCCESS) g->fail("DSQueueBuffer");
+  if (queue_error != GenTL::GC_ERR_SUCCESS) g->fail("DSQueueBuffer", queue_error);
   return f;
 }
 

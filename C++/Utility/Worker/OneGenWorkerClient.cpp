@@ -65,6 +65,7 @@ struct Connection::Impl {
   bool started = false;
   std::string start_error;
   std::string close_error;
+  bool inactive = false;
   struct Callbacks { FrameFn frame; ErrorFn error; InvalidateFn invalidate; };
   std::map<std::uint32_t, Callbacks> callbacks;
   ClaimFn claim;
@@ -104,6 +105,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
   });
   impl_->io = std::thread([this] {
     QProcess process;
+    qint64 process_id = 0;
     process.setProcessChannelMode(QProcess::SeparateChannels);
     auto environment = QProcessEnvironment::systemEnvironment();
     const auto separator = QDir::listSeparator();
@@ -124,6 +126,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         impl_->start_error = process.errorString().toStdString();
         impl_->running = false;
       } else {
+        process_id = process.processId();
         qInfo().noquote() << QStringLiteral("[GenICam] worker process started: pid=%1 cti=%2")
                                .arg(process.processId())
                                .arg(QString::fromStdString(impl_->cti.string()));
@@ -203,6 +206,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
             if (callback) callback(module, name);
           } else {
             std::lock_guard lock(impl_->mutex);
+            if (message.operation == Operation::ProducerInactive) impl_->inactive = true;
             impl_->replies[message.id] = std::move(message);
             impl_->cv.notify_all();
           }
@@ -238,13 +242,14 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
       const auto crashed = process.exitStatus() == QProcess::CrashExit;
       qWarning().noquote()
           << QStringLiteral("[GenICam] worker process exited: pid=%1 code=%2 crashed=%3 cti=%4")
-                 .arg(process.processId())
+                 .arg(process_id)
                  .arg(process.exitCode())
                  .arg(crashed ? QStringLiteral("yes") : QStringLiteral("no"))
                  .arg(QString::fromStdString(impl_->cti.string()));
       std::lock_guard lock(impl_->mutex);
       if (impl_->close_error.empty()) {
-        impl_->close_error = crashed ? "Worker process crashed." : "Worker process exited.";
+        impl_->close_error = crashed ? "Worker process crashed" : "Worker process exited";
+        impl_->close_error += " (process exit code " + std::to_string(process.exitCode()) + ").";
         if (!last_error.isEmpty()) {
           impl_->close_error += ' ';
           impl_->close_error += last_error.toStdString();
@@ -321,6 +326,12 @@ bool Connection::alive() const
 {
   std::lock_guard lock(impl_->mutex);
   return impl_->running;
+}
+
+bool Connection::inactive() const
+{
+  std::lock_guard lock(impl_->mutex);
+  return impl_->inactive;
 }
 
 void Connection::set_frame_callback(FrameFn callback, std::uint32_t session)

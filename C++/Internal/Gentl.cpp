@@ -53,18 +53,23 @@ void* sym(void* h, const char* name) {
 
 }  // namespace
 
-void Gentl::fail(const char* where) const {
+void Gentl::fail(const char* where, GenTL::GC_ERROR result) const {
+  // Preserve the primary failure even if a producer faults during diagnostic lookup.
+  stage_log("GenTL operation failed: operation=%s code=%d", where, static_cast<int>(result));
   char buf[1024] = {};
   size_t n = sizeof(buf);
   GenTL::GC_ERROR code = GenTL::GC_ERR_ERROR;
-  if (GCGetLastError) GCGetLastError(&code, buf, &n);
+  const auto detail_result = GCGetLastError ? GCGetLastError(&code, buf, &n) : GenTL::GC_ERR_NOT_IMPLEMENTED;
+  buf[sizeof(buf) - 1] = '\0';
   std::ostringstream o;
-  o << where << ": " << buf << " (" << code << ")";
+  o << where << " failed (" << result << ")";
+  if (detail_result == GenTL::GC_ERR_SUCCESS) o << ": " << buf;
+  else o << "; error detail unavailable (" << detail_result << ")";
   throw Error(o.str());
 }
 
 void Gentl::check(GenTL::GC_ERROR err, const char* where) const {
-  if (err != GenTL::GC_ERR_SUCCESS) fail(where);
+  if (err != GenTL::GC_ERR_SUCCESS) fail(where, err);
 }
 
 void Gentl::load(const std::filesystem::path& cti) {
