@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve failed GenTL initialization codes without querying or closing an uninitialized producer runtime; clear loaded symbols before a subsequent attempt.
+
 ## v0.3.1 (2026-10-15)
 
 - Publish the independently built device package with installed SDK validation.

@@ -29,11 +29,17 @@ int main(int argc, char** argv)
 {
   QCoreApplication application(argc, argv);
   if (argc == 3 && std::string_view(argv[1]) == "--cti") return fakeWorker(argv[2]);
-  if ((argc == 4 || argc == 5) && std::string_view(argv[1]) == "--profile-discovery") {
+  const bool profile_producers = argc >= 4 && std::string_view(argv[1]) == "--profile-producers";
+  if (profile_producers || ((argc == 4 || argc == 5) && std::string_view(argv[1]) == "--profile-discovery")) {
     try {
-      const auto budget = argc == 5 ? std::chrono::milliseconds{std::stoll(argv[4])}
+      const auto budget = !profile_producers && argc == 5 ? std::chrono::milliseconds{std::stoll(argv[4])}
                                     : std::chrono::milliseconds{1000};
-      onegen::worker::Coordinator coordinator(argv[2], argv[3], budget);
+      onegen::worker::Coordinator coordinator(argv[2], profile_producers ? "" : argv[3], budget);
+      if (profile_producers) {
+        std::vector<std::filesystem::path> files;
+        for (int index = 3; index < argc; ++index) files.emplace_back(argv[index]);
+        assert(coordinator.set_producer_files(std::move(files)));
+      }
       const auto result = coordinator.discover();
       std::cout << "Discovery: producers=" << result.finished_producers << '/' << result.total_producers
                 << " interfaces=" << result.interfaces.size() << " devices=" << result.devices.size()

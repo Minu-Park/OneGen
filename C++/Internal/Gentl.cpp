@@ -90,7 +90,14 @@ void Gentl::load(const std::filesystem::path& cti) {
   DSGetBufferChunkData = reinterpret_cast<decltype(DSGetBufferChunkData)>(
       sym(lib, "DSGetBufferChunkData"));
 
-  check(GCInitLib(), "GCInitLib");
+  const auto init_result = GCInitLib();
+  if (init_result != GenTL::GC_ERR_SUCCESS) {
+    // A failed initialization does not establish a usable producer runtime.
+    // Preserve its return code without calling GCGetLastError or GCCloseLib.
+    unload_lib(lib);
+    *this = Gentl{};
+    throw Error("GCInitLib failed (" + std::to_string(init_result) + ")");
+  }
   const auto initialized = std::chrono::steady_clock::now();
   EventGetInfo = reinterpret_cast<decltype(EventGetInfo)>(sym(lib, "EventGetInfo"));
   EventGetDataInfo = reinterpret_cast<decltype(EventGetDataInfo)>(sym(lib, "EventGetDataInfo"));

@@ -44,6 +44,19 @@ if(UNIX)
 endif()
 
 if(ONEGEN_BUILD_TESTS)
+  add_library(FailingInitProducer SHARED Tests/FailingInitProducer.cpp)
+  target_compile_features(FailingInitProducer PRIVATE cxx_std_20)
+  target_include_directories(FailingInitProducer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(FailingInitProducer PRIVATE genicam::genicam)
+  set_target_properties(FailingInitProducer PROPERTIES PREFIX "" SUFFIX ".cti")
+  add_executable(test_gentl_init Tests/test_gentl_init.cpp)
+  target_link_libraries(test_gentl_init PRIVATE onegen)
+  add_dependencies(test_gentl_init FailingInitProducer)
+  add_test(NAME test_gentl_init COMMAND test_gentl_init $<TARGET_FILE:FailingInitProducer>)
+  target_compile_options(test_gentl_init PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+
   add_executable(test_open_query Tests/test_open_query.cpp)
   target_link_libraries(test_open_query PRIVATE onegen)
   add_test(NAME test_open_query COMMAND test_open_query)
@@ -66,7 +79,7 @@ if(ONEGEN_BUILD_TESTS)
   if(ONEGEN_GENICAM_RUNTIME_FILES)
     list(GET ONEGEN_GENICAM_RUNTIME_FILES 0 _onegen_core_runtime_file)
     get_filename_component(_onegen_core_runtime_dir "${_onegen_core_runtime_file}" DIRECTORY)
-    set_tests_properties(test_open_query test_node PROPERTIES ENVIRONMENT_MODIFICATION
+    set_tests_properties(test_open_query test_node test_gentl_init PROPERTIES ENVIRONMENT_MODIFICATION
       "PATH=path_list_prepend:${_onegen_core_runtime_dir}")
   endif()
 
