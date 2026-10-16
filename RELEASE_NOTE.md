@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased
+## v0.3.2 (2026-10-16)
 
 - Preserve failed GenTL initialization codes without querying or closing an uninitialized producer runtime; clear loaded symbols before a subsequent attempt.
 - Keep a failed producer's worker alive in an explicit inactive state. Repeated requests report the original initialization error; only explicit discovery retry replaces an inactive or dead worker, without an automatic restart loop.
