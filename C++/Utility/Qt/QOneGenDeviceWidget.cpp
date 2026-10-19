@@ -56,7 +56,7 @@ QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordin
   connect_button_->setToolTip(QStringLiteral("Connect / Disconnect Interface"));
   refresh_button_ = new QToolButton;
   refresh_button_->setObjectName(QStringLiteral("OneGenDiscoveryRefresh"));
-  refresh_button_->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-refresh-48.png")));
+  refresh_button_->setIcon(QIcon(QStringLiteral(":/Resources/icon/refresh-48.png")));
   refresh_button_->setToolTip(QStringLiteral("Refresh"));
   for (auto* button : {connect_button_, refresh_button_}) {
     button->setIconSize(QSize(16, 16));

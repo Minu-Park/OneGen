@@ -101,7 +101,7 @@ QOneGenWidget::QOneGenWidget(
   streams_box_->setEnabled(false);
 
   refresh_button_ = new QToolButton;
-  refresh_button_->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-refresh-48.png")));
+  refresh_button_->setIcon(QIcon(QStringLiteral(":/Resources/icon/refresh-48.png")));
   refresh_button_->setIconSize(QSize(16, 16));
   refresh_button_->setToolButtonStyle(Qt::ToolButtonIconOnly);
   refresh_button_->setToolTip(QStringLiteral("Refresh"));
@@ -119,7 +119,7 @@ QOneGenWidget::QOneGenWidget(
   connect_button_->setToolTip(QStringLiteral("Connect / Disconnect"));
 
   grab_one_button_ = new QToolButton;
-  grab_one_button_->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
+  grab_one_button_->setIcon(QIcon(QStringLiteral(":/Resources/icon/camera-48.png")));
   grab_one_button_->setIconSize(QSize(16, 16));
   grab_one_button_->setToolButtonStyle(Qt::ToolButtonIconOnly);
   grab_one_button_->setToolTip(QStringLiteral("Grab One"));
@@ -127,9 +127,9 @@ QOneGenWidget::QOneGenWidget(
 
   grab_live_button_ = new QToolButton;
   QIcon live_icon;
-  live_icon.addFile(QStringLiteral(":/Resources/Icons/icons8-cameras-48.png"), {},
+  live_icon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), {},
                     QIcon::Normal, QIcon::Off);
-  live_icon.addFile(QStringLiteral(":/Resources/Icons/icons8-pause-48.png"), {},
+  live_icon.addFile(QStringLiteral(":/Resources/icon/pause-48.png"), {},
                     QIcon::Normal, QIcon::On);
   grab_live_button_->setIcon(live_icon);
   grab_live_button_->setIconSize(QSize(16, 16));

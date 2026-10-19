@@ -1,5 +1,9 @@
 # Release Notes
 
+## Unreleased
+
+- Use the shared refresh, single-grab, and live glyphs on the device toolbar.
+
 ## v0.3.2 (2026-10-16)
 
 - Preserve failed GenTL initialization codes without querying or closing an uninitialized producer runtime; clear loaded symbols before a subsequent attempt.
