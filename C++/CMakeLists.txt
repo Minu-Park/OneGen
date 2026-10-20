@@ -310,4 +310,18 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
       AUXILIARY_TARGETS OneGenWorker RUNTIME_FILES ${ONEGEN_GENICAM_RUNTIME_FILES})
   endif()
   message(STATUS "[OneGen] OneGenPlugin enabled.")
+  if(ONEGEN_BUILD_TESTS)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    qt_add_executable(test_plugin_discovery Tests/test_plugin_discovery.cpp)
+    set_target_properties(test_plugin_discovery PROPERTIES AUTOMOC ON)
+    target_link_libraries(test_plugin_discovery PRIVATE Playground::DevicePlugin Qt6::Widgets Qt6::Test)
+    target_compile_definitions(test_plugin_discovery PRIVATE
+      ONEGEN_TEST_PLUGIN="$<TARGET_FILE:OneGenPlugin>"
+      ONEGEN_TEST_PEER="$<TARGET_FILE:test_worker>")
+    add_dependencies(test_plugin_discovery OneGenPlugin test_worker)
+    add_test(NAME test_plugin_discovery COMMAND test_plugin_discovery)
+    set_tests_properties(test_plugin_discovery PROPERTIES TIMEOUT 30
+      ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+  endif()
 endif()

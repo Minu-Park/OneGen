@@ -217,7 +217,7 @@ int main(int argc, char** argv)
       }
       assert(rejected);
       assert(failed.status().phase == onegen::worker::StartupDiscovery::Phase::Failed);
-      assert(failed.status().detail == "Synthetic startup failure");
+      assert(failed.status().detail.find("Synthetic startup failure") != std::string::npos);
     }
   }
 
@@ -248,7 +248,7 @@ int main(int argc, char** argv)
       scan.finish({});
       const auto result = scan.status();
       assert(result.phase == (partial ? Scan::Phase::Partial : Scan::Phase::Failed));
-      assert(result.detail == "synthetic producer failure");
+      assert(result.detail.find("synthetic producer failure") != std::string::npos);
     }
     assert(phases == std::vector<Scan::Phase>({Scan::Phase::Running,
         partial ? Scan::Phase::Partial : Scan::Phase::Failed, Scan::Phase::Stopping, Scan::Phase::Stopped}));
@@ -343,6 +343,7 @@ int main(int argc, char** argv)
   std::size_t updates = 0;
   const auto caller = std::this_thread::get_id();
   const auto discovery = coordinator.discover([&](const auto& update) {
+    if (update.finished_producers == 0) return;
     ++updates;
     assert(std::this_thread::get_id() == caller);
     assert(update.finished_producers == updates);
@@ -357,11 +358,12 @@ int main(int argc, char** argv)
   onegen::worker::Coordinator progressive(argv[0], root, std::chrono::seconds{2});
   const auto previous_handler = qInstallMessageHandler(
       [](QtMsgType type, const QMessageLogContext&, const QString& message) {
-        if (type == QtWarningMsg && message == QStringLiteral("[GenICam] Interface XML test failure"))
+        if (type == QtInfoMsg && message == QStringLiteral("[GenICam] discovery diagnostic: Interface XML test failure"))
           ++startup_diagnostics;
       });
   std::size_t progressive_updates = 0;
   auto complete = progressive.discover([&](const auto& update) {
+    if (update.finished_producers == 0) return;
     ++progressive_updates;
     if (progressive_updates == 1) {
       assert(update.finished_producers == 1);

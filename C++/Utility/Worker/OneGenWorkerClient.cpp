@@ -8,6 +8,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <condition_variable>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <queue>
@@ -66,6 +67,7 @@ struct Connection::Impl {
   std::string start_error;
   std::string close_error;
   bool inactive = false;
+  std::atomic<bool> discovery_log{true};
   struct Callbacks { FrameFn frame; ErrorFn error; InvalidateFn invalidate; };
   std::map<std::uint32_t, Callbacks> callbacks;
   ClaimFn claim;
@@ -171,6 +173,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         buffer.append(process.readAllStandardOutput());
         const auto stderr_bytes = process.readAllStandardError();
         diagnostic.append(stderr_bytes);
+        log_forwarder.setDiscoveryMode(impl_->discovery_log.load());
         log_forwarder.append(stderr_bytes);
         if (diagnostic.size() > 65536) diagnostic.remove(0, diagnostic.size() - 65536);
         Message message;
@@ -196,6 +199,8 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
             ErrorFn callback;
             { std::lock_guard lock(impl_->mutex); callback = impl_->callbacks[message.session].error; }
             if (callback) callback(message.error);
+            else if (impl_->discovery_log.load())
+              qInfo().noquote() << "[GenICam] discovery diagnostic:" << QString::fromStdString(message.error);
             else qWarning().noquote() << "[GenICam]" << QString::fromStdString(message.error);
           } else if (message.operation == Operation::Invalidate) {
             Reader reader(message.payload);
@@ -230,6 +235,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
     {
       const auto final_diagnostics = process.readAllStandardError();
       diagnostic.append(final_diagnostics);
+      log_forwarder.setDiscoveryMode(impl_->discovery_log.load());
       log_forwarder.append(final_diagnostics);
       log_forwarder.finish();
       QString last_error;
@@ -240,7 +246,8 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         last_error = line;
       }
       const auto crashed = process.exitStatus() == QProcess::CrashExit;
-      qWarning().noquote()
+      auto exit_log = impl_->discovery_log.load() ? qInfo() : qWarning();
+      exit_log.noquote()
           << QStringLiteral("[GenICam] worker process exited: pid=%1 code=%2 crashed=%3 cti=%4")
                  .arg(process_id)
                  .arg(process.exitCode())
@@ -305,6 +312,10 @@ std::vector<std::byte> Connection::request(Operation operation, std::vector<std:
                                    : impl_->close_error);
     }
     id = impl_->next_id++;
+    // Once a device/interface is opened, retain operational warning/error levels.
+    // Probe-only workers report search failures through the terminal scan log.
+    if (operation == Operation::Open || operation == Operation::OpenInterface)
+      impl_->discovery_log = false;
     impl_->outgoing.push({operation, id, true, {}, std::move(payload), session});
   }
   std::unique_lock lock(impl_->mutex);

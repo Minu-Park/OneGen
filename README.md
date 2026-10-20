@@ -48,11 +48,23 @@ CMake retains discovered package directories in its cache.
 
 ## Runtime
 
+The consumer package declares on-demand discovery. Loading its metadata does not
+start workers. Explicit session discovery starts one shared scan and waits for
+the first camera or scan completion, with cooperative caller cancellation.
+Copied running status includes checked/total CTIs and camera count for consumer
+loading views. Remaining producers continue after the first camera is available;
+later controls replay the retained scan. Full completion records each producer's
+outcome and original failure reason at INFO. Discovery-only worker diagnostics
+retain their original text at INFO; device/interface operations retain their
+normal warning/error levels.
+
 Pass a vendor CTI file to `OneGen::loadCti()`, then enumerate devices or open a
 camera by ID, user-defined name, IP address, serial number, display name, or
 model. Loading a CTI executes vendor code, so only use trusted producers.
-The Playground plugin discovers `.cti` entries from `GENICAM_GENTL64_PATH` or
-`GENICAM_GENTL32_PATH`, without vendor-specific paths or filenames. Discovery starts one
+Standalone discovery resolves `.cti` entries from `GENICAM_GENTL64_PATH` or
+`GENICAM_GENTL32_PATH`, without vendor-specific paths or filenames. The consumer
+adapter uses the exact injected producer inventory; an empty list never falls
+back to ambient paths. Discovery starts one
 `OneGenWorker` process per CTI; the first camera adopts that worker, and additional
 cameras use separate workers so Open cannot close another camera. Successfully
 closed camera workers retain their discovery caches for reconnect. Each worker preserves the producer install directory for

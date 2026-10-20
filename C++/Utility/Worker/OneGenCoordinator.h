@@ -23,6 +23,8 @@ struct DiscoveryResult {
   std::vector<DeviceInfo> devices;
   std::vector<InterfaceInfo> interfaces;
   std::vector<std::string> failures;
+  /** @brief Completed producer outcomes retained for the terminal scan report. */
+  std::vector<std::string> producer_results;
   bool completed = false;
   std::size_t finished_producers = 0;
   std::size_t total_producers = 0;

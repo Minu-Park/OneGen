@@ -329,6 +329,7 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
   }
   result.total_producers = ctis.size();
   result.completed = ctis.empty();
+  if (progress) progress(result);
   struct Item { std::filesystem::path cti; std::vector<DeviceInfo> devices; std::string error; std::vector<InterfaceInfo> interfaces; };
   std::mutex completed_mutex;
   std::condition_variable completed_cv;
@@ -398,11 +399,11 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
     { std::lock_guard lock(mutex_); interface_inventory_[item.cti.string()] = item.interfaces; }
     result.completed = true;
     ++result.finished_producers;
-    qDebug().noquote() << QStringLiteral("[GenICam] producer search result: cti=%1 cameras=%2 status=%3 detail=%4")
+    result.producer_results.push_back(QStringLiteral("cti=%1 cameras=%2 status=%3 detail=%4")
         .arg(QString::fromStdString(item.cti.string())).arg(item.devices.size())
         .arg(item.error.empty() ? (item.devices.empty() ? QStringLiteral("no connected camera") : QStringLiteral("available"))
                               : (item.devices.empty() ? QStringLiteral("search failed") : QStringLiteral("partial result")))
-        .arg(QString::fromStdString(item.error));
+        .arg(item.error.empty() ? QStringLiteral("scan completed") : QString::fromStdString(item.error)).toStdString());
     for (auto& device : item.devices) result.devices.push_back(std::move(device));
     if (!item.error.empty()) {
       result.failures.push_back(item.cti.string() + ": " + item.error);

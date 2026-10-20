@@ -74,6 +74,17 @@ int main(int argc, char** argv)
     assert(records.back().text.contains(QString::fromUtf8(line)));
     assert(records.back().text.endsWith(QStringLiteral(" cti=producer.cti")));
   }
+  // Discovery retains failure text without activating warning/error UI in a consumer.
+  forwarder.setDiscoveryMode(true);
+  for (const auto& line : {QByteArray("[GenICam] [WARN] init failed rc=-1001"), QByteArray("ERROR: vendor init failed")}) {
+    forwarder.append(line + '\n');
+    assert(records.back().type == QtInfoMsg);
+    assert(records.back().text.startsWith("[GenICam] discovery diagnostic: "));
+    assert(records.back().text.contains(QString::fromUtf8(line)));
+  }
+  forwarder.setDiscoveryMode(false);
+  forwarder.append("[GenICam] [WARN] acquisition failed\n");
+  assert(records.back().type == QtWarningMsg);
   qInstallMessageHandler(handler);
   std::cout << "Stage serialization and worker diagnostic forwarding passed.\n";
 }

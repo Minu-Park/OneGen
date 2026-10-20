@@ -272,7 +272,7 @@ QOneGenWidget::QOneGenWidget(
     const auto result = discovery_watcher_.result();
     if (result.error.isEmpty()) updateDiscoveryDevices(result.devices);
     if (!result.error.isEmpty())
-      qWarning().noquote() << QStringLiteral("[GenICam] discovery failed: %1").arg(result.error);
+      qInfo().noquote() << QStringLiteral("[GenICam] discovery failed: %1").arg(result.error);
     setOperationActive(operation_watcher_.isRunning());
   });
   for (const auto& device : devices_) {

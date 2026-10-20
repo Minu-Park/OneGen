@@ -68,14 +68,24 @@ public:
   /** @brief Copies the scan phase and failure detail without waiting for completion. */
   Status status() const {
     std::lock_guard lock(mutex_);
-    return status_;
+    auto result = status_;
+    if (result.phase == Phase::Running || result.phase == Phase::Succeeded
+        || result.phase == Phase::Partial || result.phase == Phase::Failed) {
+      const auto counts = "CTIs checked: " + std::to_string(latest_.finished_producers) + " / "
+          + std::to_string(latest_.total_producers) + " | Cameras found: "
+          + std::to_string(latest_.devices.size());
+      result.detail = (result.phase == Phase::Running ? "Searching cameras...\n" : "Camera search completed.\n")
+          + counts + (result.detail.empty() ? "" : "\n" + result.detail);
+    }
+    return result;
   }
 
-  /** Returns the first available snapshot, waiting at most ten seconds for a camera. */
+  /** @brief Waits for a camera or terminal scan; a zero timeout waits until completion or cancellation. */
   std::vector<DeviceInfo> waitForCamera(
       std::chrono::milliseconds timeout = std::chrono::seconds{10},
       std::function<bool()> cancelled = {}) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    const auto deadline = timeout.count() == 0 ? std::chrono::steady_clock::time_point::max()
+        : std::chrono::steady_clock::now() + timeout;
     std::unique_lock lock(mutex_);
     while (latest_.devices.empty() && !finishedLocked()) {
       if (cancelled && cancelled()) throw std::runtime_error("Device discovery was cancelled.");

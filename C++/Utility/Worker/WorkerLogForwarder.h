@@ -13,6 +13,8 @@ class WorkerLogForwarder {
 public:
   /** @brief Associates forwarded diagnostics with their producer. */
   explicit WorkerLogForwarder(QString cti) : cti_(std::move(cti)) {}
+  /** @brief Records scan diagnostics as informational text, retaining the original producer severity in the body. */
+  void setDiscoveryMode(bool enabled) { discovery_ = enabled; }
 
   /** @brief Accepts fragmented UTF-8 diagnostics and forwards complete lines. */
   void append(const QByteArray& bytes) {
@@ -35,6 +37,11 @@ private:
   void forward(QByteArray line) const {
     if (line.endsWith('\r')) line.chop(1);
     if (line.isEmpty()) return;
+    if (discovery_) {
+      qInfo().noquote() << QStringLiteral("[GenICam] discovery diagnostic: %1 cti=%2")
+          .arg(QString::fromUtf8(line), cti_);
+      return;
+    }
     const bool known = line.startsWith("[GenICam]");
     const auto header = known ? line.mid(9).trimmed() : QByteArray{};
     const QString message = (known ? QString() : QStringLiteral("[GenICam/Producer] "))
@@ -63,6 +70,7 @@ private:
 
   QString cti_;
   QByteArray pending_;
+  bool discovery_ = false;
 };
 
 } // namespace onegen::worker

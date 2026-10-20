@@ -102,29 +102,30 @@ std::vector<onegen::DeviceInfo> discover(
 {
   if (!coordinator) throw std::runtime_error("GenICam discovery is shutting down.");
   const auto started = std::chrono::steady_clock::now();
-  auto last_report = started;
   qInfo().noquote() << QStringLiteral("[GenICam] camera search started with consumer-provided producers");
-  const auto result = coordinator->discover([&](const auto& update) {
-    if (progress) progress(update);
-    const auto now = std::chrono::steady_clock::now();
-    if (update.finished_producers < update.total_producers && now - last_report >= std::chrono::seconds{5}) {
-      last_report = now;
-      qInfo().noquote() << QStringLiteral("[GenICam] camera search in progress: %1/%2 producers checked, %3 camera(s) found, elapsed=%4 s")
-          .arg(update.finished_producers).arg(update.total_producers).arg(update.devices.size())
-          .arg(std::chrono::duration_cast<std::chrono::seconds>(now - started).count());
-    }
-  });
-  qInfo().noquote() << QStringLiteral("[GenICam] camera search completed: %1 camera(s), %2/%3 producers checked, %4 producer(s) with search failures, elapsed=%5 ms%6")
+  onegen::worker::DiscoveryResult result;
+  try {
+    result = coordinator->discover(std::move(progress));
+  } catch (const std::exception& error) {
+    qInfo().noquote() << QStringLiteral("[GenICam] camera search completed: status=failed reason=%1")
+        .arg(QString::fromLocal8Bit(error.what()));
+    throw;
+  } catch (...) {
+    qInfo().noquote() << "[GenICam] camera search completed: status=failed reason=unknown discovery exception";
+    throw;
+  }
+  for (const auto& producer : result.producer_results)
+    qInfo().noquote() << "[GenICam] producer search result:" << QString::fromStdString(producer);
+  const auto outcome = result.failures.empty() ? QStringLiteral("succeeded")
+      : result.devices.empty() && result.failures.size() == result.total_producers
+          ? QStringLiteral("failed") : QStringLiteral("partial");
+  qInfo().noquote() << QStringLiteral("[GenICam] camera search completed: status=%7, %1 camera(s), %2/%3 producers checked, %4 producer(s) with search failures, elapsed=%5 ms%6")
       .arg(result.devices.size()).arg(result.finished_producers).arg(result.total_producers)
       .arg(result.failures.size())
       .arg(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count())
-      .arg(result.devices.empty() ? QStringLiteral("; no connected camera found") : QString{});
-  if (!result.failures.empty()) {
-    QStringList details;
-    for (const auto& failure : result.failures) details.append(QString::fromStdString(failure));
-    qWarning().noquote() << QStringLiteral("[GenICam] producer search failures; available results remain usable. Details:\n%1")
-        .arg(details.join(QLatin1Char('\n')));
-  }
+      .arg(result.total_producers == 0 ? QStringLiteral("; no configured CTI producers")
+          : result.devices.empty() ? QStringLiteral("; no connected camera found") : QString{})
+      .arg(outcome);
   for (const auto& device : result.devices)
     qDebug().noquote() << QStringLiteral("[GenICam] camera found: model=%1 serial=%2 id=%3 transport=%4 ip=%5 cti=%6")
         .arg(QString::fromStdString(device.model), QString::fromStdString(device.serial),
@@ -285,7 +286,7 @@ public:
       if (!startGenTLDiscovery(&startup_error)) throw std::runtime_error(startup_error.toStdString());
       std::shared_ptr<onegen::worker::StartupDiscovery> startup;
       { std::lock_guard lock(mutex_); startup = startup_; }
-      const auto devices = startup->waitForCamera(std::chrono::seconds{10}, [] {
+      const auto devices = startup->waitForCamera(std::chrono::milliseconds{0}, [] {
         return QThread::currentThread()->isInterruptionRequested();
       });
       qInfo().noquote() << (devices.empty()
@@ -371,7 +372,7 @@ public:
   /** @brief Refreshes surviving controls after the host applies new search paths. */
   void rescanGenTLPaths() override {
     QString error;
-    if (!startGenTLDiscovery(&error)) { qWarning().noquote() << "[GenICam]" << error; return; }
+    if (!startGenTLDiscovery(&error)) { qInfo().noquote() << "[GenICam]" << error; return; }
     std::erase_if(widgets_, [](const auto& widget) { return widget.isNull(); });
     for (const auto& widget : widgets_) if (widget)
       widget->rescanGenTLPaths(cachedDiscovery(coordinator_, startup_,
