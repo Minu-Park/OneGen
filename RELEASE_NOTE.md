@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased
+## v0.3.3 (2026-10-20)
 
 - Use the neutral GenICam artwork for the package icon.
 
