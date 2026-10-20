@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Use the neutral GenICam artwork for the package icon.
+
+- Use the shared connect and disconnect artwork for connection controls.
+
 - Use the shared refresh, single-grab, and live glyphs on the device toolbar.
 
 ## v0.3.2 (2026-10-16)

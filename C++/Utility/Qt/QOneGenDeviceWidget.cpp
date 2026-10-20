@@ -49,8 +49,8 @@ QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordin
   devices_box_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
   connect_button_ = new QToolButton;
   QIcon connectionIcon;
-  connectionIcon.addFile(QStringLiteral(":/Resources/Icons/icons8-connect-48.png"), {}, QIcon::Normal, QIcon::Off);
-  connectionIcon.addFile(QStringLiteral(":/Resources/Icons/icons8-disconnected-48.png"), {}, QIcon::Normal, QIcon::On);
+  connectionIcon.addFile(QStringLiteral(":/Resources/icon/connect-48.png"), {}, QIcon::Normal, QIcon::Off);
+  connectionIcon.addFile(QStringLiteral(":/Resources/icon/disconnected-48.png"), {}, QIcon::Normal, QIcon::On);
   connect_button_->setIcon(connectionIcon);
   connect_button_->setCheckable(true);
   connect_button_->setToolTip(QStringLiteral("Connect / Disconnect Interface"));

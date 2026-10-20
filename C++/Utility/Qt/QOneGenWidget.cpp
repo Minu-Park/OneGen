@@ -108,9 +108,9 @@ QOneGenWidget::QOneGenWidget(
 
   connect_button_ = new QToolButton;
   QIcon connect_icon;
-  connect_icon.addFile(QStringLiteral(":/Resources/Icons/icons8-connect-48.png"), {},
+  connect_icon.addFile(QStringLiteral(":/Resources/icon/connect-48.png"), {},
                        QIcon::Normal, QIcon::Off);
-  connect_icon.addFile(QStringLiteral(":/Resources/Icons/icons8-disconnected-48.png"), {},
+  connect_icon.addFile(QStringLiteral(":/Resources/icon/disconnected-48.png"), {},
                        QIcon::Normal, QIcon::On);
   connect_button_->setIcon(connect_icon);
   connect_button_->setIconSize(QSize(16, 16));

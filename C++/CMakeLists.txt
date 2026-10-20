@@ -306,7 +306,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     endif()
     playground_sdk_package_plugin(OneGenPlugin
       PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
-      ICON "${PlaygroundPluginSDK_ICON_DIR}/genicam.png"
+      ICON "${PlaygroundPluginSDK_ICON_DIR}/genicam-48.png"
       AUXILIARY_TARGETS OneGenWorker RUNTIME_FILES ${ONEGEN_GENICAM_RUNTIME_FILES})
   endif()
   message(STATUS "[OneGen] OneGenPlugin enabled.")
