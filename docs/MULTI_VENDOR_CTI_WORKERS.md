@@ -88,6 +88,22 @@ producer output retains the warning fallback; message-body keywords do not
 change severity. Vendor fatal diagnostics are forwarded as critical messages
 without terminating the consumer.
 
+Worker C++ failures retain their operation/request/session context on diagnostic
+stderr; binary protocol stdout remains separate. Fatal worker startup/IO failures
+return a failed process or close the connection and wake pending requests. Unknown
+C++ exceptions follow the same failure boundary as standard exceptions. A frame
+consumer exception keeps the existing acknowledgement/continued-delivery behavior
+and logs its detail, session and CTI; error/invalidation callback failures close
+the connection rather than escaping the IO thread. Startup errors include worker
+and CTI paths. Exit diagnostics include decimal and hexadecimal process codes and
+retain the final tagged warning/error record. These guards do not recover native
+access violations, CRT assertions or process fail-fast; those remain isolated
+worker/process failures. No automatic retry or producer ownership change is added.
+
+`test_worker_errors` injects startup, invalid inactive-state, worker argument and
+standard/unknown callback failures. It verifies explicit nonzero exits, diagnostic
+context, clean protocol stdout, request wake-up and continued frame delivery.
+
 ## OneGen Session UI
 
 Creating `Device > GenICam` creates one independent OneGen session.

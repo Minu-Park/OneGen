@@ -166,6 +166,13 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
     add_test(NAME test_worker COMMAND test_worker $<TARGET_FILE:OneGenWorker>)
     add_test(NAME test_worker_inactive_producer COMMAND test_worker --inactive-producer
       $<TARGET_FILE:OneGenWorker> $<TARGET_FILE:FailingInitProducer>)
+    add_executable(test_worker_errors Tests/test_worker_errors.cpp)
+    target_link_libraries(test_worker_errors PRIVATE OneGen::WorkerClient)
+    add_dependencies(test_worker_errors test_worker OneGenWorker FailingInitProducer)
+    add_test(NAME test_worker_errors COMMAND test_worker_errors
+      $<TARGET_FILE:test_worker> $<TARGET_FILE:OneGenWorker> $<TARGET_FILE:FailingInitProducer>)
+    set_tests_properties(test_worker_errors PROPERTIES ENVIRONMENT_MODIFICATION
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
     add_test(NAME test_worker_package COMMAND ${CMAKE_COMMAND}
       "-DWORKER_FILE=$<TARGET_FILE:OneGenWorker>"
       "-DCMAKE_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"

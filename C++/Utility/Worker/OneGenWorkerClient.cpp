@@ -2,6 +2,7 @@
 
 #include "OneGenWorkerMessages.h"
 #include "WorkerLogForwarder.h"
+#include "WorkerException.h"
 
 #include <QDir>
 #include <QDebug>
@@ -72,6 +73,21 @@ struct Connection::Impl {
   std::map<std::uint32_t, Callbacks> callbacks;
   ClaimFn claim;
   std::map<std::string, std::shared_ptr<void>> interface_claims;
+  /** @brief Fails the connection and wakes startup/request waiters with contextual diagnostics. */
+  void fail(const char* phase, const std::string& detail) {
+    const auto message = QStringLiteral("Worker %1 failed: %2 worker=%3 cti=%4")
+        .arg(QString::fromLatin1(phase), QString::fromStdString(detail),
+             QString::fromStdString(executable.string()), QString::fromStdString(cti.string()));
+    {
+      std::lock_guard lock(mutex);
+      if (close_error.empty()) close_error = message.toStdString();
+      if (!started) { start_error = close_error; started = true; }
+      running = false;
+      cv.notify_all();
+    }
+    auto log = discovery_log.load() ? qInfo() : qWarning();
+    log.noquote() << "[GenICam]" << message;
+  }
 #ifdef _WIN32
   HANDLE job = nullptr;
 #endif
@@ -84,6 +100,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
   impl_->cti = std::move(cti);
   impl_->claim = std::move(claim);
   impl_->delivery = std::thread([this] {
+    try {
     while (true) {
       Frame frame;
       std::uint32_t session = 0;
@@ -98,16 +115,28 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         callback = impl_->callbacks[session].frame;
         if (!impl_->running) callback = {};
       }
-      try { if (callback) callback(frame); } catch (...) { qWarning() << "[GenICam] frame consumer failed"; }
+      try { if (callback) callback(frame); }
+      catch (...) {
+        qWarning().noquote() << QStringLiteral("[GenICam] frame consumer failed: session=%1 cti=%2 detail=%3")
+            .arg(session).arg(QString::fromStdString(impl_->cti.string()),
+                             QString::fromStdString(currentExceptionMessage()));
+      }
       {
         std::lock_guard lock(impl_->mutex);
         if (impl_->running) { Message ack{Operation::FrameAck}; ack.session = session; impl_->outgoing.push(std::move(ack)); }
       }
     }
+    } catch (...) { impl_->fail("frame delivery", currentExceptionMessage()); }
   });
+  try {
   impl_->io = std::thread([this] {
     QProcess process;
     qint64 process_id = 0;
+    QByteArray buffer;
+    QByteArray diagnostic;
+    WorkerLogForwarder log_forwarder(QString::fromStdString(impl_->cti.string()));
+    try {
+    { std::lock_guard lock(impl_->mutex); if (!impl_->running) return; }
     process.setProcessChannelMode(QProcess::SeparateChannels);
     auto environment = QProcessEnvironment::systemEnvironment();
     const auto separator = QDir::listSeparator();
@@ -125,7 +154,10 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
       std::lock_guard lock(impl_->mutex);
       impl_->started = true;
       if (!process.waitForStarted(5000)) {
-        impl_->start_error = process.errorString().toStdString();
+        impl_->start_error = QStringLiteral("Worker start failed: %1 worker=%2 cti=%3")
+            .arg(process.errorString(), QString::fromStdString(impl_->executable.string()),
+                 QString::fromStdString(impl_->cti.string())).toStdString();
+        qInfo().noquote() << "[GenICam]" << QString::fromStdString(impl_->start_error);
         impl_->running = false;
       } else {
         process_id = process.processId();
@@ -153,9 +185,6 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
     }
     if (process.state() == QProcess::NotRunning) return;
 
-    QByteArray buffer;
-    QByteArray diagnostic;
-    WorkerLogForwarder log_forwarder(QString::fromStdString(impl_->cti.string()));
     while (process.state() != QProcess::NotRunning) {
       std::queue<Message> pending;
       {
@@ -216,17 +245,13 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
             impl_->cv.notify_all();
           }
         }
-      } catch (const std::exception& error) {
-        {
-          std::lock_guard lock(impl_->mutex);
-          impl_->close_error = error.what();
-          impl_->running = false;
-          impl_->cv.notify_all();
-        }
+      } catch (...) {
+        impl_->fail("message processing", currentExceptionMessage());
         process.kill();
         break;
       }
     }
+    } catch (...) { impl_->fail("process IO", currentExceptionMessage()); }
     if (process.state() != QProcess::NotRunning) {
       process.kill();
       process.waitForFinished(5000);
@@ -242,21 +267,31 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
       auto remainder = QString::fromUtf8(diagnostic);
       for (auto line : remainder.split('\n')) {
         line = line.trimmed();
-        if (line.isEmpty() || line.startsWith(QLatin1String("[GenICam]"))) continue;
+        if (line.isEmpty()) continue;
+        if (line.startsWith(QLatin1String("[GenICam]"))
+            && !line.startsWith(QLatin1String("[GenICam] [WARN]"))
+            && !line.startsWith(QLatin1String("[GenICam] [WARNING]"))
+            && !line.startsWith(QLatin1String("[GenICam] [ERROR]"))
+            && !line.startsWith(QLatin1String("[GenICam] [CRIT]"))
+            && !line.startsWith(QLatin1String("[GenICam] [CRITICAL]"))
+            && !line.startsWith(QLatin1String("[GenICam] [FATAL]"))) continue;
         last_error = line;
       }
       const auto crashed = process.exitStatus() == QProcess::CrashExit;
+      const auto exit_hex = QString::number(static_cast<quint32>(process.exitCode()), 16).rightJustified(8, '0');
       auto exit_log = impl_->discovery_log.load() ? qInfo() : qWarning();
       exit_log.noquote()
-          << QStringLiteral("[GenICam] worker process exited: pid=%1 code=%2 crashed=%3 cti=%4")
+          << QStringLiteral("[GenICam] worker process exited: pid=%1 code=%2 hex=0x%3 crashed=%4 cti=%5")
                  .arg(process_id)
                  .arg(process.exitCode())
+                 .arg(exit_hex)
                  .arg(crashed ? QStringLiteral("yes") : QStringLiteral("no"))
                  .arg(QString::fromStdString(impl_->cti.string()));
       std::lock_guard lock(impl_->mutex);
       if (impl_->close_error.empty()) {
         impl_->close_error = crashed ? "Worker process crashed" : "Worker process exited";
-        impl_->close_error += " (process exit code " + std::to_string(process.exitCode()) + ").";
+        impl_->close_error += " (process exit code " + std::to_string(process.exitCode())
+            + ", 0x" + exit_hex.toStdString() + ").";
         if (!last_error.isEmpty()) {
           impl_->close_error += ' ';
           impl_->close_error += last_error.toStdString();
@@ -266,6 +301,11 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
       impl_->cv.notify_all();
     }
   });
+  } catch (...) {
+    { std::lock_guard lock(impl_->mutex); impl_->running = false; impl_->cv.notify_all(); }
+    if (impl_->delivery.joinable()) impl_->delivery.join();
+    throw;
+  }
   std::unique_lock lock(impl_->mutex);
   impl_->cv.wait(lock, [&] { return impl_->started; });
   if (!impl_->start_error.empty()) {

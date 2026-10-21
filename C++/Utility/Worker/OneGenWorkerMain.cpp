@@ -1,5 +1,6 @@
 #include "OneGenWorkerMessages.h"
 #include "OneGenParameterMessages.h"
+#include "WorkerException.h"
 
 #include "OneGen.h"
 #include "Internal/ConnectTiming.h"
@@ -85,7 +86,10 @@ struct CameraSession {
     if (grab.joinable()) grab.join();
     if (error) std::rethrow_exception(error);
   }
-  ~CameraSession() { try { stop(); if (camera) camera->close(); } catch (...) {} }
+  ~CameraSession() {
+    try { stop(); if (camera) camera->close(); }
+    catch (...) { onegen::stage_log_warning("worker session cleanup failed: %s", onegen::worker::currentExceptionMessage().c_str()); }
+  }
 };
 
 void sendFor(std::uint32_t session, Message message) {
@@ -142,9 +146,15 @@ int main(int argc, char** argv)
   protocol_output = fdopen(dup(fileno(stdout)), "wb");
   dup2(fileno(stderr), fileno(stdout));
 #endif
-  if (!protocol_output) return 1;
+  if (!protocol_output) {
+    std::fprintf(stderr, "[GenICam] [WARN] worker startup failed: could not open protocol output\n");
+    std::fflush(stderr);
+    return 1;
+  }
+  std::string producer;
   try {
     const auto cti = ctiArgument(argc, argv);
+    producer = cti.string();
     onegen::OneGen system;
     std::string inactive_error;
     try { system.loadCti(cti); }
@@ -223,6 +233,8 @@ int main(int argc, char** argv)
               out.string(name);
               sendFor(session, {Operation::Invalidate, 0, true, {}, out.take()});
             } catch (...) {
+              onegen::stage_log_warning("worker invalidate notification failed: session=%u detail=%s",
+                  session, onegen::worker::currentExceptionMessage().c_str());
             }
           });
         }
@@ -491,13 +503,17 @@ int main(int argc, char** argv)
                 onegen::worker::write(payload, frames.front());
                 reply.payload = payload.take();
                 timing.mark("frame-serialization");
-              } catch (const std::exception& error) {
+              } catch (...) {
                 reply.success = false;
-                reply.error = error.what();
+                reply.error = onegen::worker::currentExceptionMessage();
+                onegen::stage_log_warning("worker single acquisition failed: id=%u session=%u detail=%s",
+                    id, session, reply.error.c_str());
               }
               try {
                 send(std::move(reply));
               } catch (...) {
+                onegen::stage_log_warning("worker single response failed: id=%u session=%u detail=%s",
+                    id, session, onegen::worker::currentExceptionMessage().c_str());
               }
             });
             continue;
@@ -522,17 +538,20 @@ int main(int argc, char** argv)
             throw std::runtime_error("Unsupported OneGen worker request.");
         }
         response.payload = output.take();
-      } catch (const std::exception& error) {
+      } catch (...) {
         response.success = false;
-        response.error = error.what();
+        response.error = onegen::worker::currentExceptionMessage();
+        onegen::stage_log_warning("worker request failed: operation=%u id=%u session=%u detail=%s",
+            static_cast<unsigned>(request.operation), request.id, request.session, response.error.c_str());
       }
       send(std::move(response));
       if (shutdown) break;
     }
     sessions.clear();
     return 0;
-  } catch (const std::exception& error) {
-    std::cerr << error.what() << '\n';
+  } catch (...) {
+    onegen::stage_log_warning("worker fatal error: cti=%s detail=%s",
+        producer.c_str(), onegen::worker::currentExceptionMessage().c_str());
     return 1;
   }
 }

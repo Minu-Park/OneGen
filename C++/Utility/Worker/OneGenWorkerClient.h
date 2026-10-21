@@ -13,6 +13,7 @@
 
 namespace onegen::worker {
 
+/** @brief Isolates worker failures and reports C++ errors without escaping client IO threads. */
 class Connection {
 public:
   using FrameFn = std::function<void(const Frame&)>;
@@ -37,8 +38,11 @@ public:
   bool inactive() const;
   /** Stops this worker and releases its native resources before producer fallback. */
   void close();
+  /** @brief Reports callback exceptions to diagnostics while retaining frame acknowledgement. */
   void set_frame_callback(FrameFn callback, std::uint32_t session = 0);
+  /** @brief Registers error delivery; callback exceptions fail the connection and wake requests. */
   void set_error_callback(ErrorFn callback, std::uint32_t session = 0);
+  /** @brief Registers invalidation delivery with the same failure boundary as error callbacks. */
   void set_invalidate_callback(InvalidateFn callback, std::uint32_t session = 0);
 
 private:

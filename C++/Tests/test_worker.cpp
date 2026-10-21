@@ -25,24 +25,29 @@
 std::atomic<int> startup_diagnostics{0};
 
 
-int main(int argc, char** argv)
+int runTests(int argc, char** argv)
 {
   QCoreApplication application(argc, argv);
   if (argc == 3 && std::string_view(argv[1]) == "--cti") return fakeWorker(argv[2]);
   if (argc == 4 && std::string_view(argv[1]) == "--inactive-producer") {
     onegen::worker::Connection connection(argv[2], argv[3]);
     for (int attempt = 0; attempt < 3; ++attempt) {
-      bool rejected = false;
+      std::string observed = "request unexpectedly succeeded";
       try { connection.request(onegen::worker::Operation::ListInterfaces); }
       catch (const std::exception& error) {
-        const std::string text = error.what();
-        rejected = text.find("Producer inactive:") != std::string::npos
-            && text.find("GCInitLib failed (-1001)") != std::string::npos;
+        observed = error.what();
       }
-      assert(rejected && connection.alive() && connection.inactive());
+      const bool alive = connection.alive(), inactive = connection.inactive();
+      if (observed.find("Producer inactive:") == std::string::npos
+          || observed.find("GCInitLib failed (-1001)") == std::string::npos
+          || !alive || !inactive) {
+        throw std::runtime_error("Inactive producer check failed: attempt=" + std::to_string(attempt + 1)
+            + " alive=" + std::to_string(alive) + " inactive=" + std::to_string(inactive)
+            + " observed=" + observed);
+      }
     }
     connection.close();
-    assert(!connection.alive());
+    if (connection.alive()) throw std::runtime_error("Inactive producer worker remained alive after close.");
     std::cout << "Inactive producer: explicit initialization error; worker remained alive for three requests.\n";
     return 0;
   }
@@ -654,4 +659,18 @@ int main(int argc, char** argv)
   }
   std::filesystem::remove_all(root);
   std::cout << "test_worker ok\n";
+  return 0;
+}
+
+int main(int argc, char** argv)
+{
+  try { return runTests(argc, argv); }
+  catch (const std::exception& error) {
+    std::cerr << "test_worker failed: " << error.what();
+  } catch (...) {
+    std::cerr << "test_worker failed: Unknown C++ exception.";
+  }
+  for (int index = 1; index < argc; ++index) std::cerr << " arg" << index << '=' << argv[index];
+  std::cerr << std::endl;
+  return 1;
 }

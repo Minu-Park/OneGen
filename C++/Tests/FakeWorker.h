@@ -334,6 +334,24 @@ inline int fakeWorker(const std::filesystem::path& cti)
       }
     }
     if (request.operation == Operation::Probe) {
+      if (cti.stem() == "FatalDiagnostics") {
+        std::cerr << "[GenICam] [ERROR] fixture fatal detail" << std::flush;
+        return 71;
+      }
+      if (cti.stem() == "MalformedDiagnostics") {
+        const auto invalid = frameSize(maximum_message_size + 1);
+        std::cout.write(reinterpret_cast<const char*>(invalid.data()), invalid.size());
+        std::cout.flush();
+        return 71;
+      }
+      if (cti.stem() == "InvalidateDiagnostics") {
+        Writer notification; notification.scalar(std::int32_t{0}); notification.string("Gain");
+        transmit({Operation::Invalidate, 0, true, {}, notification.take(), request.session});
+      }
+      if (cti.stem() == "FrameDiagnostics") {
+        Writer notification; write(notification, frame(request.session));
+        transmit({Operation::Frame, 0, true, {}, notification.take(), request.session});
+      }
       std::ofstream(cti.string() + ".all-probes", std::ios::app) << "probe\n";
       if (cti.stem() == "CrashProbe") return 53;
       ++probes;
