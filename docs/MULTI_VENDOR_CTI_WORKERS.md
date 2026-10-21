@@ -89,7 +89,9 @@ change severity. Vendor fatal diagnostics are forwarded as critical messages
 without terminating the consumer.
 
 Worker C++ failures retain their operation/request/session context on diagnostic
-stderr; binary protocol stdout remains separate. Fatal worker startup/IO failures
+stderr; binary protocol stdout remains separate. Standard request and single-acquisition
+exceptions return failed replies and log at INFO; unknown request exceptions retain
+WARN severity. Fatal worker startup/IO failures
 return a failed process or close the connection and wake pending requests. Unknown
 C++ exceptions follow the same failure boundary as standard exceptions. A frame
 consumer exception keeps the existing acknowledgement/continued-delivery behavior

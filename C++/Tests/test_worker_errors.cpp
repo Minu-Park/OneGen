@@ -1,4 +1,5 @@
 #include "OneGenWorkerClient.h"
+#include "Utility/Worker/WorkerException.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -7,7 +8,9 @@
 #include <QThread>
 #include <atomic>
 #include <iostream>
+#include <initializer_list>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -21,10 +24,31 @@ void capture(QtMsgType, const QMessageLogContext&, const QString& message) {
 void require(bool condition, const std::string& detail) {
   if (!condition) throw std::runtime_error(detail);
 }
-bool logged(const std::string& text) {
+bool logged(std::initializer_list<std::string> fragments) {
   std::lock_guard lock(logMutex);
-  for (const auto& line : logs) if (line.find(text) != std::string::npos) return true;
+  for (const auto& line : logs) {
+    bool matches = true;
+    for (const auto& fragment : fragments)
+      if (line.find(fragment) == std::string::npos) { matches = false; break; }
+    if (matches) return true;
+  }
   return false;
+}
+void requestFailureSeverity() {
+  std::ostringstream output;
+  auto* previous = std::clog.rdbuf(output.rdbuf());
+  std::string expected, unknown;
+  try {
+    try { throw std::runtime_error("request rejected"); }
+    catch (...) { expected = onegen::worker::reportRequestException("worker request failed: id=3"); }
+    try { throw 7; }
+    catch (...) { unknown = onegen::worker::reportRequestException("worker single acquisition failed: id=4"); }
+  } catch (...) { std::clog.rdbuf(previous); throw; }
+  std::clog.rdbuf(previous);
+  require(expected == "request rejected" && unknown == "Unknown C++ exception.", "request reply detail changed");
+  require(output.str() == "[GenICam] [INFO] worker request failed: id=3 detail=request rejected\n"
+                          "[GenICam] [WARN] worker single acquisition failed: id=4 detail=Unknown C++ exception.\n",
+          "request failure severity or context changed: " + output.str());
 }
 void rejectedProcess(const QString& program, const QStringList& args, const QByteArray& expected) {
   QProcess process;
@@ -43,6 +67,7 @@ int main(int argc, char** argv) {
   QCoreApplication application(argc, argv);
   try {
     require(argc == 4, "expected peer, worker and failing producer paths");
+    requestFailureSeverity();
     const QString peer = QString::fromLocal8Bit(argv[1]);
     QTemporaryDir directory;
     require(directory.isValid(), "temporary diagnostic directory unavailable");
@@ -89,6 +114,7 @@ int main(int argc, char** argv) {
                 "invalidate callback escaped its IO boundary: " + failure);
       }
       for (const bool unknown : {false, true}) {
+        { std::lock_guard lock(logMutex); logs.clear(); }
         onegen::worker::Connection connection(argv[1], "FrameDiagnostics.cti");
         std::atomic<int> frames{0};
         connection.set_frame_callback([&](const auto&) {
@@ -103,9 +129,10 @@ int main(int argc, char** argv) {
           require(frames == count && connection.alive(), "frame callback failure broke continued delivery");
         }
         connection.close();
+        require(logged({"frame consumer failed:", "cti=FrameDiagnostics.cti",
+                        unknown ? "detail=Unknown C++ exception." : "detail=frame callback detail"}),
+                "frame callback diagnostic record was lost");
       }
-      require(logged("frame callback detail") && logged("Unknown C++ exception.")
-                  && logged("cti=FrameDiagnostics.cti"), "callback diagnostics were lost");
     } catch (...) { qInstallMessageHandler(previous); throw; }
     qInstallMessageHandler(previous);
     std::cout << "worker exception boundaries and failure diagnostics passed\n";

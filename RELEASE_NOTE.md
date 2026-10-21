@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Contain standard and unknown C++ failures at worker IO, request and acquisition boundaries, preserving contextual failure diagnostics and waking affected client requests. Frame consumer failures retain detailed logs and the existing acknowledgement behavior.
-- Report worker startup paths, native exit codes and trailing tagged errors. Inactive-producer regression failures now exit with explicit observed state and arguments instead of an opaque assertion abort.
+- Report worker startup paths, native exit codes and trailing tagged errors. Inactive-producer regression failures now exit with explicit observed state and arguments instead of an opaque assertion abort. Standard request failures log at INFO; unknown request exceptions retain WARN diagnostics.
+
 ## v0.3.3 (2026-10-21)
 
 - Require Core 0.6.0 or newer for on-demand discovery and its session-loading contract.

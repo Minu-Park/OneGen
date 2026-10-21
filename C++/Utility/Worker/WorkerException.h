@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Internal/StageLog.h"
+
 #include <exception>
 #include <string>
 
@@ -11,6 +13,21 @@ inline std::string currentExceptionMessage()
   try { throw; }
   catch (const std::exception& error) { return error.what(); }
   catch (...) { return "Unknown C++ exception."; }
+}
+
+/** @brief Reports an active request exception and returns its failed-reply detail. */
+inline std::string reportRequestException(const std::string& context)
+{
+  try { throw; }
+  catch (const std::exception& error) {
+    onegen::stage_log("%s detail=%s", context.c_str(), error.what());
+    return error.what();
+  }
+  catch (...) {
+    const auto detail = currentExceptionMessage();
+    onegen::stage_log_warning("%s detail=%s", context.c_str(), detail.c_str());
+    return detail;
+  }
 }
 
 } // namespace onegen::worker

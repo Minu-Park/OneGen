@@ -505,9 +505,9 @@ int main(int argc, char** argv)
                 timing.mark("frame-serialization");
               } catch (...) {
                 reply.success = false;
-                reply.error = onegen::worker::currentExceptionMessage();
-                onegen::stage_log_warning("worker single acquisition failed: id=%u session=%u detail=%s",
-                    id, session, reply.error.c_str());
+                reply.error = onegen::worker::reportRequestException(
+                    "worker single acquisition failed: id=" + std::to_string(id)
+                    + " session=" + std::to_string(session));
               }
               try {
                 send(std::move(reply));
@@ -540,9 +540,9 @@ int main(int argc, char** argv)
         response.payload = output.take();
       } catch (...) {
         response.success = false;
-        response.error = onegen::worker::currentExceptionMessage();
-        onegen::stage_log_warning("worker request failed: operation=%u id=%u session=%u detail=%s",
-            static_cast<unsigned>(request.operation), request.id, request.session, response.error.c_str());
+        response.error = onegen::worker::reportRequestException(
+            "worker request failed: operation=" + std::to_string(static_cast<unsigned>(request.operation))
+            + " id=" + std::to_string(request.id) + " session=" + std::to_string(request.session));
       }
       send(std::move(response));
       if (shutdown) break;
