@@ -4,6 +4,7 @@
 
 ## v0.3.3 (2026-10-21)
 
+- Require Core 0.6.0 or newer for on-demand discovery and its session-loading contract.
 - Request on-demand discovery, expose copied CTI/camera progress, and wait for the first camera or full scan. Retain the scan for later controls and cooperative cancellation.
 - Record completed producer outcomes and failure reasons as informational logs. Discovery-only worker diagnostics retain their original text without warning severity; opened device/interface operations retain normal diagnostic severity.
 
