@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep camera search logs to start/completion summaries and one concise reason per failed producer; retain worker lifecycle, raw producer output and per-producer results at Debug.
 - Contain standard and unknown C++ failures at worker IO, request and acquisition boundaries, preserving contextual failure diagnostics and waking affected client requests. Frame consumer failures retain detailed logs and the existing acknowledgement behavior.
 - Report worker startup paths, native exit codes and trailing tagged errors. Inactive-producer regression failures now exit with explicit observed state and arguments instead of an opaque assertion abort. Standard request failures log at INFO; unknown request exceptions retain WARN diagnostics.
 

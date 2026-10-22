@@ -78,7 +78,7 @@ int main(int argc, char** argv)
   forwarder.setDiscoveryMode(true);
   for (const auto& line : {QByteArray("[GenICam] [WARN] init failed rc=-1001"), QByteArray("ERROR: vendor init failed")}) {
     forwarder.append(line + '\n');
-    assert(records.back().type == QtInfoMsg);
+    assert(records.back().type == QtDebugMsg);
     assert(records.back().text.startsWith("[GenICam] discovery diagnostic: "));
     assert(records.back().text.contains(QString::fromUtf8(line)));
   }

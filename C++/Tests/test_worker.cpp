@@ -363,7 +363,7 @@ int runTests(int argc, char** argv)
   onegen::worker::Coordinator progressive(argv[0], root, std::chrono::seconds{2});
   const auto previous_handler = qInstallMessageHandler(
       [](QtMsgType type, const QMessageLogContext&, const QString& message) {
-        if (type == QtInfoMsg && message == QStringLiteral("[GenICam] discovery diagnostic: Interface XML test failure"))
+        if (type == QtDebugMsg && message == QStringLiteral("[GenICam] discovery diagnostic: Interface XML test failure"))
           ++startup_diagnostics;
       });
   std::size_t progressive_updates = 0;

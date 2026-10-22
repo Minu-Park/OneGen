@@ -13,7 +13,7 @@ class WorkerLogForwarder {
 public:
   /** @brief Associates forwarded diagnostics with their producer. */
   explicit WorkerLogForwarder(QString cti) : cti_(std::move(cti)) {}
-  /** @brief Records scan diagnostics as informational text, retaining the original producer severity in the body. */
+  /** @brief Keeps raw scan diagnostics at Debug; the scan owner reports operational outcomes. */
   void setDiscoveryMode(bool enabled) { discovery_ = enabled; }
 
   /** @brief Accepts fragmented UTF-8 diagnostics and forwards complete lines. */
@@ -38,7 +38,7 @@ private:
     if (line.endsWith('\r')) line.chop(1);
     if (line.isEmpty()) return;
     if (discovery_) {
-      qInfo().noquote() << QStringLiteral("[GenICam] discovery diagnostic: %1 cti=%2")
+      qDebug().noquote() << QStringLiteral("[GenICam] discovery diagnostic: %1 cti=%2")
           .arg(QString::fromUtf8(line), cti_);
       return;
     }

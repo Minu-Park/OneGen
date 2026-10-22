@@ -85,7 +85,7 @@ struct Connection::Impl {
       running = false;
       cv.notify_all();
     }
-    auto log = discovery_log.load() ? qInfo() : qWarning();
+    auto log = discovery_log.load() ? qDebug() : qWarning();
     log.noquote() << "[GenICam]" << message;
   }
 #ifdef _WIN32
@@ -157,11 +157,11 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         impl_->start_error = QStringLiteral("Worker start failed: %1 worker=%2 cti=%3")
             .arg(process.errorString(), QString::fromStdString(impl_->executable.string()),
                  QString::fromStdString(impl_->cti.string())).toStdString();
-        qInfo().noquote() << "[GenICam]" << QString::fromStdString(impl_->start_error);
+        qDebug().noquote() << "[GenICam]" << QString::fromStdString(impl_->start_error);
         impl_->running = false;
       } else {
         process_id = process.processId();
-        qInfo().noquote() << QStringLiteral("[GenICam] worker process started: pid=%1 cti=%2")
+        qDebug().noquote() << QStringLiteral("[GenICam] worker process started: pid=%1 cti=%2")
                                .arg(process.processId())
                                .arg(QString::fromStdString(impl_->cti.string()));
 #ifdef _WIN32
@@ -229,7 +229,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
             { std::lock_guard lock(impl_->mutex); callback = impl_->callbacks[message.session].error; }
             if (callback) callback(message.error);
             else if (impl_->discovery_log.load())
-              qInfo().noquote() << "[GenICam] discovery diagnostic:" << QString::fromStdString(message.error);
+              qDebug().noquote() << "[GenICam] discovery diagnostic:" << QString::fromStdString(message.error);
             else qWarning().noquote() << "[GenICam]" << QString::fromStdString(message.error);
           } else if (message.operation == Operation::Invalidate) {
             Reader reader(message.payload);
@@ -279,7 +279,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
       }
       const auto crashed = process.exitStatus() == QProcess::CrashExit;
       const auto exit_hex = QString::number(static_cast<quint32>(process.exitCode()), 16).rightJustified(8, '0');
-      auto exit_log = impl_->discovery_log.load() ? qInfo() : qWarning();
+      auto exit_log = impl_->discovery_log.load() ? qDebug() : qWarning();
       exit_log.noquote()
           << QStringLiteral("[GenICam] worker process exited: pid=%1 code=%2 hex=0x%3 crashed=%4 cti=%5")
                  .arg(process_id)

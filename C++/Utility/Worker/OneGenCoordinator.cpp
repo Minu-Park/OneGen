@@ -437,7 +437,7 @@ void Coordinator::retire_failed_discovery(const std::string& cti, Connection* ex
     std::erase_if(device_connections_, [&](const auto& item) { return item.second == failed; });
   }
   failed->close();
-  qInfo().noquote() << QStringLiteral("[GenICam] failed discovery worker retired: cti=%1")
+  qDebug().noquote() << QStringLiteral("[GenICam] failed discovery worker retired: cti=%1")
                           .arg(QString::fromStdString(cti));
 }
 

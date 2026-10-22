@@ -66,8 +66,8 @@ private slots:
     QVERIFY(!hasInfo("camera search completed:"));
     QTRY_COMPARE_WITH_TIMEOUT(observer->genTLDiscoveryStatus().phase, GenTLDiscoveryPhase::Partial, 10000);
     QVERIFY(hasInfo("camera search completed:"));
-    QVERIFY(hasInfo("status=available"));
-    QVERIFY(hasInfo("status=search failed"));
+    QVERIFY(!hasInfo("producer search result:"));
+    QVERIFY(hasInfo("producer search failed:"));
     QVERIFY(hasInfo("CrashProbe.cti"));
     // The same completed scan is reused when a second session opens.
     QVariantMap replay;
@@ -77,8 +77,16 @@ private slots:
     qInstallMessageHandler(previous);
     {
       QMutexLocker lock(&log_mutex);
+      QCOMPARE(std::count_if(logs.cbegin(), logs.cend(), [](const auto& item) {
+        return item.first == QtInfoMsg;
+      }), 3); // One start, one completion, one failed CTI; cached opens add no records.
       for (const auto& item : logs) {
         QVERIFY2(item.first != QtWarningMsg && item.first != QtCriticalMsg, qPrintable(item.second));
+        if (item.first == QtInfoMsg) {
+          QVERIFY2(!item.second.contains("worker process"), qPrintable(item.second));
+          QVERIFY2(!item.second.contains("discovery diagnostic:"), qPrintable(item.second));
+          QVERIFY2(!item.second.contains(" -> "), qPrintable(item.second));
+        }
       }
     }
     QVERIFY(loader.unload());

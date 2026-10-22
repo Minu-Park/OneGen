@@ -39,7 +39,7 @@ void logDiscoveryState(const onegen::worker::StartupDiscovery::Status& before,
                        const onegen::worker::StartupDiscovery::Status& after) {
   const auto old_state = consumerStatus(before);
   const auto state = consumerStatus(after);
-  qInfo().noquote() << QStringLiteral("[GenTL] consumer=onegen scan=%1 %2 -> %3 reason=%4")
+  qDebug().noquote() << QStringLiteral("[GenTL] consumer=onegen scan=%1 %2 -> %3 reason=%4")
       .arg(state.generation).arg(QLatin1String(GenTLDiscoveryState::name(old_state.phase)))
       .arg(QLatin1String(GenTLDiscoveryState::name(state.phase)), state.detail);
 }
@@ -115,7 +115,7 @@ std::vector<onegen::DeviceInfo> discover(
     throw;
   }
   for (const auto& producer : result.producer_results)
-    qInfo().noquote() << "[GenICam] producer search result:" << QString::fromStdString(producer);
+    qDebug().noquote() << "[GenICam] producer search result:" << QString::fromStdString(producer);
   const auto outcome = result.failures.empty() ? QStringLiteral("succeeded")
       : result.devices.empty() && result.failures.size() == result.total_producers
           ? QStringLiteral("failed") : QStringLiteral("partial");
@@ -126,6 +126,9 @@ std::vector<onegen::DeviceInfo> discover(
       .arg(result.total_producers == 0 ? QStringLiteral("; no configured CTI producers")
           : result.devices.empty() ? QStringLiteral("; no connected camera found") : QString{})
       .arg(outcome);
+  for (const auto& failure : result.failures)
+    qInfo().noquote() << "[GenICam] producer search failed:"
+        << QString::fromStdString(failure).simplified();
   for (const auto& device : result.devices)
     qDebug().noquote() << QStringLiteral("[GenICam] camera found: model=%1 serial=%2 id=%3 transport=%4 ip=%5 cti=%6")
         .arg(QString::fromStdString(device.model), QString::fromStdString(device.serial),
@@ -289,7 +292,7 @@ public:
       const auto devices = startup->waitForCamera(std::chrono::milliseconds{0}, [] {
         return QThread::currentThread()->isInterruptionRequested();
       });
-      qInfo().noquote() << (devices.empty()
+      qDebug().noquote() << (devices.empty()
           ? QStringLiteral("[GenICam] opening session without a camera; available startup results are reused")
           : QStringLiteral("[GenICam] camera available: opening session with %1 camera(s); remaining producer search continues").arg(devices.size()));
       if (data) data->insert(QStringLiteral("devices"), toDiscoveryData(devices));
