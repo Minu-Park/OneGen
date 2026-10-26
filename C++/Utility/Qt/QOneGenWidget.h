@@ -1,4 +1,5 @@
 #pragma once
+#include "OneGenControlUi.h"
 
 #include "OneGenNode.h"
 #include "OneGenTypes.h"
@@ -31,7 +32,7 @@ class Lease;
 }
 
 /** Playground control surface for one OneGen camera session. */
-class QOneGenWidget final : public QWidget {
+class QOneGenWidget final : public QWidget, protected OneGenControlUi {
   Q_OBJECT
 public:
   using DiscoverFn = std::function<std::vector<onegen::DeviceInfo>(
@@ -161,14 +162,6 @@ private:
   std::vector<onegen::DeviceInfo> devices_;
   DiscoverFn discover_;
   std::function<void(const QString&)> title_callback_;
-  QComboBox* devices_box_ = nullptr;
-  QComboBox* streams_box_ = nullptr;
-  QToolButton* refresh_button_ = nullptr;
-  QToolButton* connect_button_ = nullptr;
-  QToolButton* grab_one_button_ = nullptr;
-  QToolButton* grab_live_button_ = nullptr;
-  QLabel* status_ = nullptr;
-  OneGenFeatureTree* features_ = nullptr;
   QTimer* feature_drain_timer_ = nullptr;
   FeatureRead feature_read_;
   FeatureWrite feature_write_;

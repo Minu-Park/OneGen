@@ -270,3 +270,12 @@ OneGen provides internal node search text, snapshot row identities and the
 unchanged node-map/internal-name favorite identities. It uses the consumer's
 explicit settings file/key or `OneGenFeatures.ini` for standalone widgets;
 these stores remain independent and no legacy list is imported implicitly.
+
+## Qt presentation
+
+`C++/Utility/Qt` provides the SDK-independent `OneGenPresentation` target.
+The runtime Qt widget and isolated presentation consumers use the same
+`OneGenControlUi` composition; device discovery, feature access and
+acquisition remain in the runtime widget. The presentation target does not
+install an application theme.
+The feature browser also requires the existing `Resources::Widgets` target.

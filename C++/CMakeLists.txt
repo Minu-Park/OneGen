@@ -202,14 +202,13 @@ if(ONEGEN_BUILD_QT_WIDGET)
   if(NOT TARGET Resources::Widgets)
     message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires the Qt-only Resources::Widgets target.")
   endif()
+  add_subdirectory(Utility/Qt)
   add_library(OneGenQtWidget STATIC
     Utility/Qt/QOneGenDeviceWidget.cpp
     Utility/Qt/QOneGenDeviceWidget.h
     Utility/Qt/QOneGenWidget.cpp
     Utility/Qt/QOneGenWidget.h
     Utility/Qt/NumericFeatureEditor.h
-    Utility/Qt/OneGenFeatureTree.cpp
-    Utility/Qt/OneGenFeatureTree.h
   )
   add_library(OneGen::QtWidget ALIAS OneGenQtWidget)
   set_target_properties(OneGenQtWidget PROPERTIES AUTOMOC ON)
@@ -331,4 +330,8 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
   endif()
+endif()
+
+if(TARGET OneGenQtWidget)
+    target_link_libraries(OneGenQtWidget PUBLIC OneGenPresentation)
 endif()
