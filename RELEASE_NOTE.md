@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Declare semantic layout, device-panel and action-density scopes through Qt properties; preserve independent plain-Qt builds without a theme dependency.
+
 - Share the SDK-independent Qt control composition between the runtime widget and isolated presentation consumers.
 
 - Keep camera search logs to start/completion summaries and one concise reason per failed producer; retain worker lifecycle, raw producer output and per-producer results at Debug.

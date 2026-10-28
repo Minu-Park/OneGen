@@ -4,10 +4,13 @@
 
 
 void OneGenControlUi::create(QWidget* owner, const QString& settingsFile, const QString& favoritesKey) {
+    owner->setProperty("actionDensity", "compact");
+    owner->setProperty("controlRole", "devicePanel");
 
   owner->setMinimumSize(300, 350);
   auto* layout = new QVBoxLayout(owner);
   layout->setObjectName(QStringLiteral("DeviceRootLayout"));
+  layout->setProperty("layoutRole", "flush");
 
   devices_box_ = new QComboBox;
   devices_box_->setMinimumWidth(120);
@@ -59,16 +62,19 @@ void OneGenControlUi::create(QWidget* owner, const QString& settingsFile, const 
 
   auto* selector_layout = new QHBoxLayout;
   selector_layout->setObjectName(QStringLiteral("DeviceSelectorLayout"));
+  selector_layout->setProperty("layoutRole", "row");
   selector_layout->addWidget(devices_box_);
   selector_layout->addWidget(streams_box_);
   selector_layout->addWidget(refresh_button_);
   auto* tool_layout = new QHBoxLayout;
   tool_layout->setObjectName(QStringLiteral("DeviceToolLayout"));
+  tool_layout->setProperty("layoutRole", "actions");
   tool_layout->addWidget(connect_button_);
   tool_layout->addWidget(grab_one_button_);
   tool_layout->addWidget(grab_live_button_);
   auto* top_layout = new QHBoxLayout;
   top_layout->setObjectName(QStringLiteral("DeviceTopBarLayout"));
+  top_layout->setProperty("layoutRole", "content");
   top_layout->addLayout(selector_layout, 1);
   top_layout->addLayout(tool_layout, 0);
   layout->addLayout(top_layout);
@@ -84,6 +90,7 @@ void OneGenControlUi::create(QWidget* owner, const QString& settingsFile, const 
 
   auto* features_layout = new QVBoxLayout;
   features_layout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
+  features_layout->setProperty("layoutRole", "bottom-panel");
   features_layout->addWidget(features_);
   layout->addLayout(features_layout);
 

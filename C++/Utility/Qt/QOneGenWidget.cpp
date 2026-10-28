@@ -218,6 +218,7 @@ void QOneGenWidget::setTabbedCamera()
   setMinimumSize(0, 0);
   if (auto* panel = findChild<QVBoxLayout*>(QStringLiteral("DeviceTreePanelLayout")))
     panel->setObjectName(QStringLiteral("DeviceTabbedTreePanelLayout"));
+    panel->setProperty("layoutRole", "tabbed-panel");
 }
 
 bool QOneGenWidget::cameraInUse() const

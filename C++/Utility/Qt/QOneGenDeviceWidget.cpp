@@ -35,13 +35,17 @@ QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordin
       discover_(std::move(discover)), settings_file_(settingsFile), favorites_key_(favoritesKey),
       devices_(std::move(devices))
 {
+  setProperty("actionDensity", "compact");
+  setProperty("controlRole", "devicePanel");
   setMinimumSize(300, 350);
   auto* layout = new QVBoxLayout(this);
   layout->setObjectName(QStringLiteral("DeviceRootLayout"));
+  layout->setProperty("layoutRole", "flush");
   selector_bar_ = new QFrame(this);
   selector_bar_->setObjectName(QStringLiteral("OneGenSelectorBar"));
   auto* top = new QHBoxLayout(selector_bar_);
   top->setObjectName(QStringLiteral("DeviceTopBarLayout"));
+  top->setProperty("layoutRole", "content");
   devices_box_ = new QComboBox;
   devices_box_->setObjectName(QStringLiteral("OneGenDeviceSelector"));
   devices_box_->setMinimumWidth(120);
@@ -64,10 +68,12 @@ QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordin
   }
   auto* selector = new QHBoxLayout;
   selector->setObjectName(QStringLiteral("DeviceSelectorLayout"));
+  selector->setProperty("layoutRole", "row");
   selector->addWidget(devices_box_);
   selector->addWidget(refresh_button_);
   auto* tools = new QHBoxLayout;
   tools->setObjectName(QStringLiteral("DeviceToolLayout"));
+  tools->setProperty("layoutRole", "actions");
   tools->addWidget(connect_button_);
   top->addLayout(selector, 1);
   top->addLayout(tools);
