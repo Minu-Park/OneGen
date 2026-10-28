@@ -216,9 +216,10 @@ void QOneGenWidget::setTabbedCamera()
   setFixedCamera();
   // The containing device panel owns the minimum size for embedded pages.
   setMinimumSize(0, 0);
-  if (auto* panel = findChild<QVBoxLayout*>(QStringLiteral("DeviceTreePanelLayout")))
+  if (auto* panel = findChild<QVBoxLayout*>(QStringLiteral("DeviceTreePanelLayout"))) {
     panel->setObjectName(QStringLiteral("DeviceTabbedTreePanelLayout"));
     panel->setProperty("layoutRole", "tabbed-panel");
+  }
 }
 
 bool QOneGenWidget::cameraInUse() const

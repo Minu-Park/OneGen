@@ -24,6 +24,7 @@
 #include <QTemporaryDir>
 #include <QToolButton>
 #include <QUuid>
+#include <QVBoxLayout>
 
 namespace {
 
@@ -247,6 +248,20 @@ private slots:
     QVERIFY(reopened.isFavorite(renamed));
     reopened.toggleFavorite(renamed);
     QVERIFY(!reopened.isFavorite(renamed));
+  }
+
+  void tabbedCameraRetainsItsPanelAndUpdatesLayoutRole() {
+    QOneGenWidget panel({}, nullptr, {}, {});
+    auto* layout = panel.findChild<QVBoxLayout*>(QStringLiteral("DeviceTreePanelLayout"));
+    QVERIFY(layout);
+    QCOMPARE(layout->property("layoutRole").toString(), QStringLiteral("bottom-panel"));
+    panel.setTabbedCamera();
+    QCOMPARE(panel.findChild<QVBoxLayout*>(QStringLiteral("DeviceTabbedTreePanelLayout")), layout);
+    QCOMPARE(layout->property("layoutRole").toString(), QStringLiteral("tabbed-panel"));
+    QCOMPARE(panel.minimumSize(), QSize(0, 0));
+    panel.setTabbedCamera();
+    QCOMPARE(panel.findChild<QVBoxLayout*>(QStringLiteral("DeviceTabbedTreePanelLayout")), layout);
+    QCOMPARE(layout->property("layoutRole").toString(), QStringLiteral("tabbed-panel"));
   }
 
   void snapshotsKeepEditorsAndUnavailableFavorites() {

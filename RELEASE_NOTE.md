@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep tabbed camera layout renaming and its semantic role assignment in the same conditional scope, restoring optional Qt widget/plugin builds.
+
 - Declare semantic layout, device-panel and action-density scopes through Qt properties; preserve independent plain-Qt builds without a theme dependency.
 
 - Share the SDK-independent Qt control composition between the runtime widget and isolated presentation consumers.
