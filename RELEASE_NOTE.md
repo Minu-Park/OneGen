@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Connect and Grab Live icons name the current state (`disconnected`/`connect`, `pause`/`cameras`); the host theme previews the other state on hover. Commands, tooltips and checked state are unchanged.
+
 - Open the Register Inspector through a consumer `OneGenDialogShellFactory`; the Playground plugin supplies the themed dialog shell, and standalone widgets keep a plain Qt dialog. Raw-write consent, exact-length hexadecimal validation, register access and logging are unchanged and covered by widget tests.
 
 - Keep tabbed camera layout renaming and its semantic role assignment in the same conditional scope, restoring optional Qt widget/plugin builds.

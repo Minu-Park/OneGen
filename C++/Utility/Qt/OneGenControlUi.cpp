@@ -30,9 +30,10 @@ void OneGenControlUi::create(QWidget* owner, const QString& settingsFile, const 
 
   connect_button_ = new QToolButton;
   QIcon connect_icon;
-  connect_icon.addFile(QStringLiteral(":/Resources/icon/connect-48.png"), {},
-                       QIcon::Normal, QIcon::Off);
+  // The glyph names the current state; the shared theme previews the other state on hover.
   connect_icon.addFile(QStringLiteral(":/Resources/icon/disconnected-48.png"), {},
+                       QIcon::Normal, QIcon::Off);
+  connect_icon.addFile(QStringLiteral(":/Resources/icon/connect-48.png"), {},
                        QIcon::Normal, QIcon::On);
   connect_button_->setIcon(connect_icon);
   connect_button_->setIconSize(QSize(16, 16));
@@ -49,9 +50,10 @@ void OneGenControlUi::create(QWidget* owner, const QString& settingsFile, const 
 
   grab_live_button_ = new QToolButton;
   QIcon live_icon;
-  live_icon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), {},
-                    QIcon::Normal, QIcon::Off);
+  // Paused while stopped, live while grabbing.
   live_icon.addFile(QStringLiteral(":/Resources/icon/pause-48.png"), {},
+                    QIcon::Normal, QIcon::Off);
+  live_icon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), {},
                     QIcon::Normal, QIcon::On);
   grab_live_button_->setIcon(live_icon);
   grab_live_button_->setIconSize(QSize(16, 16));
