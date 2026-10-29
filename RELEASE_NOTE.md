@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-- Connect and Grab Live icons name the current state (`disconnected`/`connect`, `pause`/`cameras`); the host theme previews the other state on hover. Commands, tooltips and checked state are unchanged.
+- Disable connection and Live commands while any asynchronous control operation is pending, including Live start/stop, so the UI does not offer commands rejected by the operation gate.
+
+- Show the next Live grab command with cameras/stop artwork in all pointer and focus states, and keep its tooltip and accessible name synchronized with acquisition state.
+
+
+- Connect icons name the current state (`disconnected`/`connect`); a consumer theme can preview the other state on hover.
 
 - Open the Register Inspector through a consumer `OneGenDialogShellFactory`; the Playground plugin supplies the themed dialog shell, and standalone widgets keep a plain Qt dialog. Raw-write consent, exact-length hexadecimal validation, register access and logging are unchanged and covered by widget tests.
 

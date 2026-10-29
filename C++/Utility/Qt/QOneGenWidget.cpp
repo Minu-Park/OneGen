@@ -497,7 +497,7 @@ void QOneGenWidget::syncController()
   } else if (!current && lease_) dropLease();
   const bool live = controller_->isGrabbing();
   { const QSignalBlocker blocker(connect_button_); connect_button_->setChecked(bool(current)); }
-  { const QSignalBlocker blocker(grab_live_button_); grab_live_button_->setChecked(live); }
+  { const QSignalBlocker blocker(grab_live_button_); grab_live_button_->setChecked(live); updateLiveAction(); }
   setFeatureGrabbing(live);
   if (current) setFeatureSnapshot(controller_->controlFeatures());
   setOperationActive(false);
@@ -538,7 +538,7 @@ void QOneGenWidget::finishOperation()
     }
     if (operation == Operation::Start) {
       const QSignalBlocker blocker(grab_live_button_);
-      grab_live_button_->setChecked(false);
+      grab_live_button_->setChecked(false); updateLiveAction();
     }
     if (operation == Operation::Disconnect || workerProcessDead(result.error)
         || (lease_ && !lease_->alive())) dropLease();
@@ -587,7 +587,7 @@ void QOneGenWidget::dropLease()
   setFeatureGrabbing(false);
   {
     const QSignalBlocker live(grab_live_button_);
-    grab_live_button_->setChecked(false);
+    grab_live_button_->setChecked(false); updateLiveAction();
   }
   {
     const QSignalBlocker connect(connect_button_);
@@ -667,17 +667,14 @@ void QOneGenWidget::setOperationActive(bool active)
            && !feature_drain_timer_->isActive()) feature_drain_timer_->start();
   const bool connected = static_cast<bool>(lease_);
   const bool grabbing = grab_watcher_.isRunning();
-  const bool blocking = (controller_ && controller_->externalBusy()) || (active
-      && (operation_ == Operation::Connect || operation_ == Operation::Disconnect
-          || operation_ == Operation::Restore || operation_ == Operation::SelectStream));
   devices_box_->setEnabled(!active && !connected);
   streams_box_->setVisible(connected && streams_box_->count() > 1);
   streams_box_->setEnabled(!active && connected && !grabbing && !grab_live_button_->isChecked()
                            && streams_box_->count() > 1);
   refresh_button_->setEnabled(!active && !connected && !discovery_watcher_.isRunning());
-  connect_button_->setEnabled(!blocking && (connected || devices_box_->count() > 0));
+  connect_button_->setEnabled(!active && (connected || devices_box_->count() > 0));
   grab_one_button_->setEnabled(!active && connected && !grabbing && !grab_live_button_->isChecked());
-  grab_live_button_->setEnabled(!blocking && connected && !grabbing);
+  grab_live_button_->setEnabled(!active && connected && !grabbing);
   features_->setEnabled(connected || interface_.has_value());
   updateStatus();
   emit stateChanged();

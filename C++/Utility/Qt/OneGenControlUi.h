@@ -8,6 +8,8 @@ class QLineEdit; class QTabWidget; class OneGenFeatureTree;
 struct OneGenControlUi {
     /** @brief Creates the same controls used by the runtime widget. */
     void create(QWidget* owner, const QString& settingsFile = {}, const QString& favoritesKey = {});
+    /** @brief Synchronizes the next command after observed or local acquisition state changes. */
+    void updateLiveAction();
     QComboBox* devices_box_ = nullptr;
     QComboBox* streams_box_ = nullptr;
     QToolButton* refresh_button_ = nullptr;

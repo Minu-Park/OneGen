@@ -50,15 +50,18 @@ void OneGenControlUi::create(QWidget* owner, const QString& settingsFile, const 
 
   grab_live_button_ = new QToolButton;
   QIcon live_icon;
-  // Paused while stopped, live while grabbing.
-  live_icon.addFile(QStringLiteral(":/Resources/icon/pause-48.png"), {},
-                    QIcon::Normal, QIcon::Off);
+  // Always show the next acquisition command, including during hover.
   live_icon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), {},
+                    QIcon::Normal, QIcon::Off);
+  live_icon.addFile(QStringLiteral(":/Resources/icon/stop-48.png"), {},
                     QIcon::Normal, QIcon::On);
+  grab_live_button_->setProperty("iconStateRole", "action");
   grab_live_button_->setIcon(live_icon);
+  QObject::connect(grab_live_button_, &QToolButton::toggled, owner, [this] { updateLiveAction(); });
+  updateLiveAction();
   grab_live_button_->setIconSize(QSize(16, 16));
   grab_live_button_->setToolButtonStyle(Qt::ToolButtonIconOnly);
-  grab_live_button_->setToolTip(QStringLiteral("Grab Live / Stop"));
+
   grab_live_button_->setCheckable(true);
   grab_live_button_->setEnabled(false);
 
@@ -106,4 +109,13 @@ void OneGenControlUi::create(QWidget* owner, const QString& settingsFile, const 
   layout->addWidget(status_bar);
 
 
+}
+
+void OneGenControlUi::updateLiveAction()
+{
+    const QString command = grab_live_button_->isChecked()
+        ? QCoreApplication::translate("QOneGenWidget", "Stop live acquisition")
+        : QCoreApplication::translate("QOneGenWidget", "Start live acquisition");
+    grab_live_button_->setToolTip(command);
+    grab_live_button_->setAccessibleName(command);
 }
