@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.3.4 (2026-10-29)
+
 - Disable connection and Live commands while any asynchronous control operation is pending, including Live start/stop, so the UI does not offer commands rejected by the operation gate.
 
 - Show the next Live grab command with cameras/stop artwork in all pointer and focus states, and keep its tooltip and accessible name synchronized with acquisition state.

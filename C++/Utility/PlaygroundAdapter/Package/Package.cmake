@@ -1,6 +1,6 @@
 # Device-owned Playground plugin identity.
 set(PLAYGROUND_PLUGIN_ID "onegen")
-set(PLAYGROUND_PLUGIN_VERSION "0.3.3")
+set(PLAYGROUND_PLUGIN_VERSION "0.3.4")
 set(PLAYGROUND_PLUGIN_MINIMUM_CORE_VERSION "0.6.0")
 set(PLAYGROUND_PLUGIN_DISPLAY_NAME "GenICam")
 # Optional presentation metadata; consumers must export it to manifests/catalogs.
