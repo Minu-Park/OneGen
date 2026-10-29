@@ -279,3 +279,7 @@ The runtime Qt widget and isolated presentation consumers use the same
 acquisition remain in the runtime widget. The presentation target does not
 install an application theme.
 The feature browser also requires the existing `Resources::Widgets` target.
+Modal dialogs such as the Register Inspector use a consumer
+`OneGenDialogShellFactory` (`setDialogShellFactory()`); without one they use a plain
+Qt dialog. The Playground plugin links `Resources::Dialogs` and supplies its
+`ThemedDialog` shell.

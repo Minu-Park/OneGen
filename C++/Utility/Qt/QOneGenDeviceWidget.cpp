@@ -121,6 +121,11 @@ void QOneGenDeviceWidget::setTitleCallback(std::function<void(const QString&)> c
   title_callback_ = std::move(callback);
 }
 
+void QOneGenDeviceWidget::setDialogShellFactory(OneGenDialogShellFactory factory) {
+  dialog_shell_factory_ = std::move(factory);
+  for (auto* child : findChildren<QOneGenWidget*>()) child->setDialogShellFactory(dialog_shell_factory_);
+}
+
 void QOneGenDeviceWidget::prepareForShutdown() {
   if (shutting_down_) return;
   shutting_down_ = true;
@@ -318,6 +323,7 @@ void QOneGenDeviceWidget::selectTarget() {
     const auto& device = targets_[index].camera;
     auto* source = controller_->cameraController(cameraKey(device), cameraLabel(device).toStdString());
     direct_camera_ = new QOneGenWidget(coordinator_, source, {device}, {}, content_, settings_file_, favorites_key_);
+    direct_camera_->setDialogShellFactory(dialog_shell_factory_);
     direct_camera_->setExternalSelector(devices_box_, refresh_button_);
     direct_camera_->setTitleCallback([this](const QString& title) {
       if (title_callback_) title_callback_(title);
@@ -329,6 +335,7 @@ void QOneGenDeviceWidget::selectTarget() {
     selector_bar_->hide();
   } else {
     interface_settings_ = new QOneGenWidget(coordinator_, nullptr, {}, {}, content_, settings_file_, favorites_key_);
+    interface_settings_->setDialogShellFactory(dialog_shell_factory_);
     connect(interface_settings_, &QOneGenWidget::stateChanged, this, [this] { updateControls(); });
     interface_settings_->setFeaturePanelOnly();
     content_->addWidget(interface_settings_);
@@ -404,6 +411,7 @@ void QOneGenDeviceWidget::updateCameraTabs(const std::vector<onegen::DeviceInfo>
     }
     auto* source = controller_->cameraController(key, label.toStdString());
     auto* camera = new QOneGenWidget(coordinator_, source, {device}, {}, tabs_, settings_file_, favorites_key_);
+    camera->setDialogShellFactory(dialog_shell_factory_);
     camera->setTabbedCamera();
     camera->setTitleCallback([this](const QString& title) { if (!interface_ && title_callback_) title_callback_(title); });
     cameras_[key] = camera;
@@ -459,6 +467,7 @@ void QOneGenDeviceWidget::finish() {
 void QOneGenDeviceWidget::showInterface(const Result& result) {
   if (!interface_settings_) {
     interface_settings_ = new QOneGenWidget(coordinator_, nullptr, {}, {}, tabs_, settings_file_, favorites_key_);
+    interface_settings_->setDialogShellFactory(dialog_shell_factory_);
     connect(interface_settings_, &QOneGenWidget::stateChanged, this, [this] { updateControls(); });
   }
   interface_settings_->setInterface(*interface_, result.features);

@@ -23,6 +23,8 @@ public:
   void prepareForShutdown();
   /** Publishes device titles without changing connection state on tab selection. */
   void setTitleCallback(std::function<void(const QString&)> callback);
+  /** @brief Selects the consumer dialog shell for current and later camera/Interface panels. */
+  void setDialogShellFactory(OneGenDialogShellFactory factory);
   /** @brief Allows search-path changes only without connection or pending control operations. */
   bool canReconfigureSearch() const;
   /** @brief Gives an actionable connected, busy or shutdown reason for search-path preflight. */
@@ -86,4 +88,5 @@ private:
   bool retaining_retry_targets_ = false;
   bool shutting_down_ = false;
   std::function<void(const QString&)> title_callback_;
+  OneGenDialogShellFactory dialog_shell_factory_;
 };

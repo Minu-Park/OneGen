@@ -7,6 +7,8 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QCursor>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFrame>
 #include <QFileInfo>
@@ -15,6 +17,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPainter>
+#include <QPlainTextEdit>
+#include <QPushButton>
 #include <QScrollBar>
 #include <QSettings>
 #include <QStandardPaths>
@@ -25,6 +29,8 @@
 #include <QToolButton>
 #include <QUuid>
 #include <QVBoxLayout>
+
+#include <stdexcept>
 
 namespace {
 
@@ -262,6 +268,111 @@ private slots:
     panel.setTabbedCamera();
     QCOMPARE(panel.findChild<QVBoxLayout*>(QStringLiteral("DeviceTabbedTreePanelLayout")), layout);
     QCOMPARE(layout->property("layoutRole").toString(), QStringLiteral("tabbed-panel"));
+  }
+
+  void dialogShellUsesConsumerFactoryOrPlainQt() {
+    QWidget owner;
+    auto plain = createOneGenDialogShell({}, &owner, QStringLiteral("Raw"));
+    QVERIFY(plain.dialog && plain.content);
+    QCOMPARE(plain.dialog->parentWidget(), &owner);
+    QCOMPARE(plain.dialog->windowTitle(), QStringLiteral("Raw"));
+    QCOMPARE(plain.dialog->layout(), plain.content);
+
+    QWidget* receivedParent = nullptr;
+    QString receivedTitle;
+    const OneGenDialogShellFactory factory = [&](QWidget* parent, const QString& title) {
+      receivedParent = parent;
+      receivedTitle = title;
+      auto dialog = std::make_unique<QDialog>(parent);
+      dialog->setObjectName(QStringLiteral("ConsumerShell"));
+      auto* frame = new QWidget(dialog.get());
+      auto* content = new QVBoxLayout(frame);
+      return OneGenDialogShell{std::move(dialog), content};
+    };
+    auto themed = createOneGenDialogShell(factory, &owner, QStringLiteral("Raw"));
+    QCOMPARE(receivedParent, &owner);
+    QCOMPARE(receivedTitle, QStringLiteral("Raw"));
+    QCOMPARE(themed.dialog->objectName(), QStringLiteral("ConsumerShell"));
+    QVERIFY(themed.content != themed.dialog->layout());
+
+    const OneGenDialogShellFactory incomplete = [](QWidget* parent, const QString&) {
+      return OneGenDialogShell{std::make_unique<QDialog>(parent), nullptr};
+    };
+    QVERIFY_THROWS_EXCEPTION(std::runtime_error,
+        createOneGenDialogShell(incomplete, &owner, QStringLiteral("Raw")));
+  }
+
+  void registerInspectorRequiresConsentAndExactBytes() {
+    QDialog dialog;
+    auto* content = new QVBoxLayout(&dialog);
+    std::vector<std::vector<std::uint8_t>> writes;
+    bool failWrite = false;
+    OneGenRegisterInspectorRequest request;
+    request.name = QStringLiteral("Raw");
+    request.length = 4;
+    request.value = std::vector<std::uint8_t>{0x01, 0x02, 0x0a, 0xff};
+    request.writeAllowed = true;
+    request.write = [&](const std::vector<std::uint8_t>& bytes) {
+      if (failWrite) throw std::runtime_error("device refused");
+      writes.push_back(bytes);
+    };
+    populateOneGenRegisterInspector(dialog, content, std::move(request));
+
+    auto* bytes = dialog.findChild<QPlainTextEdit*>(QStringLiteral("OneGenRegisterBytes"));
+    auto* consent = dialog.findChild<QCheckBox*>(QStringLiteral("OneGenRegisterWriteConsent"));
+    auto* actions = dialog.findChild<QDialogButtonBox*>();
+    QVERIFY(bytes && consent && actions);
+    auto* save = actions->button(QDialogButtonBox::Save);
+    QCOMPARE(bytes->toPlainText(), QStringLiteral("01 02 0a ff"));
+    QVERIFY(bytes->isReadOnly());
+    QVERIFY(consent->isEnabled());
+    QVERIFY(!save->isEnabled());
+
+    consent->setChecked(true);
+    QVERIFY(!bytes->isReadOnly());
+    QVERIFY(save->isEnabled());
+    for (const auto& invalid : {QStringLiteral("01 02"), QStringLiteral("01 02 0a fz"), QStringLiteral("01 02 0a ff 00")}) {
+      bytes->setPlainText(invalid);
+      save->click();
+      QVERIFY(writes.empty());
+      QVERIFY(dialog.result() != QDialog::Accepted);
+    }
+
+    failWrite = true;
+    bytes->setPlainText(QStringLiteral("10 20 30 40"));
+    save->click();
+    QVERIFY(writes.empty());
+    QVERIFY(dialog.result() != QDialog::Accepted);
+
+    failWrite = false;
+    bytes->setPlainText(QStringLiteral("1020\n30 40"));
+    save->click();
+    QCOMPARE(writes.size(), std::size_t{1});
+    QCOMPARE(writes.front(), (std::vector<std::uint8_t>{0x10, 0x20, 0x30, 0x40}));
+    QCOMPARE(dialog.result(), int(QDialog::Accepted));
+  }
+
+  void registerInspectorKeepsUnwritableRegistersReadOnly() {
+    QDialog dialog;
+    auto* content = new QVBoxLayout(&dialog);
+    bool wrote = false;
+    OneGenRegisterInspectorRequest request;
+    request.name = QStringLiteral("Raw");
+    request.length = 2;
+    request.writeAllowed = false;
+    request.write = [&](const std::vector<std::uint8_t>&) { wrote = true; };
+    populateOneGenRegisterInspector(dialog, content, std::move(request));
+    auto* bytes = dialog.findChild<QPlainTextEdit*>(QStringLiteral("OneGenRegisterBytes"));
+    auto* consent = dialog.findChild<QCheckBox*>(QStringLiteral("OneGenRegisterWriteConsent"));
+    auto* save = dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save);
+    QVERIFY(bytes->toPlainText().isEmpty());
+    QVERIFY(bytes->isReadOnly());
+    QVERIFY(!consent->isEnabled());
+    QVERIFY(!save->isEnabled());
+    bytes->setPlainText(QStringLiteral("00 01"));
+    emit dialog.findChild<QDialogButtonBox*>()->accepted();
+    QVERIFY(!wrote);
+    QVERIFY(dialog.result() != QDialog::Accepted);
   }
 
   void snapshotsKeepEditorsAndUnavailableFavorites() {

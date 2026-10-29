@@ -42,12 +42,9 @@ void logOneGenSnapshot(const onegen::worker::Lease& lease, const Maps& features,
 #include <QLabel>
 #include <QLineEdit>
 #include <QDialog>
-#include <QDialogButtonBox>
 #include <QClipboard>
 #include <QApplication>
 #include <QMenu>
-#include <QPlainTextEdit>
-#include <QRegularExpression>
 #include <QMetaObject>
 #include <QPushButton>
 #include <QPointer>
@@ -264,6 +261,11 @@ void QOneGenWidget::setInterface(const onegen::InterfaceInfo& info, onegen::Feat
 void QOneGenWidget::setTitleCallback(std::function<void(const QString&)> callback)
 {
   title_callback_ = std::move(callback);
+}
+
+void QOneGenWidget::setDialogShellFactory(OneGenDialogShellFactory factory)
+{
+  dialog_shell_factory_ = std::move(factory);
 }
 
 QOneGenWidget::~QOneGenWidget()
@@ -1091,48 +1093,18 @@ QWidget* QOneGenWidget::createFeatureEditor(const onegen::FeatureNode& n, const 
           try {
             if (!n.register_length || n.register_length > 65536)
               throw std::runtime_error("Raw register length must be between 1 and 65536 bytes.");
-            QDialog dialog(this);
-            dialog.setWindowTitle(nodeName);
-            auto* layout = new QVBoxLayout(&dialog);
-            auto* bytes = new QPlainTextEdit;
-            bytes->setReadOnly(true);
-            if (n.readable) {
-              const auto value = lease_->read_register(map_index, nodeName.toStdString());
-              bytes->setPlainText(QString::fromLatin1(QByteArray(
-                  reinterpret_cast<const char*>(value.data()), static_cast<qsizetype>(value.size())).toHex(' ')));
-            }
-            auto* allow = new QCheckBox(QStringLiteral("Enable raw register writes"));
-            allow->setEnabled(n.writable && !grab_watcher_.isRunning() && !grab_live_button_->isChecked());
-            auto* actions = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
-            actions->button(QDialogButtonBox::Save)->setEnabled(false);
-            connect(allow, &QCheckBox::toggled, &dialog, [bytes, actions](bool checked) {
-              bytes->setReadOnly(!checked);
-              actions->button(QDialogButtonBox::Save)->setEnabled(checked);
-            });
-            layout->addWidget(new QLabel(QStringLiteral("%1 bytes. Raw writes bypass named feature controls.").arg(n.register_length)));
-            layout->addWidget(bytes);
-            layout->addWidget(allow);
-            layout->addWidget(actions);
-            connect(actions, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-            connect(actions, &QDialogButtonBox::accepted, &dialog, [&] {
-              auto hex = bytes->toPlainText();
-              hex.remove(QRegularExpression(QStringLiteral("\\s+")));
-              if (hex.size() != static_cast<qsizetype>(n.register_length * 2)
-                  || !QRegularExpression(QStringLiteral("\\A[0-9a-fA-F]+\\z")).match(hex).hasMatch()) {
-                qWarning() << "[GenICam] register write requires the exact number of hexadecimal bytes";
-                return;
-              }
-              const auto raw = QByteArray::fromHex(hex.toLatin1());
-              try {
-                lease_->write_register(map_index, nodeName.toStdString(),
-                    std::vector<std::uint8_t>(raw.begin(), raw.end()));
-                qInfo().noquote() << "[GenICam] raw register written:" << nodeName;
-                dialog.accept();
-              } catch (const std::exception& error) {
-                qWarning().noquote() << "[GenICam] register write failed:" << error.what();
-              }
-            });
-            dialog.exec();
+            OneGenRegisterInspectorRequest request;
+            request.name = nodeName;
+            request.length = n.register_length;
+            if (n.readable) request.value = lease_->read_register(map_index, nodeName.toStdString());
+            request.writeAllowed = n.writable && !grab_watcher_.isRunning() && !grab_live_button_->isChecked();
+            request.write = [this, map_index, nodeName](const std::vector<std::uint8_t>& bytes) {
+              if (!lease_) throw std::runtime_error("The camera is disconnected.");
+              lease_->write_register(map_index, nodeName.toStdString(), bytes);
+            };
+            auto shell = createOneGenDialogShell(dialog_shell_factory_, this, nodeName);
+            populateOneGenRegisterInspector(*shell.dialog, shell.content, std::move(request));
+            shell.dialog->exec();
             if (lease_) {
               run(Operation::Write, [this] {
                 AsyncResult result;

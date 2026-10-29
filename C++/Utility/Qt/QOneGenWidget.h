@@ -1,5 +1,6 @@
 #pragma once
 #include "OneGenControlUi.h"
+#include "OneGenDialogs.h"
 
 #include "OneGenNode.h"
 #include "OneGenTypes.h"
@@ -60,6 +61,8 @@ public:
   /** Reports the completed camera connection independently of pending operations. */
   bool cameraConnected() const { return static_cast<bool>(lease_); }
   void setTitleCallback(std::function<void(const QString&)> callback);
+  /** @brief Selects the consumer shell for modal dialogs; empty uses plain Qt dialogs. */
+  void setDialogShellFactory(OneGenDialogShellFactory factory);
   void prepareForShutdown();
 
 signals:
@@ -162,6 +165,7 @@ private:
   std::vector<onegen::DeviceInfo> devices_;
   DiscoverFn discover_;
   std::function<void(const QString&)> title_callback_;
+  OneGenDialogShellFactory dialog_shell_factory_;
   QTimer* feature_drain_timer_ = nullptr;
   FeatureRead feature_read_;
   FeatureWrite feature_write_;

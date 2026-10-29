@@ -1,6 +1,7 @@
 #include "DevicePluginTemplate.h"
 
 #include "Utility/Qt/QOneGenDeviceWidget.h"
+#include "Chrome/ThemedDialog.h"
 #include "OneGenCoordinator.h"
 #include "OneGenSourceController.h"
 #include "OneGen.h"
@@ -187,6 +188,12 @@ public:
       widget_->setTitleCallback([this](const QString& title) {
         title_ = title;
         if (title_changed_) title_changed_(title_);
+      });
+      // The host installs Resources; plugin dialogs use its shell while the widget stays theme-free.
+      widget_->setDialogShellFactory([](QWidget* parent, const QString& title) {
+        auto dialog = std::make_unique<ThemedDialog>(title, parent);
+        auto* content = dialog->contentLayout();
+        return OneGenDialogShell{std::move(dialog), content};
       });
       register_widget_(widget_);
     }

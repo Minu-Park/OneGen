@@ -204,6 +204,8 @@ if(ONEGEN_BUILD_QT_WIDGET)
   endif()
   add_subdirectory(Utility/Qt)
   add_library(OneGenQtWidget STATIC
+    Utility/Qt/OneGenDialogs.cpp
+    Utility/Qt/OneGenDialogs.h
     Utility/Qt/QOneGenDeviceWidget.cpp
     Utility/Qt/QOneGenDeviceWidget.h
     Utility/Qt/QOneGenWidget.cpp
@@ -272,8 +274,8 @@ endif()
 if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
   if(NOT ONEGEN_BUILD_PLAYGROUND_ADAPTER OR NOT ONEGEN_BUILD_QT_WIDGET
       OR NOT TARGET Playground::DevicePlugin
-      OR NOT TARGET Resources::Widgets OR NOT Qt6_FOUND)
-    message(FATAL_ERROR "ONEGEN_BUILD_PLAYGROUND_PLUGIN requires the adapter, OneGen::QtWidget, Playground::DevicePlugin, Resources::Widgets, and Qt6::Widgets")
+      OR NOT TARGET Resources::Widgets OR NOT TARGET Resources::Dialogs OR NOT Qt6_FOUND)
+    message(FATAL_ERROR "ONEGEN_BUILD_PLAYGROUND_PLUGIN requires the adapter, OneGen::QtWidget, Playground::DevicePlugin, Resources::Widgets, Resources::Dialogs, and Qt6::Widgets")
   endif()
   find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
   add_library(OneGenPlugin MODULE
@@ -291,7 +293,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin")
   target_link_libraries(OneGenPlugin PRIVATE
     Playground::DevicePlugin OneGen::PlaygroundAdapter OneGen::QtWidget
-    Resources::Widgets Qt6::Widgets Qt6::Concurrent)
+    Resources::Widgets Resources::Dialogs Qt6::Widgets Qt6::Concurrent)
 
   set(_onegen_runtime_payload "${CMAKE_CURRENT_BINARY_DIR}/plugin-runtime")
   file(MAKE_DIRECTORY "${_onegen_runtime_payload}")
