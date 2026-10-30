@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Take the binary display name from the package definition.
+
 ## v0.3.4 (2026-10-29)
 
 - Disable connection and Live commands while any asynchronous control operation is pending, including Live start/stop, so the UI does not offer commands rejected by the operation gate.

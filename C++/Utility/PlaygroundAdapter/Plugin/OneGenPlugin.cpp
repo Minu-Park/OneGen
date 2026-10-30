@@ -287,7 +287,7 @@ public:
   }
 
   DevicePluginDescriptor descriptor() const override
-  { return {QStringLiteral("onegen"), QStringLiteral("GenICam"), playgroundDevicePluginVersion(), false}; }
+  { return {QStringLiteral("onegen"), playgroundDevicePluginDisplayName(), playgroundDevicePluginVersion(), false}; }
 
   bool discoverDevices(QVariantMap* data, QString* error) override
   {
