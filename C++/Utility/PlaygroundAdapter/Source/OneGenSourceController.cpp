@@ -453,16 +453,16 @@ QList<ToolDescriptor> OneGenSourceController::toolDescriptors() const {
       {"deviceId", text}, {"producer", text}, {"interfaceId", QJsonObject{{"type", "string"}}}},
       {"targetId", "title", "deviceId", "producer", "interfaceId"});
   QList<ToolDescriptor> result{
-      {"device.targets", 1, "Device targets", "Copy exact producer/interface/device targets.", ToolEffect::Observe, true, {}, empty,
+      {"device.targets", 1, "Device targets", "Copy exact producer/interface/device targets.", ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty,
           schema({{"targets", QJsonObject{{"type", "array"}, {"items", entry}}}}, {"targets"})},
-      {"device.connection", 1, "Device connection", "Observe the module-owned connection and converted-frame count, not presentation completion.", ToolEffect::Observe, true, {}, empty, stateSchema()},
-      {"device.discover", 1, "Discover devices", "Run existing isolated producer discovery while disconnected and idle.", ToolEffect::Device, true, {}, empty,
+      {"device.connection", 1, "Device connection", "Observe the module-owned connection and converted-frame count, not presentation completion.", ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, stateSchema()},
+      {"device.discover", 1, "Discover devices", "Run existing isolated producer discovery while disconnected and idle.", ToolEffect::Device, ToolEgress::Metadata, true, {}, empty,
           schema({{"targets", QJsonObject{{"type", "array"}, {"items", entry}}}}, {"targets"})},
-      {"device.connect", 1, "Connect device", "Open an exact declared Device; implicit switching and Interface mode are refused.", ToolEffect::Device, true, {}, schema({{"targetId", text}}, {"targetId"}), stateSchema()},
-      {"device.disconnect", 1, "Disconnect device", "Close the exact connection generation.", ToolEffect::Device, true, {}, connection, stateSchema()},
-      {"device.single", 1, "Acquire one image", "Wait for native single acquisition and conversion; query the viewer separately for presentation evidence.", ToolEffect::Pipeline, true, {}, connection, stateSchema()},
-      {"device.live-start", 1, "Start Live", "Start existing acquisition on the exact connection; completion is worker acknowledgement.", ToolEffect::Pipeline, true, {}, connection, stateSchema()},
-      {"device.live-stop", 1, "Stop Live", "Stop existing acquisition on the exact connection.", ToolEffect::Pipeline, true, {}, connection, stateSchema()}};
+      {"device.connect", 1, "Connect device", "Open an exact declared Device; implicit switching and Interface mode are refused.", ToolEffect::Device, ToolEgress::Metadata, true, {}, schema({{"targetId", text}}, {"targetId"}), stateSchema()},
+      {"device.disconnect", 1, "Disconnect device", "Close the exact connection generation.", ToolEffect::Device, ToolEgress::Metadata, true, {}, connection, stateSchema()},
+      {"device.single", 1, "Acquire one image", "Wait for native single acquisition and conversion; query the viewer separately for presentation evidence.", ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, stateSchema()},
+      {"device.live-start", 1, "Start Live", "Start existing acquisition on the exact connection; completion is worker acknowledgement.", ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, stateSchema()},
+      {"device.live-stop", 1, "Stop Live", "Stop existing acquisition on the exact connection.", ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, stateSchema()}};
   if (!coordinator_) for (auto& descriptor : result) {
     descriptor.available = false; descriptor.unavailableReason = "Device control has no coordinator.";
   }
