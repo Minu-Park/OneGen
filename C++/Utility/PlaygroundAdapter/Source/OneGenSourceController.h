@@ -2,7 +2,7 @@
 
 #include "AbstractSourceController.h"
 #include "engine/GraphicsFrameAdapter.h"
-#include "ToolProvider.h"
+#include "DeviceConnectionControl.h"
 #include "DeviceParameterControl.h"
 #include "OneGenTypes.h"
 #include "OneGenNode.h"
@@ -24,10 +24,11 @@ class Coordinator;
 }
 
 /** Owns OneGen live acquisition and delivers SessionFrame values synchronously. */
-class OneGenSourceController final : public AbstractSourceController, public IToolProvider, public IDeviceParameterControl {
+class OneGenSourceController final : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl {
   Q_OBJECT
-  Q_INTERFACES(IToolProvider IDeviceParameterControl)
+  Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl)
 public:
+  using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
   explicit OneGenSourceController(QObject* parent = nullptr);
   ~OneGenSourceController() override;
 
@@ -73,10 +74,24 @@ public:
   /** @brief Copies cached feature/stream observations without SDK calls on the GUI thread. */
   std::vector<std::pair<std::string, onegen::FeatureNode>> controlFeatures() const;
   std::vector<onegen::DataStreamInfo> controlStreams() const;
-  /** @brief Declares neutral device commands independently of visible controls. */
-  QList<ToolDescriptor> toolDescriptors() const override;
-  /** @brief Admits one bounded external command and drains it before destruction. */
-  ApiResult<void> requestTool(const QString& name, int version, QJsonObject arguments, IToolProvider::Completion completion) override;
+  /** @brief Declares every lifecycle operation while a discovery coordinator is configured. */
+  DeviceConnectionCapabilities connectionCapabilities() const override;
+  /** @brief Copies the cached producer/interface/device targets without refreshing them. */
+  DeviceConnectionResult requestConnectionTargets(TargetsCompletion completion) override;
+  /** @brief Observes the module-owned connection and converted-frame count. */
+  DeviceConnectionResult requestConnectionState(IDeviceConnectionControl::Completion completion) override;
+  /** @brief Runs isolated producer discovery while disconnected and idle. */
+  DeviceConnectionResult requestDiscover(TargetsCompletion completion) override;
+  /** @brief Opens an exact declared Device; implicit switching and Interface mode are refused. */
+  DeviceConnectionResult requestConnect(std::string targetId, IDeviceConnectionControl::Completion completion) override;
+  /** @brief Closes the exact connection. */
+  DeviceConnectionResult requestDisconnect(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
+  /** @brief Waits for native single acquisition and conversion on the exact connection. */
+  DeviceConnectionResult requestSingle(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
+  /** @brief Starts acquisition on the exact connection; completion is worker acknowledgement. */
+  DeviceConnectionResult requestLiveStart(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
+  /** @brief Stops acquisition on the exact connection. */
+  DeviceConnectionResult requestLiveStop(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
   /** @brief Copies typed device features using the existing lease authority. */
   DeviceParameterResult requestParameters(InventoryCompletion completion) override;
   /** @brief Reads one exact current connection and selector context. */
@@ -123,7 +138,12 @@ private:
   std::vector<std::pair<std::string, onegen::FeatureNode>> control_features_;
   std::vector<onegen::DataStreamInfo> control_streams_;
   void refreshControlSnapshot();
-  QJsonObject controlState() const;
+  /** @brief Copies the connection of this controller or of its one connected child. */
+  DeviceConnectionState connectionState() const;
+  enum class Lifecycle { Discover, Connect, Disconnect, Single, LiveStart, LiveStop };
+  /** @brief Admits one bounded lifecycle command and drains it before destruction. */
+  DeviceConnectionResult admitLifecycle(Lifecycle operation, std::string argument,
+      IDeviceConnectionControl::Completion completion, TargetsCompletion targetsCompletion);
   DeviceParameterResult parameterAdmission();
   std::vector<OneGenSourceController*> parameterControllers() const;
   DeviceParameterDescriptor observeParameter(const std::shared_ptr<onegen::worker::Lease>& lease,

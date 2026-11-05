@@ -80,9 +80,10 @@ Physical-board equivalence across producers or SDKs is not inferred; native
 Producer/SDK resource arbitration determines whether a connection is available.
 
 The optional consumer adapter's `OneGenSourceController` owns Device leases and
-declares `device.targets`, `device.connection`, `device.discover`, `device.connect`,
-`device.disconnect`, `device.single`, `device.live-start` and `device.live-stop`.
-Consumers discover schemas through `IToolProvider`; views borrow lease references
+implements the SDK `IDeviceConnectionControl` capability, from which Playground
+declares the canonical `device.targets`, `device.connection`, `device.discover`,
+`device.connect`, `device.disconnect`, `device.single`, `device.live-start` and
+`device.live-stop` tools; views borrow lease references
 and use the same module commands. A target retains producer, Interface and Device
 identity; each connection gets a fresh UUID. Pending GUI/API/discovery or Interface
 work is refused as Busy, and accepted external work drains before teardown.
