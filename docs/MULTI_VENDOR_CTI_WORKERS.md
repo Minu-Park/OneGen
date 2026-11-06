@@ -32,13 +32,13 @@ files and does not own a package `cti/` overlay.
 
 ```text
 plugins/
-?붴?? onegen/
-    ?붴?? current/
-        ?쒋?? plugin.json
-        ?쒋?? OneGenPlugin.{dll,so}
-        ?쒋?? OneGenWorker{.exe}
-        ?붴?? runtime/
-            ?붴?? OneGen's GenApi runtime
+└── onegen/
+    └── current/
+        ├── plugin.json
+        ├── OneGenPlugin.{dll,so}
+        ├── OneGenWorker{.exe}
+        └── runtime/
+            └── OneGen's GenApi runtime
 ```
 
 Automatic discovery uses only the architecture-specific standard GenTL search path. Copied `.cti` files without their sibling vendor libraries are not
@@ -74,19 +74,13 @@ Discovery runs are serialized per coordinator; process isolation does not confer
 exclusive ownership of hardware shared by different producer installations.
 Shutdown suppresses pending GUI updates and joins discovery before teardown.
 
-Probe responses in protocol v14 carry both Devices and producer-scoped Interface
+Probe responses in protocol v10 carry both Devices and producer-scoped Interface
 failure details. An individual Interface failure preserves other Interfaces and
 their Devices, appears in the cumulative result, and is not retried as an empty
 inventory. Successful empty inventories retain the initial-discovery budget.
 An idle worker with a failed probe is retired before publishing its result so
 native resources retained during failed initialization are released. Connected
 or opening Interface/Device sessions prevent retirement of their worker.
-
-Worker maps use one canonical producer path identity, so equivalent forward-
-and backslash spellings of the same CTI share the retained discovery worker.
-If that discovery-only worker rejects the first Device open, the coordinator
-retires it once and retries with a fresh process. A pinned Interface, active
-Device, or live lease prevents both reuse retirement and the retry.
 
 Worker diagnostics preserve OneGen severity tags and leading producer severity
 fields, including timestamped `NOTICE:` and `ERROR:` records. Unclassified
@@ -134,7 +128,7 @@ for reconnect; shutdown releases them.
 ## Multiple Sessions
 
 The plugin owns one coordinator. An explicitly connected Interface pins one
-producer worker and its Device channels share that worker through protocol v14.
+producer worker and its Device channels share that worker through protocol v10.
 Standalone Device connections retain the existing worker-isolation policy.
 
 - Duplicate local opens of the same complete Device identity are rejected.
