@@ -35,7 +35,7 @@ public:
   /** True while the worker process is still accepting requests. */
   bool alive() const;
   /** Marks the worker as retiring and waits briefly for active requests to finish. */
-  bool beginRetirement();
+  bool beginRetirement(std::chrono::milliseconds timeout = std::chrono::seconds{2});
   /** True when initialization failed and the worker accepts only inactive replies and shutdown. */
   bool inactive() const;
   /** Stops this worker and releases its native resources before producer fallback. */

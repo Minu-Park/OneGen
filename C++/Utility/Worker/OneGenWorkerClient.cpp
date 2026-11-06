@@ -74,10 +74,10 @@ struct Connection::Impl {
   bool accepting = true;
   std::atomic<bool> discovery_log{true};
 
-  bool beginRequest()
+  bool beginRequest(const bool allow_retiring = false)
   {
     std::lock_guard lock(lifecycle_mutex);
-    if (!accepting) return false;
+    if (!accepting && !allow_retiring) return false;
     ++active_requests;
     return true;
   }
@@ -87,13 +87,12 @@ struct Connection::Impl {
     if (active_requests > 0) --active_requests;
     lifecycle_cv.notify_all();
   }
-  bool beginRetirement()
+  bool beginRetirement(const std::chrono::milliseconds timeout)
   {
     std::unique_lock lock(lifecycle_mutex);
     if (!accepting) return false;
     accepting = false;
-    lifecycle_cv.wait(lock, [&] { return active_requests == 0; });
-    return true;
+    return lifecycle_cv.wait_for(lock, timeout, [&] { return active_requests == 0; });
   }
   struct Callbacks { FrameFn frame; ErrorFn error; InvalidateFn invalidate; };
   std::map<std::uint32_t, Callbacks> callbacks;
@@ -369,7 +368,7 @@ void Connection::close()
 std::vector<std::byte> Connection::request(Operation operation, std::vector<std::byte> payload,
                                             const std::chrono::milliseconds timeout, std::uint32_t session)
 {
-  if (!impl_->beginRequest()) throw std::runtime_error("Worker connection is retiring.");
+  if (!impl_->beginRequest(operation == Operation::Shutdown)) throw std::runtime_error("Worker connection is retiring.");
   struct ActiveRequest {
     explicit ActiveRequest(Impl* value) : value(value) {}
     ~ActiveRequest() { value->endRequest(); }
@@ -411,9 +410,9 @@ bool Connection::alive() const
   return impl_->running;
 }
 
-bool Connection::beginRetirement()
+bool Connection::beginRetirement(const std::chrono::milliseconds timeout)
 {
-  return impl_->beginRetirement();
+  return impl_->beginRetirement(timeout);
 }
 
 bool Connection::inactive() const

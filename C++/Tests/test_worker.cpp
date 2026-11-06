@@ -583,6 +583,9 @@ int runTests(int argc, char** argv)
     assert(std::chrono::steady_clock::now() - started >= 200ms);
     (void)reply.get();
     connection.close();
+#ifndef _WIN32
+    assert(std::filesystem::exists(cti.string() + ".shutdown"));
+#endif
   }
   // Equivalent producer path spellings reuse the retained discovery worker.
   {

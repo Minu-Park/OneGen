@@ -478,9 +478,15 @@ bool Coordinator::retire_idle_discovery(const std::string& cti, Connection* expe
             [&](const auto& entry) { return producerKey(entry.second.cti_path) == cti_key; })) return false;
     if (std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
             [&](const auto& entry) { return entry.second.starts_with(cti_key + '\0'); })) return false;
-    if (!found->second->beginRetirement()) return false;
     retired = std::move(found->second);
     connections_.erase(found);
+  }
+  // Drain outside the coordinator lock so unrelated Interface/Device work can proceed.
+  if (!retired->beginRetirement(std::chrono::seconds{2})) {
+    qWarning().noquote() << QStringLiteral("[GenICam] idle discovery worker drain timed out or was already retiring: cti=%1")
+                                .arg(QString::fromStdString(cti));
+    retired->close();
+    return false;
   }
   retired->close();
   qDebug().noquote() << QStringLiteral("[GenICam] idle discovery worker retired after open failure: cti=%1")

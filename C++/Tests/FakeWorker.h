@@ -396,7 +396,10 @@ inline int fakeWorker(const std::filesystem::path& cti)
       if (failed) std::ofstream(cti.string() + ".probes", std::ios::app) << "probe\n";
     }
     transmit({request.operation, request.id, true, {}, payload.take(), request.session});
-    if (request.operation == Operation::Shutdown) return 0;
+    if (request.operation == Operation::Shutdown) {
+      std::ofstream(cti.string() + ".shutdown").put('1');
+      return 0;
+    }
   }
   return 0;
 }
