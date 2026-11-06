@@ -18,9 +18,17 @@
 namespace onegen::worker {
 namespace {
 
+std::string producerKey(const std::string& cti)
+{
+  const std::filesystem::path path(cti);
+  std::error_code error;
+  const auto canonical = std::filesystem::weakly_canonical(path, error);
+  return (error ? path.lexically_normal() : canonical).string();
+}
+
 std::string identity(const DeviceInfo& device)
 {
-  return device.cti_path + '\0' + device.interface_id + '\0' + device.id;
+  return producerKey(device.cti_path) + '\0' + device.interface_id + '\0' + device.id;
 }
 
 const char* moduleLabel(int index)
@@ -221,7 +229,7 @@ Coordinator::Coordinator(std::filesystem::path worker_executable,
 Coordinator::~Coordinator() { shutdown(); }
 
 void Coordinator::open_interface(const InterfaceInfo& info) {
-  const auto resource = info.cti_path + '\0' + info.id;
+  const auto resource = producerKey(info.cti_path) + '\0' + info.id;
   {
     std::lock_guard lock(mutex_);
     if (interface_sessions_.count(resource)) throw std::runtime_error("The Interface is already connected.");
@@ -236,11 +244,11 @@ void Coordinator::open_interface(const InterfaceInfo& info) {
       std::lock_guard lock(mutex_);
       interface_sessions_.erase(resource);
       const bool in_use = std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
-          [&](const auto& item) { return item.second.cti_path == info.cti_path; })
+          [&](const auto& item) { return producerKey(item.second.cti_path) == producerKey(info.cti_path); })
           || std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
-              [&](const auto& item) { return item.second.starts_with(info.cti_path + '\0'); });
+              [&](const auto& item) { return item.second.starts_with(producerKey(info.cti_path) + '\0'); });
       if (!in_use) {
-        if (const auto found = connections_.find(info.cti_path); found != connections_.end()) {
+        if (const auto found = connections_.find(producerKey(info.cti_path)); found != connections_.end()) {
           failed = std::move(found->second);
           connections_.erase(found);
         }
@@ -257,10 +265,10 @@ void Coordinator::open_interface(const InterfaceInfo& info) {
 
 void Coordinator::close_interface(const InterfaceInfo& info) {
   std::lock_guard lock(mutex_);
-  const auto key = info.cti_path + '\0' + info.id;
+  const auto key = producerKey(info.cti_path) + '\0' + info.id;
   for (const auto& [device, iface] : leased_interfaces_)
-    if (iface == key) throw std::runtime_error("Disconnect this Interface's Devices before releasing it.");
-  if (const auto found = connections_.find(info.cti_path); found != connections_.end() && found->second->alive()) {
+    if (producerKey(iface.substr(0, iface.find('\0'))) == producerKey(info.cti_path) && iface.substr(iface.find('\0') + 1) == info.id) throw std::runtime_error("Disconnect this Interface's Devices before releasing it.");
+  if (const auto found = connections_.find(producerKey(info.cti_path)); found != connections_.end() && found->second->alive()) {
     Writer out; out.string(info.id);
     found->second->request(Operation::CloseInterface, out.take());
   }
@@ -302,8 +310,8 @@ FeatureNode Coordinator::write_interface(const InterfaceInfo& info, std::string_
                                          std::string_view operation, std::string_view value) {
   std::lock_guard lock(mutex_);
   for (const auto& [key, id] : leased_interfaces_)
-    if (id == info.cti_path + '\0' + info.id) throw std::runtime_error("Disconnect all cameras on this interface before reconfiguration.");
-  const auto found = connections_.find(info.cti_path);
+    if (producerKey(id.substr(0, id.find('\0'))) == producerKey(info.cti_path) && id.substr(id.find('\0') + 1) == info.id) throw std::runtime_error("Disconnect all cameras on this interface before reconfiguration.");
+  const auto found = connections_.find(producerKey(info.cti_path));
   if (found == connections_.end()) throw std::runtime_error("Interface producer is unavailable.");
   Writer out;
   out.string(info.id);
@@ -344,7 +352,7 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
         std::shared_ptr<Connection> previous;
         {
           std::lock_guard lock(mutex_);
-          if (const auto found = connections_.find(cti.string()); found != connections_.end())
+          if (const auto found = connections_.find(producerKey(cti.string())); found != connections_.end())
             previous = found->second;
         }
         if (previous && (!previous->alive() || previous->inactive()))
@@ -422,16 +430,17 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
 
 void Coordinator::retire_failed_discovery(const std::string& cti, Connection* expected, bool preserve_inactive)
 {
+  const auto cti_key = producerKey(cti);
   std::shared_ptr<Connection> failed;
   {
     std::lock_guard lock(mutex_);
-    const auto found = connections_.find(cti);
+    const auto found = connections_.find(cti_key);
     if (found == connections_.end() || found->second.get() != expected) return;
     if (preserve_inactive && found->second->alive() && found->second->inactive()) return;
     if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
-                    [&](const auto& item) { return item.second.cti_path == cti; })
+                    [&](const auto& item) { return producerKey(item.second.cti_path) == cti_key; })
         || std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
-                       [&](const auto& item) { return item.second.starts_with(cti + '\0'); })) return;
+                       [&](const auto& item) { return item.second.starts_with(cti_key + '\0'); })) return;
     failed = std::move(found->second);
     connections_.erase(found);
     std::erase_if(device_connections_, [&](const auto& item) { return item.second == failed; });
@@ -439,6 +448,29 @@ void Coordinator::retire_failed_discovery(const std::string& cti, Connection* ex
   failed->close();
   qDebug().noquote() << QStringLiteral("[GenICam] failed discovery worker retired: cti=%1")
                           .arg(QString::fromStdString(cti));
+}
+
+bool Coordinator::retire_idle_discovery(const std::string& cti, Connection* expected)
+{
+  const auto cti_key = producerKey(cti);
+  std::shared_ptr<Connection> retired;
+  {
+    std::lock_guard lock(mutex_);
+    const auto found = connections_.find(cti_key);
+    if (found == connections_.end() || found->second.get() != expected) return false;
+    if (std::any_of(device_connections_.begin(), device_connections_.end(),
+            [&](const auto& entry) { return entry.second == found->second; })) return false;
+    if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
+            [&](const auto& entry) { return producerKey(entry.second.cti_path) == cti_key; })) return false;
+    if (std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
+            [&](const auto& entry) { return entry.second.starts_with(cti_key + '\0'); })) return false;
+    retired = std::move(found->second);
+    connections_.erase(found);
+  }
+  retired->close();
+  qDebug().noquote() << QStringLiteral("[GenICam] idle discovery worker retired after open failure: cti=%1")
+                          .arg(QString::fromStdString(cti));
+  return true;
 }
 
 std::vector<DeviceInfo> Coordinator::merge(std::vector<DeviceInfo> devices)
@@ -474,13 +506,17 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
   auto candidates = device.cti_candidates;
   if (candidates.empty() && !device.cti_path.empty()) candidates.push_back(device.cti_path);
   std::string error;
-  for (std::size_t index = 0; index < candidates.size(); ++index) {
+  bool retried_discovery = false;
+  std::size_t index = 0;
+  while (index < candidates.size()) {
     const auto& cti = candidates[index];
     const auto& device_id = index < device.cti_candidate_ids.size() ? device.cti_candidate_ids[index] : device.id;
     const auto& interface_id = index < device.cti_candidate_interfaces.size()
         ? device.cti_candidate_interfaces[index] : device.interface_id;
+    const auto cti_key = producerKey(cti);
     std::shared_ptr<Connection> worker;
     bool claimed = false;
+    bool retry_discovery = false;
     std::uint32_t session = 0;
     try {
       {
@@ -488,7 +524,7 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
         if (leased_.count(key)) {
           bool live_holder = false;
           for (const auto& held_cti : candidates) {
-            const auto found = device_connections_.find(held_cti + '\0' + key);
+            const auto found = device_connections_.find(producerKey(held_cti) + '\0' + key);
             if (found != device_connections_.end() && found->second && found->second->alive()) {
               live_holder = true;
               break;
@@ -497,10 +533,10 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
           if (live_holder) throw std::runtime_error("The camera is already in use.");
           leased_.erase(key);
           for (const auto& held_cti : candidates) {
-            const auto found = device_connections_.find(held_cti + '\0' + key);
+            const auto found = device_connections_.find(producerKey(held_cti) + '\0' + key);
             if (found == device_connections_.end()) continue;
             if (found->second && found->second->alive()) continue;
-            if (const auto probe = connections_.find(held_cti);
+            if (const auto probe = connections_.find(producerKey(held_cti));
                 probe != connections_.end() && probe->second == found->second)
               connections_.erase(probe);
             device_connections_.erase(found);
@@ -508,47 +544,54 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
         }
         leased_.insert(key);
         claimed = true;
-        leased_interfaces_[key] = cti + '\0' + interface_id;
+        leased_interfaces_[key] = cti_key + '\0' + interface_id;
         for (const auto& [resource, board] : interface_sessions_)
-          if (board.cti_path == cti && board.id == interface_id) {
-            auto [channel, inserted] = session_channels_.try_emplace(cti + '\0' + key, next_session_);
+          if (producerKey(board.cti_path) == cti_key && board.id == interface_id) {
+            auto [channel, inserted] = session_channels_.try_emplace(cti_key + '\0' + key, next_session_);
             if (inserted) ++next_session_;
             session = channel->second;
-            worker = connections_.at(cti);
-            device_connections_[cti + '\0' + key] = worker;
+            worker = connections_.at(cti_key);
+            device_connections_[cti_key + '\0' + key] = worker;
             break;
           }
       }
-      if (!worker) worker = connection(cti, key);
+      if (!worker) worker = connection(cti_key, key);
       Writer out;
       out.string(device_id);
       out.string(interface_id);
       worker->request(Operation::Open, out.take(), std::chrono::seconds{60}, session);
       auto opened = device;
-      opened.cti_path = cti;
+      opened.cti_path = cti_key;
       opened.id = device_id;
       opened.interface_id = interface_id;
-      { std::lock_guard lock(mutex_); leased_interfaces_[key] = cti + '\0' + opened.interface_id; }
+      { std::lock_guard lock(mutex_); leased_interfaces_[key] = cti_key + '\0' + opened.interface_id; }
       return std::make_unique<Lease>(std::move(worker), std::move(opened), key, this, session);
     } catch (const std::exception& exception) {
       error = exception.what();
-      std::lock_guard lock(mutex_);
-      if (claimed) { leased_.erase(key); leased_interfaces_.erase(key); }
-      if (session && worker && worker->alive()) {
-        try { worker->request(Operation::Close, {}, std::chrono::seconds{2}, session); } catch (...) {}
-      }
-      if (claimed) {
-        const auto connection_key = cti + '\0' + key;
-        if (const auto found = device_connections_.find(connection_key); found != device_connections_.end()) {
-          if (!session) {
-            if (const auto probe = connections_.find(cti); probe != connections_.end() && probe->second == found->second)
-              connections_.erase(probe);
-          }
-          device_connections_.erase(found);
+      bool close_session = false;
+      {
+        std::lock_guard lock(mutex_);
+        if (claimed) { leased_.erase(key); leased_interfaces_.erase(key); }
+        close_session = session && worker && worker->alive();
+        if (claimed) {
+          const auto connection_key = cti_key + '\0' + key;
+          if (const auto found = device_connections_.find(connection_key); found != device_connections_.end())
+            device_connections_.erase(found);
         }
       }
+      if (close_session) {
+        try { worker->request(Operation::Close, {}, std::chrono::seconds{2}, session); } catch (...) {}
+      }
+      if (claimed) retry_discovery = retire_idle_discovery(cti_key, worker.get());
+      qDebug().noquote() << QStringLiteral("[GenICam] coordinator open failed: cti=%1 claimed=%2 retryDiscovery=%3")
+          .arg(QString::fromStdString(cti_key)).arg(claimed).arg(retry_discovery);
       if (!claimed) break;
     }
+    if (retry_discovery && !retried_discovery) {
+      retried_discovery = true;
+      continue;
+    }
+    ++index;
   }
   throw std::runtime_error(error.empty() ? "No producer candidate is available." : error);
 }
@@ -598,19 +641,26 @@ void Coordinator::shutdown()
 
 std::shared_ptr<Connection> Coordinator::connection(const std::string& cti, const std::string& device)
 {
+  const auto cti_key = producerKey(cti);
   if (!device.empty()) {
-    const auto key = cti + '\0' + device;
+    const auto key = cti_key + '\0' + device;
     {
       std::lock_guard lock(mutex_);
       if (const auto found = device_connections_.find(key); found != device_connections_.end()) return found->second;
-      if (const auto probe = connections_.find(cti); probe != connections_.end()
-          && std::none_of(device_connections_.begin(), device_connections_.end(),
-                          [&](const auto& entry) { return entry.second == probe->second; })) {
-        device_connections_[key] = probe->second;
-        return probe->second;
+      if (const auto probe = connections_.find(cti_key); probe != connections_.end()) {
+        const auto refs = std::count_if(device_connections_.begin(), device_connections_.end(),
+            [&](const auto& entry) { return entry.second == probe->second; });
+        qDebug().noquote() << QStringLiteral("[GenICam] coordinator reuse check: cti=%1 refs=%2")
+            .arg(QString::fromStdString(cti_key)).arg(static_cast<qulonglong>(refs));
+        if (refs == 0) {
+          device_connections_[key] = probe->second;
+          return probe->second;
+        }
       }
     }
-    auto worker = std::make_shared<Connection>(worker_executable_, cti, claim_);
+    qDebug().noquote() << QStringLiteral("[GenICam] coordinator creating worker: cti=%1")
+        .arg(QString::fromStdString(cti_key));
+    auto worker = std::make_shared<Connection>(worker_executable_, cti_key, claim_);
     Writer probe;
     probe.scalar(std::uint32_t{1000});
     worker->request(Operation::Probe, probe.take(), std::chrono::seconds{21});
@@ -618,10 +668,10 @@ std::shared_ptr<Connection> Coordinator::connection(const std::string& cti, cons
     device_connections_[key] = worker;
     return worker;
   }
-  { std::lock_guard lock(mutex_); if (auto found = connections_.find(cti); found != connections_.end()) return found->second; }
-  auto worker = std::make_shared<Connection>(worker_executable_, cti, claim_);
+  { std::lock_guard lock(mutex_); if (auto found = connections_.find(cti_key); found != connections_.end()) return found->second; }
+  auto worker = std::make_shared<Connection>(worker_executable_, cti_key, claim_);
   std::lock_guard lock(mutex_);
-  auto& stored = connections_[cti];
+  auto& stored = connections_[cti_key];
   if (!stored) stored = worker;
   return stored;
 }
@@ -630,14 +680,14 @@ void Coordinator::release(const std::string& identity, const std::string& cti, b
                           Connection* dying, std::uint32_t session)
 {
   std::lock_guard lock(mutex_);
-  const auto found = device_connections_.find(cti + '\0' + identity);
+  const auto found = device_connections_.find(producerKey(cti) + '\0' + identity);
   // A dead worker's lease may outlive a reconnect with the same scoped identity.
   if (dying && (found == device_connections_.end() || found->second.get() != dying)) return;
   leased_.erase(identity);
   leased_interfaces_.erase(identity);
   if (!reusable && found != device_connections_.end()) {
     if (!session) {
-      if (const auto probe = connections_.find(cti); probe != connections_.end() && probe->second == found->second)
+      if (const auto probe = connections_.find(producerKey(cti)); probe != connections_.end() && probe->second == found->second)
         connections_.erase(probe);
     }
     device_connections_.erase(found);
