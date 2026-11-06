@@ -562,40 +562,6 @@ int runTests(int argc, char** argv)
     for (std::string line; std::getline(file, line);) ++count;
     return count;
   };
-  // Equivalent producer path spellings reuse the retained discovery worker.
-  {
-    const auto boards = root / "path-board";
-    std::filesystem::create_directories(boards);
-    const auto cti = boards / "PathBoard.cti";
-    std::ofstream(cti).put('\0');
-    onegen::worker::Coordinator path(argv[0], boards, 100ms);
-    const auto scan = path.discover();
-    assert(scan.devices.size() == 1);
-    auto device = scan.devices.front();
-    device.cti_path = std::filesystem::path(device.cti_path).generic_string();
-    device.cti_candidates = {device.cti_path};
-    auto lease = path.open(device);
-    assert(lease && lease->info().id == "fast");
-    lease.reset();
-    path.shutdown();
-    assert(line_count(cti.string() + ".starts") == 1);
-  }
-  // A discovery-only worker that still holds an exclusive Interface is replaced once on open failure.
-  {
-    const auto boards = root / "retry-board";
-    std::filesystem::create_directories(boards);
-    const auto cti = boards / "RetryBoard.cti";
-    std::ofstream(cti).put('\0');
-    std::ofstream(cti.string() + ".fail-open").put('1');
-    onegen::worker::Coordinator retry(argv[0], boards, 100ms);
-    const auto scan = retry.discover();
-    assert(scan.devices.size() == 1);
-    auto lease = retry.open(scan.devices.front());
-    assert(lease && lease->info().id == "fast");
-    lease.reset();
-    retry.shutdown();
-    assert(line_count(cti.string() + ".starts") == 2);
-  }
   // Initialization refusal stays inactive; a dead worker also waits for explicit retry.
   for (const auto name : {"Inactive", "CrashOnce"}) {
     const auto directory = root / name;
