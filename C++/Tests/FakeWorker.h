@@ -22,6 +22,12 @@ inline int fakeWorker(const std::filesystem::path& cti)
 {
   std::ofstream(cti.string() + ".starts", std::ios::app) << "start\n";
   const bool retry_always = cti.stem() == "RetryBoardAlways";
+  const bool slow_retry_first = cti.stem() == "SlowRetryBoard"
+      && !std::filesystem::exists(cti.string() + ".active");
+  if (slow_retry_first) std::ofstream(cti.string() + ".active").put('1');
+  if (cti.stem() == "SlowRetryBoard" && !slow_retry_first
+      && std::filesystem::exists(cti.string() + ".active")
+      && !std::filesystem::exists(cti.string() + ".shutdown")) std::_Exit(71);
   const bool retry_first_worker = cti.stem() == "RetryBoard"
       && !std::filesystem::exists(cti.string() + ".first-worker");
   if (retry_first_worker) std::ofstream(cti.string() + ".first-worker").put('1');
@@ -235,7 +241,8 @@ inline int fakeWorker(const std::filesystem::path& cti)
     if (request.operation == Operation::Open) {
       Reader input(request.payload);
       opened_device = input.string();
-      if (retry_first_worker || retry_always) {
+      if (slow_retry_first) std::ofstream(cti.string() + ".open-failed").put('1');
+      if (retry_first_worker || retry_always || slow_retry_first) {
         transmit({request.operation, request.id, false, "TLOpenInterface: test resource busy", {}, request.session});
         continue;
       }
@@ -285,6 +292,10 @@ inline int fakeWorker(const std::filesystem::path& cti)
       write(payload, onegen::InterfaceInfo{"board", cti.string(), "Test board", "TEST", "TEST"});
     }
     if (request.operation == Operation::InterfaceFeatures || request.operation == Operation::InterfaceWrite) {
+      if (request.operation == Operation::InterfaceFeatures && slow_retry_first) {
+        std::ofstream(cti.string() + ".interface-started").put('1');
+        std::this_thread::sleep_for(std::chrono::milliseconds{300});
+      }
       if (request.operation == Operation::InterfaceWrite) {
         Reader input(request.payload);
         (void)input.string(); (void)input.string(); (void)input.string();

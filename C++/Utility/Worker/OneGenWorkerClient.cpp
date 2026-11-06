@@ -350,9 +350,8 @@ Connection::~Connection()
 void Connection::close()
 {
   std::lock_guard closing(impl_->close_mutex);
-#ifndef _WIN32
   try { request(Operation::Shutdown, {}, std::chrono::milliseconds{500}); } catch (...) {}
-#else
+#ifdef _WIN32
   const auto job = std::exchange(impl_->job, nullptr);
   if (job) CloseHandle(job);
 #endif

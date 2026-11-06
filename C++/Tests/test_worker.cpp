@@ -587,6 +587,38 @@ int runTests(int argc, char** argv)
     assert(std::filesystem::exists(cti.string() + ".shutdown"));
 #endif
   }
+  // A same-CTI connection waits until the retiring worker has shut down.
+  {
+    const auto boards = root / "slow-retry-coordinator";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SlowRetryBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator coordinator(argv[0], boards, 100ms);
+    const auto scan = coordinator.discover();
+    assert(scan.interfaces.size() == 1 && scan.devices.size() == 1);
+    auto feature = std::async(std::launch::async, [&] {
+      return coordinator.interface_features(scan.interfaces.front());
+    });
+    for (int attempt = 0; attempt < 80 && !std::filesystem::exists(cti.string() + ".interface-started"); ++attempt)
+      std::this_thread::sleep_for(25ms);
+    assert(std::filesystem::exists(cti.string() + ".interface-started"));
+    auto opening = std::async(std::launch::async, [&] {
+      return coordinator.open(scan.devices.front());
+    });
+    for (int attempt = 0; attempt < 80 && !std::filesystem::exists(cti.string() + ".open-failed"); ++attempt)
+      std::this_thread::sleep_for(25ms);
+    assert(std::filesystem::exists(cti.string() + ".open-failed"));
+    auto waiting_feature = std::async(std::launch::async, [&] {
+      return coordinator.interface_features(scan.interfaces.front());
+    });
+    auto lease = opening.get();
+    assert(lease && lease->info().id == "fast");
+    assert(feature.get().name == "Root");
+    assert(waiting_feature.get().name == "Root");
+    assert(std::filesystem::exists(cti.string() + ".shutdown"));
+    lease.reset();
+    coordinator.shutdown();
+  }
   // Equivalent producer path spellings reuse the retained discovery worker.
   {
     const auto boards = root / "path-board";
