@@ -32,13 +32,13 @@ files and does not own a package `cti/` overlay.
 
 ```text
 plugins/
-?붴?? onegen/
-    ?붴?? current/
-        ?쒋?? plugin.json
-        ?쒋?? OneGenPlugin.{dll,so}
-        ?쒋?? OneGenWorker{.exe}
-        ?붴?? runtime/
-            ?붴?? OneGen's GenApi runtime
+  onegen/
+    current/
+      plugin.json
+      OneGenPlugin.{dll,so}
+      OneGenWorker{.exe}
+      runtime/
+        OneGen's GenApi runtime
 ```
 
 Automatic discovery uses only the architecture-specific standard GenTL search path. Copied `.cti` files without their sibling vendor libraries are not
@@ -84,9 +84,11 @@ or opening Interface/Device sessions prevent retirement of their worker.
 
 Worker maps use one canonical producer path identity, so equivalent forward-
 and backslash spellings of the same CTI share the retained discovery worker.
-If that discovery-only worker rejects the first Device open, the coordinator
-retires it once and retries with a fresh process. A pinned Interface, active
-Device, or live lease prevents both reuse retirement and the retry.
+If that discovery-only worker rejects a Device open with an Interface/resource-
+busy failure, the coordinator retires it once per candidate and retries with a
+fresh process. It never retires while discovery or a worker request is active.
+Validation, identity and timeout failures do not replace the worker. A pinned
+Interface, active Device, or live lease also prevents retirement and retry.
 
 Worker diagnostics preserve OneGen severity tags and leading producer severity
 fields, including timestamped `NOTICE:` and `ERROR:` records. Unclassified

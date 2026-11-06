@@ -68,6 +68,7 @@ struct Connection::Impl {
   std::string start_error;
   std::string close_error;
   bool inactive = false;
+  std::atomic<int> active_requests{0};
   std::atomic<bool> discovery_log{true};
   struct Callbacks { FrameFn frame; ErrorFn error; InvalidateFn invalidate; };
   std::map<std::uint32_t, Callbacks> callbacks;
@@ -343,6 +344,11 @@ void Connection::close()
 std::vector<std::byte> Connection::request(Operation operation, std::vector<std::byte> payload,
                                             const std::chrono::milliseconds timeout, std::uint32_t session)
 {
+  struct ActiveRequest {
+    explicit ActiveRequest(std::atomic<int>& value) : value(value) { value.fetch_add(1, std::memory_order_acq_rel); }
+    ~ActiveRequest() { value.fetch_sub(1, std::memory_order_acq_rel); }
+    std::atomic<int>& value;
+  } active_request(impl_->active_requests);
   std::uint32_t id;
   {
     std::lock_guard lock(impl_->mutex);
@@ -377,6 +383,11 @@ bool Connection::alive() const
 {
   std::lock_guard lock(impl_->mutex);
   return impl_->running;
+}
+
+bool Connection::idle() const
+{
+  return impl_->active_requests.load(std::memory_order_acquire) == 0;
 }
 
 bool Connection::inactive() const

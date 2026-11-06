@@ -21,6 +21,9 @@
 inline int fakeWorker(const std::filesystem::path& cti)
 {
   std::ofstream(cti.string() + ".starts", std::ios::app) << "start\n";
+  const bool retry_first_worker = cti.stem() == "RetryBoard"
+      && !std::filesystem::exists(cti.string() + ".first-worker");
+  if (retry_first_worker) std::ofstream(cti.string() + ".first-worker").put('1');
   const bool inactive = cti.stem() == "Inactive" && !std::filesystem::exists(cti.string() + ".ready");
   if (cti.stem() == "CrashOnce" && !std::filesystem::exists(cti.string() + ".ready"))
     std::_Exit(71);
@@ -231,8 +234,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
     if (request.operation == Operation::Open) {
       Reader input(request.payload);
       opened_device = input.string();
-      if (cti.stem() == "RetryBoard" && std::filesystem::exists(cti.string() + ".fail-open")) {
-        std::filesystem::remove(cti.string() + ".fail-open");
+      if (retry_first_worker) {
         transmit({request.operation, request.id, false, "TLOpenInterface: test resource busy", {}, request.session});
         continue;
       }

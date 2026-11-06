@@ -572,7 +572,7 @@ int runTests(int argc, char** argv)
     const auto scan = path.discover();
     assert(scan.devices.size() == 1);
     auto device = scan.devices.front();
-    device.cti_path = std::filesystem::path(device.cti_path).generic_string();
+    device.cti_path = (cti.parent_path() / "." / cti.filename()).string();
     device.cti_candidates = {device.cti_path};
     auto lease = path.open(device);
     assert(lease && lease->info().id == "fast");
@@ -586,7 +586,6 @@ int runTests(int argc, char** argv)
     std::filesystem::create_directories(boards);
     const auto cti = boards / "RetryBoard.cti";
     std::ofstream(cti).put('\0');
-    std::ofstream(cti.string() + ".fail-open").put('1');
     onegen::worker::Coordinator retry(argv[0], boards, 100ms);
     const auto scan = retry.discover();
     assert(scan.devices.size() == 1);
@@ -595,6 +594,45 @@ int runTests(int argc, char** argv)
     lease.reset();
     retry.shutdown();
     assert(line_count(cti.string() + ".starts") == 2);
+  }
+  // An open during the discovery scan must not retire the worker carrying the probe.
+  {
+    const auto boards = root / "discovery-retire-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "RetryBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator during(argv[0], boards, 100ms);
+    bool early_failed = false;
+    const auto scan = during.discover([&](const auto& update) {
+      if (early_failed || update.finished_producers == 0 || update.devices.empty()) return;
+      try { during.open(update.devices.front()); } catch (const std::exception&) { early_failed = true; }
+    });
+    assert(early_failed);
+    assert(scan.devices.size() == 1);
+    auto lease = during.open(scan.devices.front());
+    assert(lease && lease->info().id == "fast");
+    lease.reset();
+    during.shutdown();
+    assert(line_count(cti.string() + ".starts") == 2);
+  }
+  // Non-retryable open failures do not replace a discovery worker.
+  {
+    const auto boards = root / "nonretry-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "PathBoardBad.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator bad(argv[0], boards, 100ms);
+    const auto scan = bad.discover();
+    assert(scan.devices.size() == 1);
+    auto device = scan.devices.front();
+    device.interface_id = "wrong";
+    device.cti_candidates = {cti.string()};
+    device.cti_candidate_interfaces = {"wrong"};
+    bool rejected = false;
+    try { bad.open(device); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    bad.shutdown();
+    assert(line_count(cti.string() + ".starts") == 1);
   }
   // Initialization refusal stays inactive; a dead worker also waits for explicit retry.
   for (const auto name : {"Inactive", "CrashOnce"}) {

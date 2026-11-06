@@ -4,6 +4,7 @@
 #include "OneGen.h"
 
 #include <algorithm>
+#include <cctype>
 #include <condition_variable>
 #include <future>
 #include <map>
@@ -24,6 +25,16 @@ std::string producerKey(const std::string& cti)
   std::error_code error;
   const auto canonical = std::filesystem::weakly_canonical(path, error);
   return (error ? path.lexically_normal() : canonical).string();
+}
+
+bool retryableDiscoveryOpenFailure(const std::string& message)
+{
+  std::string lower = message;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+      [](const unsigned char value) { return static_cast<char>(std::tolower(value)); });
+  return lower.find("tlopeninterface") != std::string::npos
+      || lower.find("resources are already in use") != std::string::npos
+      || lower.find("resource busy") != std::string::npos;
 }
 
 std::string identity(const DeviceInfo& device)
@@ -452,12 +463,16 @@ void Coordinator::retire_failed_discovery(const std::string& cti, Connection* ex
 
 bool Coordinator::retire_idle_discovery(const std::string& cti, Connection* expected)
 {
+  // Discovery owns the worker while discover() runs; never retire under an in-flight probe.
+  std::unique_lock discovery_lock(discovery_mutex_, std::try_to_lock);
+  if (!discovery_lock.owns_lock()) return false;
   const auto cti_key = producerKey(cti);
   std::shared_ptr<Connection> retired;
   {
     std::lock_guard lock(mutex_);
     const auto found = connections_.find(cti_key);
     if (found == connections_.end() || found->second.get() != expected) return false;
+    if (!found->second->idle()) return false;
     if (std::any_of(device_connections_.begin(), device_connections_.end(),
             [&](const auto& entry) { return entry.second == found->second; })) return false;
     if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
@@ -506,7 +521,6 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
   auto candidates = device.cti_candidates;
   if (candidates.empty() && !device.cti_path.empty()) candidates.push_back(device.cti_path);
   std::string error;
-  bool retried_discovery = false;
   std::size_t index = 0;
   while (index < candidates.size()) {
     const auto& cti = candidates[index];
@@ -517,6 +531,7 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
     std::shared_ptr<Connection> worker;
     bool claimed = false;
     bool retry_discovery = false;
+    bool retried_discovery = false;
     std::uint32_t session = 0;
     try {
       {
@@ -582,9 +597,11 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
       if (close_session) {
         try { worker->request(Operation::Close, {}, std::chrono::seconds{2}, session); } catch (...) {}
       }
-      if (claimed) retry_discovery = retire_idle_discovery(cti_key, worker.get());
-      qDebug().noquote() << QStringLiteral("[GenICam] coordinator open failed: cti=%1 claimed=%2 retryDiscovery=%3")
-          .arg(QString::fromStdString(cti_key)).arg(claimed).arg(retry_discovery);
+      if (claimed && retryableDiscoveryOpenFailure(exception.what()))
+        retry_discovery = retire_idle_discovery(cti_key, worker.get());
+      qDebug().noquote() << QStringLiteral("[GenICam] coordinator open failed: cti=%1 claimed=%2 retryable=%3 retryDiscovery=%4")
+          .arg(QString::fromStdString(cti_key)).arg(claimed)
+          .arg(retryableDiscoveryOpenFailure(exception.what())).arg(retry_discovery);
       if (!claimed) break;
     }
     if (retry_discovery && !retried_discovery) {
