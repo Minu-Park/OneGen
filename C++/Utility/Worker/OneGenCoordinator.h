@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "OneGenWorkerClient.h"
 #include "OneGenNode.h"
@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <atomic>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -151,6 +152,9 @@ private:
   std::unordered_map<std::string, std::vector<InterfaceInfo>> interface_inventory_;
   std::mutex mutex_;
   std::mutex discovery_mutex_;
+  std::mutex worker_lifecycle_mutex_;
+  std::condition_variable worker_lifecycle_cv_;
+  std::unordered_set<std::string> retiring_ctis_;
   std::unordered_map<std::string, std::shared_ptr<Connection>> connections_;
   std::unordered_map<std::string, std::shared_ptr<Connection>> device_connections_;
   std::unordered_set<std::string> leased_;

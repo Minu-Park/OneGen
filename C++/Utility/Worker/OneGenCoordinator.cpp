@@ -468,30 +468,39 @@ bool Coordinator::retire_idle_discovery(const std::string& cti, Connection* expe
   if (!discovery_lock.owns_lock()) return false;
   const auto cti_key = producerKey(cti);
   std::shared_ptr<Connection> retired;
+  bool drained = false;
   {
-    std::lock_guard lock(mutex_);
-    const auto found = connections_.find(cti_key);
-    if (found == connections_.end() || found->second.get() != expected) return false;
-    if (std::any_of(device_connections_.begin(), device_connections_.end(),
-            [&](const auto& entry) { return entry.second == found->second; })) return false;
-    if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
-            [&](const auto& entry) { return producerKey(entry.second.cti_path) == cti_key; })) return false;
-    if (std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
-            [&](const auto& entry) { return entry.second.starts_with(cti_key + '\0'); })) return false;
-    retired = std::move(found->second);
-    connections_.erase(found);
-  }
-  // Drain outside the coordinator lock so unrelated Interface/Device work can proceed.
-  if (!retired->beginRetirement(std::chrono::seconds{2})) {
-    qWarning().noquote() << QStringLiteral("[GenICam] idle discovery worker drain timed out or was already retiring: cti=%1")
-                                .arg(QString::fromStdString(cti));
+    std::unique_lock lifecycle_lock(worker_lifecycle_mutex_);
+    {
+      std::lock_guard lock(mutex_);
+      const auto found = connections_.find(cti_key);
+      if (found == connections_.end() || found->second.get() != expected) return false;
+      if (std::any_of(device_connections_.begin(), device_connections_.end(),
+              [&](const auto& entry) { return entry.second == found->second; })) return false;
+      if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
+              [&](const auto& entry) { return producerKey(entry.second.cti_path) == cti_key; })) return false;
+      if (std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
+              [&](const auto& entry) { return entry.second.starts_with(cti_key + '\0'); })) return false;
+      retiring_ctis_.insert(cti_key);
+      retired = std::move(found->second);
+      connections_.erase(found);
+    }
+    lifecycle_lock.unlock();
+    // Drain outside the coordinator lock. Same-CTI connection/open calls wait on
+    // retiring_ctis_ until this worker has shut down; other CTIs continue.
+    drained = retired->beginRetirement(std::chrono::seconds{2});
+    if (!drained) {
+      qWarning().noquote() << QStringLiteral("[GenICam] idle discovery worker drain timed out or was already retiring: cti=%1")
+                                  .arg(QString::fromStdString(cti));
+    }
     retired->close();
-    return false;
+    lifecycle_lock.lock();
+    retiring_ctis_.erase(cti_key);
   }
-  retired->close();
-  qDebug().noquote() << QStringLiteral("[GenICam] idle discovery worker retired after open failure: cti=%1")
-                          .arg(QString::fromStdString(cti));
-  return true;
+  worker_lifecycle_cv_.notify_all();
+  qDebug().noquote() << QStringLiteral("[GenICam] idle discovery worker retired after open failure: cti=%1 drained=%2")
+                          .arg(QString::fromStdString(cti)).arg(drained);
+  return drained;
 }
 
 std::vector<DeviceInfo> Coordinator::merge(std::vector<DeviceInfo> devices)
@@ -662,6 +671,10 @@ void Coordinator::shutdown()
 std::shared_ptr<Connection> Coordinator::connection(const std::string& cti, const std::string& device)
 {
   const auto cti_key = producerKey(cti);
+  {
+    std::unique_lock lifecycle_lock(worker_lifecycle_mutex_);
+    worker_lifecycle_cv_.wait(lifecycle_lock, [&] { return retiring_ctis_.count(cti_key) == 0; });
+  }
   if (!device.empty()) {
     const auto key = cti_key + '\0' + device;
     {
