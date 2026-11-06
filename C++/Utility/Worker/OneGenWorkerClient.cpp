@@ -1,4 +1,4 @@
-#include "OneGenWorkerClient.h"
+﻿#include "OneGenWorkerClient.h"
 
 #include "OneGenWorkerMessages.h"
 #include "WorkerLogForwarder.h"
@@ -68,8 +68,33 @@ struct Connection::Impl {
   std::string start_error;
   std::string close_error;
   bool inactive = false;
-  std::atomic<int> active_requests{0};
+  std::mutex lifecycle_mutex;
+  std::condition_variable lifecycle_cv;
+  int active_requests = 0;
+  bool accepting = true;
   std::atomic<bool> discovery_log{true};
+
+  bool beginRequest()
+  {
+    std::lock_guard lock(lifecycle_mutex);
+    if (!accepting) return false;
+    ++active_requests;
+    return true;
+  }
+  void endRequest()
+  {
+    std::lock_guard lock(lifecycle_mutex);
+    if (active_requests > 0) --active_requests;
+    lifecycle_cv.notify_all();
+  }
+  bool beginRetirement()
+  {
+    std::unique_lock lock(lifecycle_mutex);
+    if (!accepting) return false;
+    accepting = false;
+    lifecycle_cv.wait(lock, [&] { return active_requests == 0; });
+    return true;
+  }
   struct Callbacks { FrameFn frame; ErrorFn error; InvalidateFn invalidate; };
   std::map<std::uint32_t, Callbacks> callbacks;
   ClaimFn claim;
@@ -344,11 +369,12 @@ void Connection::close()
 std::vector<std::byte> Connection::request(Operation operation, std::vector<std::byte> payload,
                                             const std::chrono::milliseconds timeout, std::uint32_t session)
 {
+  if (!impl_->beginRequest()) throw std::runtime_error("Worker connection is retiring.");
   struct ActiveRequest {
-    explicit ActiveRequest(std::atomic<int>& value) : value(value) { value.fetch_add(1, std::memory_order_acq_rel); }
-    ~ActiveRequest() { value.fetch_sub(1, std::memory_order_acq_rel); }
-    std::atomic<int>& value;
-  } active_request(impl_->active_requests);
+    explicit ActiveRequest(Impl* value) : value(value) {}
+    ~ActiveRequest() { value->endRequest(); }
+    Impl* value;
+  } active_request(impl_.get());
   std::uint32_t id;
   {
     std::lock_guard lock(impl_->mutex);
@@ -385,9 +411,9 @@ bool Connection::alive() const
   return impl_->running;
 }
 
-bool Connection::idle() const
+bool Connection::beginRetirement()
 {
-  return impl_->active_requests.load(std::memory_order_acquire) == 0;
+  return impl_->beginRetirement();
 }
 
 bool Connection::inactive() const

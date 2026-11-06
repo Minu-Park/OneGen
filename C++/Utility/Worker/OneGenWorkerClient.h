@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "OneGenWorkerProtocol.h"
 #include "OneGenTypes.h"
@@ -34,8 +34,8 @@ public:
       std::uint32_t session = 0);
   /** True while the worker process is still accepting requests. */
   bool alive() const;
-  /** True when no request is queued or waiting for a worker reply. */
-  bool idle() const;
+  /** Marks the worker as retiring and waits briefly for active requests to finish. */
+  bool beginRetirement();
   /** True when initialization failed and the worker accepts only inactive replies and shutdown. */
   bool inactive() const;
   /** Stops this worker and releases its native resources before producer fallback. */

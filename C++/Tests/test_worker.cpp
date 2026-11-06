@@ -1,4 +1,4 @@
-#include "OneGenCoordinator.h"
+﻿#include "OneGenCoordinator.h"
 #include "FakeWorker.h"
 #include "OneGenWorkerClient.h"
 #include "OneGenWorkerMessages.h"
@@ -10,6 +10,7 @@
 #include <cassert>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -562,6 +563,27 @@ int runTests(int argc, char** argv)
     for (std::string line; std::getline(file, line);) ++count;
     return count;
   };
+  // Retirement waits for an active worker request before closing the worker.
+  {
+    const auto boards = root / "slow-retire-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SlowProbe.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    onegen::worker::Writer payload;
+    payload.scalar(std::uint32_t{1000});
+    auto reply = std::async(std::launch::async, [&] {
+      return connection.request(onegen::worker::Operation::Probe, payload.take(), 2s);
+    });
+    for (int attempt = 0; attempt < 80 && !std::filesystem::exists(cti.string() + ".probe-started"); ++attempt)
+      std::this_thread::sleep_for(25ms);
+    assert(std::filesystem::exists(cti.string() + ".probe-started"));
+    const auto started = std::chrono::steady_clock::now();
+    assert(connection.beginRetirement());
+    assert(std::chrono::steady_clock::now() - started >= 200ms);
+    (void)reply.get();
+    connection.close();
+  }
   // Equivalent producer path spellings reuse the retained discovery worker.
   {
     const auto boards = root / "path-board";
@@ -592,6 +614,21 @@ int runTests(int argc, char** argv)
     auto lease = retry.open(scan.devices.front());
     assert(lease && lease->info().id == "fast");
     lease.reset();
+    retry.shutdown();
+    assert(line_count(cti.string() + ".starts") == 2);
+  }
+  // Retry is bounded to one replacement per CTI even when the replacement also fails.
+  {
+    const auto boards = root / "retry-always-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "RetryBoardAlways.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator retry(argv[0], boards, 100ms);
+    const auto scan = retry.discover();
+    assert(scan.devices.size() == 1);
+    bool rejected = false;
+    try { retry.open(scan.devices.front()); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
     retry.shutdown();
     assert(line_count(cti.string() + ".starts") == 2);
   }

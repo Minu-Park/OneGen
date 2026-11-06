@@ -85,10 +85,12 @@ or opening Interface/Device sessions prevent retirement of their worker.
 Worker maps use one canonical producer path identity, so equivalent forward-
 and backslash spellings of the same CTI share the retained discovery worker.
 If that discovery-only worker rejects a Device open with an Interface/resource-
-busy failure, the coordinator retires it once per candidate and retries with a
-fresh process. It never retires while discovery or a worker request is active.
-Validation, identity and timeout failures do not replace the worker. A pinned
-Interface, active Device, or live lease also prevents retirement and retry.
+busy failure, the coordinator retires it once per CTI for that open call and
+retries with a fresh process. It never retires while discovery is running or
+while a worker request is active; the connection enters a retiring state that
+rejects new requests before close. Validation, identity and timeout failures do
+not replace the worker. A pinned Interface, active Device, or live lease also
+prevents retirement and retry.
 
 Worker diagnostics preserve OneGen severity tags and leading producer severity
 fields, including timestamped `NOTICE:` and `ERROR:` records. Unclassified

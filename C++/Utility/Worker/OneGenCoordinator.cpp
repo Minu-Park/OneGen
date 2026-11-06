@@ -1,4 +1,4 @@
-#include "OneGenCoordinator.h"
+﻿#include "OneGenCoordinator.h"
 
 #include "OneGenWorkerMessages.h"
 #include "OneGen.h"
@@ -472,13 +472,13 @@ bool Coordinator::retire_idle_discovery(const std::string& cti, Connection* expe
     std::lock_guard lock(mutex_);
     const auto found = connections_.find(cti_key);
     if (found == connections_.end() || found->second.get() != expected) return false;
-    if (!found->second->idle()) return false;
     if (std::any_of(device_connections_.begin(), device_connections_.end(),
             [&](const auto& entry) { return entry.second == found->second; })) return false;
     if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
             [&](const auto& entry) { return producerKey(entry.second.cti_path) == cti_key; })) return false;
     if (std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
             [&](const auto& entry) { return entry.second.starts_with(cti_key + '\0'); })) return false;
+    if (!found->second->beginRetirement()) return false;
     retired = std::move(found->second);
     connections_.erase(found);
   }
@@ -521,6 +521,7 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
   auto candidates = device.cti_candidates;
   if (candidates.empty() && !device.cti_path.empty()) candidates.push_back(device.cti_path);
   std::string error;
+  std::unordered_set<std::string> retried_ctis;
   std::size_t index = 0;
   while (index < candidates.size()) {
     const auto& cti = candidates[index];
@@ -531,7 +532,6 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
     std::shared_ptr<Connection> worker;
     bool claimed = false;
     bool retry_discovery = false;
-    bool retried_discovery = false;
     std::uint32_t session = 0;
     try {
       {
@@ -604,10 +604,7 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device)
           .arg(retryableDiscoveryOpenFailure(exception.what())).arg(retry_discovery);
       if (!claimed) break;
     }
-    if (retry_discovery && !retried_discovery) {
-      retried_discovery = true;
-      continue;
-    }
+    if (retry_discovery && retried_ctis.insert(cti_key).second) continue;
     ++index;
   }
   throw std::runtime_error(error.empty() ? "No producer candidate is available." : error);

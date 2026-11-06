@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "OneGenWorkerMessages.h"
 #include "OneGenParameterMessages.h"
 #include <algorithm>
@@ -21,6 +21,7 @@
 inline int fakeWorker(const std::filesystem::path& cti)
 {
   std::ofstream(cti.string() + ".starts", std::ios::app) << "start\n";
+  const bool retry_always = cti.stem() == "RetryBoardAlways";
   const bool retry_first_worker = cti.stem() == "RetryBoard"
       && !std::filesystem::exists(cti.string() + ".first-worker");
   if (retry_first_worker) std::ofstream(cti.string() + ".first-worker").put('1');
@@ -234,7 +235,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
     if (request.operation == Operation::Open) {
       Reader input(request.payload);
       opened_device = input.string();
-      if (retry_first_worker) {
+      if (retry_first_worker || retry_always) {
         transmit({request.operation, request.id, false, "TLOpenInterface: test resource busy", {}, request.session});
         continue;
       }
@@ -350,6 +351,10 @@ inline int fakeWorker(const std::filesystem::path& cti)
         std::cout.write(reinterpret_cast<const char*>(invalid.data()), invalid.size());
         std::cout.flush();
         return 71;
+      }
+      if (cti.stem() == "SlowProbe") {
+        std::ofstream(cti.string() + ".probe-started").put('1');
+        std::this_thread::sleep_for(std::chrono::milliseconds{300});
       }
       if (cti.stem() == "InvalidateDiagnostics") {
         Writer notification; notification.scalar(std::int32_t{0}); notification.string("Gain");
