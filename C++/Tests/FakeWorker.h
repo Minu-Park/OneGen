@@ -231,6 +231,11 @@ inline int fakeWorker(const std::filesystem::path& cti)
     if (request.operation == Operation::Open) {
       Reader input(request.payload);
       opened_device = input.string();
+      if (cti.stem() == "RetryBoard" && std::filesystem::exists(cti.string() + ".fail-open")) {
+        std::filesystem::remove(cti.string() + ".fail-open");
+        transmit({request.operation, request.id, false, "TLOpenInterface: test resource busy", {}, request.session});
+        continue;
+      }
       if (input.string() != "board") {
         transmit({request.operation, request.id, false, "Wrong producer-specific InterfaceID", {}, request.session});
         continue;
