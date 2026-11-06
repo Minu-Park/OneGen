@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Reuse retained discovery workers across equivalent CTI path spellings and retry once per CTI after a retryable Interface/resource-busy Device-open failure. Worker retirement now waits for active requests and rejects new ones; pinned Interfaces, active Devices and live leases are preserved.
+- Reuse retained discovery workers across equivalent CTI path spellings and retry once per CTI after a retryable Interface/resource-busy Device-open failure. Worker retirement now waits for active requests and rejects new ones; pinned Interfaces, active Devices and live leases are preserved. Idle search reset reserves the snapshotted producer lifecycles and revalidates the idle contract before transferring worker maps, so a concurrent Device claim, Interface session or new producer worker is preserved; retained workers drain active requests before close.
 - Connect, disconnect, discover and acquire through Playground's standard device connection tools, which use the same arguments and results for every device: connect takes a target id and returns a connection id that later calls use. Target details (device, producer and interface) are listed as descriptive attributes. Builds against Plugin SDK 0.2 and requires a Playground release with the standard device connection interface.
 - Declare what kind of data each automation tool returns, so Playground can limit what connected assistants receive. Requires a Playground release with the updated automation interface; earlier releases do not list this package's automation tools.
 - Take the binary display name from the package definition.

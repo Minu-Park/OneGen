@@ -94,6 +94,13 @@ during retirement, and a timed-out drain force-closes the worker. Validation,
 identity and timeout failures do not replace the worker. A pinned Interface,
 active Device, or live lease also prevents retirement and retry.
 
+Idle search reset snapshots the retained workers, reserves every snapshotted
+producer lifecycle, and revalidates that no Device claim, Interface session or
+new producer worker appeared before it transfers map ownership. A failed final
+check restores the reservations and leaves the workers in place; retained
+workers drain active requests before close, and worker shutdown runs outside
+the coordinator lock. Other producers are not serialized by a reset.
+
 Worker diagnostics preserve OneGen severity tags and leading producer severity
 fields, including timestamped `NOTICE:` and `ERROR:` records. Unclassified
 producer output retains the warning fallback; message-body keywords do not

@@ -125,8 +125,12 @@ public:
   static std::vector<DeviceInfo> merge(std::vector<DeviceInfo> devices);
   std::unique_ptr<Lease> open(const DeviceInfo& device);
   void shutdown();
-  /** @brief Releases retained workers only when no discovery, Interface or Device is active. */
-  bool reset_idle_search();
+  /**
+   * @brief Releases retained workers only when no discovery, Interface or Device is active.
+   * @param afterIdleSnapshot Observes the idle snapshot before per-producer reservation; tests
+   *        use it to interleave a new claim, Interface or producer worker deterministically.
+   */
+  bool reset_idle_search(std::function<void()> afterIdleSnapshot = {});
   /** @brief Sets exact consumer-owned CTI files only after idle workers are released; empty disables discovery. */
   bool set_producer_files(std::vector<std::filesystem::path> files);
 

@@ -626,53 +626,85 @@ bool Coordinator::set_producer_files(std::vector<std::filesystem::path> files)
   return true;
 }
 
-bool Coordinator::reset_idle_search()
+bool Coordinator::reset_idle_search(std::function<void()> afterIdleSnapshot)
 {
   std::unique_lock discovery_lock(discovery_mutex_, std::try_to_lock);
   if (!discovery_lock.owns_lock()) return false;
-  std::vector<std::string> ctis;
-  {
-    std::lock_guard lock(mutex_);
-    if (!leased_.empty() || !interface_sessions_.empty()) return false;
-    for (const auto& [cti, connection] : connections_) { (void)connection; ctis.push_back(cti); }
-    for (const auto& [key, connection] : device_connections_) {
-      (void)connection;
-      ctis.push_back(key.substr(0, key.find('\0')));
-    }
-  }
-  std::sort(ctis.begin(), ctis.end());
-  ctis.erase(std::unique(ctis.begin(), ctis.end()), ctis.end());
-  std::vector<std::shared_ptr<ProducerLifecycle>> lifecycles;
-  lifecycles.reserve(ctis.size());
-  for (const auto& cti : ctis) {
-    auto lifecycle = lifecycleFor(cti);
-    std::lock_guard lock(lifecycle->mutex);
-    if (!lifecycle->retiring) {
-      lifecycle->retiring = true;
-      lifecycles.push_back(lifecycle);
-    }
-  }
+
+  // Snapshot the retained workers and verify the idle contract once.
   std::unordered_map<std::string, std::shared_ptr<Connection>> connections;
   std::unordered_map<std::string, std::shared_ptr<Connection>> devices;
   {
     std::lock_guard lock(mutex_);
-    connections.swap(connections_);
-    devices.swap(device_connections_);
-    interface_inventory_.clear();
-    session_channels_.clear();
-    leased_interfaces_.clear();
+    if (!leased_.empty() || !leased_interfaces_.empty() || !interface_sessions_.empty()) return false;
+    connections = connections_;
+    devices = device_connections_;
   }
+  if (afterIdleSnapshot) afterIdleSnapshot();
+
+  std::vector<std::string> ctis;
+  ctis.reserve(connections.size() + devices.size());
+  for (const auto& [cti, connection] : connections) { (void)connection; ctis.push_back(cti); }
+  for (const auto& [key, connection] : devices) {
+    (void)connection;
+    ctis.push_back(key.substr(0, key.find('\0')));
+  }
+  std::sort(ctis.begin(), ctis.end());
+  ctis.erase(std::unique(ctis.begin(), ctis.end()), ctis.end());
+
+  // Reserve every snapshotted producer before any worker ownership moves. An already-retiring
+  // producer means another path owns its lifecycle; abort instead of swapping that worker out.
+  std::vector<std::shared_ptr<ProducerLifecycle>> lifecycles;
+  lifecycles.reserve(ctis.size());
+  const auto restoreLifecycles = [&lifecycles] {
+    for (const auto& lifecycle : lifecycles) {
+      std::lock_guard lock(lifecycle->mutex);
+      lifecycle->retiring = false;
+      lifecycle->cv.notify_all();
+    }
+  };
+  for (const auto& cti : ctis) {
+    auto lifecycle = lifecycleFor(cti);
+    std::unique_lock lifecycle_lock(lifecycle->mutex);
+    if (lifecycle->retiring) {
+      lifecycle_lock.unlock();
+      restoreLifecycles();
+      return false;
+    }
+    lifecycle->retiring = true;
+    lifecycles.push_back(std::move(lifecycle));
+  }
+
+  // Revalidate and transfer map ownership in one critical section. A claim, Interface session or
+  // new producer worker that appeared after the snapshot invalidates the idle contract.
+  bool idle = false;
+  {
+    std::lock_guard lock(mutex_);
+    idle = leased_.empty() && leased_interfaces_.empty() && interface_sessions_.empty()
+        && connections_ == connections && device_connections_ == devices;
+    if (idle) {
+      connections_.clear();
+      device_connections_.clear();
+      interface_inventory_.clear();
+      session_channels_.clear();
+      leased_interfaces_.clear();
+    }
+  }
+  if (!idle) {
+    restoreLifecycles();
+    return false;
+  }
+
+  // Worker shutdown stays outside every lock while the producer reservations block replacement.
   std::unordered_set<Connection*> closed;
   for (const auto& map : {&connections, &devices})
     for (const auto& [key, connection] : *map) {
       (void)key;
-      if (connection && closed.insert(connection.get()).second) connection->close();
+      if (!connection || !closed.insert(connection.get()).second) continue;
+      connection->beginRetirement(std::chrono::seconds{2});
+      connection->close();
     }
-  for (const auto& lifecycle : lifecycles) {
-    std::lock_guard lock(lifecycle->mutex);
-    lifecycle->retiring = false;
-    lifecycle->cv.notify_all();
-  }
+  restoreLifecycles();
   return true;
 }
 void Coordinator::shutdown()

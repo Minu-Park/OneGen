@@ -820,6 +820,99 @@ int runTests(int argc, char** argv)
     assert(active.reset_idle_search());
     active.shutdown();
   }
+  // Idle reset rejects a same-producer Device claim that appears after its idle snapshot.
+  {
+    const auto boards = root / "reset-device-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "ResetBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator coordinator(argv[0], boards, 100ms);
+    const auto scan = coordinator.discover();
+    assert(scan.devices.size() == 1);
+    std::promise<void> paused;
+    std::promise<void> resume;
+    auto paused_signal = paused.get_future();
+    auto resume_signal = resume.get_future();
+    auto resetting = std::async(std::launch::async, [&] {
+      return coordinator.reset_idle_search([&] {
+        paused.set_value();
+        resume_signal.wait();
+      });
+    });
+    assert(paused_signal.wait_for(2s) == std::future_status::ready);
+    std::unique_ptr<onegen::worker::Lease> lease;
+    try { lease = coordinator.open(scan.devices.front()); }
+    catch (...) { resume.set_value(); throw; }
+    resume.set_value();
+    assert(!resetting.get());
+    assert(lease && lease->data_streams().front().id == "fast");
+    lease.reset();
+    assert(coordinator.reset_idle_search());
+    assert(line_count(cti.string() + ".starts") == 1);
+    coordinator.shutdown();
+  }
+  // Idle reset rejects an Interface claim that appears after its idle snapshot.
+  {
+    const auto boards = root / "reset-interface-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "ResetBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator coordinator(argv[0], boards, 100ms);
+    const auto scan = coordinator.discover();
+    assert(scan.interfaces.size() == 1);
+    std::promise<void> paused;
+    std::promise<void> resume;
+    auto paused_signal = paused.get_future();
+    auto resume_signal = resume.get_future();
+    auto resetting = std::async(std::launch::async, [&] {
+      return coordinator.reset_idle_search([&] {
+        paused.set_value();
+        resume_signal.wait();
+      });
+    });
+    assert(paused_signal.wait_for(2s) == std::future_status::ready);
+    try { coordinator.open_interface(scan.interfaces.front()); }
+    catch (...) { resume.set_value(); throw; }
+    resume.set_value();
+    assert(!resetting.get());
+    assert(coordinator.interface_features(scan.interfaces.front()).name == "Root");
+    coordinator.close_interface(scan.interfaces.front());
+    assert(coordinator.reset_idle_search());
+    assert(line_count(cti.string() + ".starts") == 1);
+    coordinator.shutdown();
+  }
+  // Idle reset preserves a producer worker created after its idle snapshot.
+  {
+    const auto boards = root / "reset-new-producer-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "ResetBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Coordinator coordinator(argv[0], boards, 100ms);
+    const auto scan = coordinator.discover();
+    assert(scan.devices.size() == 1);
+    const auto added = boards / "ResetBoard2.cti";
+    std::ofstream(added).put('\0');
+    const onegen::InterfaceInfo added_board{"board", added.string()};
+    std::promise<void> paused;
+    std::promise<void> resume;
+    auto paused_signal = paused.get_future();
+    auto resume_signal = resume.get_future();
+    auto resetting = std::async(std::launch::async, [&] {
+      return coordinator.reset_idle_search([&] {
+        paused.set_value();
+        resume_signal.wait();
+      });
+    });
+    assert(paused_signal.wait_for(2s) == std::future_status::ready);
+    try { assert(coordinator.interface_features(added_board).name == "Root"); }
+    catch (...) { resume.set_value(); throw; }
+    resume.set_value();
+    assert(!resetting.get());
+    assert(coordinator.interface_features(added_board).name == "Root");
+    assert(line_count(added.string() + ".starts") == 1);
+    assert(coordinator.reset_idle_search());
+    coordinator.shutdown();
+  }
   std::filesystem::remove_all(root);
   std::cout << "test_worker ok\n";
   return 0;
