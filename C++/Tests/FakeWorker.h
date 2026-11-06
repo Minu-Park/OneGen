@@ -31,6 +31,9 @@ inline int fakeWorker(const std::filesystem::path& cti)
   const bool retry_first_worker = cti.stem() == "RetryBoard"
       && !std::filesystem::exists(cti.string() + ".first-worker");
   if (retry_first_worker) std::ofstream(cti.string() + ".first-worker").put('1');
+  const bool slow_timeout_first = cti.stem() == "SlowProbeTimeout"
+      && !std::filesystem::exists(cti.string() + ".first-worker");
+  if (slow_timeout_first) std::ofstream(cti.string() + ".first-worker").put('1');
   const bool inactive = cti.stem() == "Inactive" && !std::filesystem::exists(cti.string() + ".ready");
   if (cti.stem() == "CrashOnce" && !std::filesystem::exists(cti.string() + ".ready"))
     std::_Exit(71);
@@ -363,9 +366,10 @@ inline int fakeWorker(const std::filesystem::path& cti)
         std::cout.flush();
         return 71;
       }
-      if (cti.stem() == "SlowProbe" || cti.stem() == "SlowProbeTimeout") {
+      if (cti.stem() == "SlowProbe" || slow_timeout_first) {
         std::ofstream(cti.string() + ".probe-started").put('1');
-        std::this_thread::sleep_for(std::chrono::milliseconds{300});
+        std::this_thread::sleep_for(cti.stem() == "SlowProbeTimeout"
+            ? std::chrono::seconds{2} : std::chrono::milliseconds{300});
       }
       if (cti.stem() == "InvalidateDiagnostics") {
         Writer notification; notification.scalar(std::int32_t{0}); notification.string("Gain");

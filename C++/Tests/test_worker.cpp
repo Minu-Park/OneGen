@@ -587,7 +587,7 @@ int runTests(int argc, char** argv)
     assert(std::filesystem::exists(cti.string() + ".shutdown"));
 #endif
   }
-  // A timed-out retirement is explicit and force-closes instead of waiting forever.
+  // A timed-out retirement skips Shutdown and reclaims the process before a same-CTI restart.
   {
     const auto boards = root / "slow-timeout-board";
     std::filesystem::create_directories(boards);
@@ -597,14 +597,24 @@ int runTests(int argc, char** argv)
     onegen::worker::Writer payload;
     payload.scalar(std::uint32_t{1000});
     auto reply = std::async(std::launch::async, [&] {
-      return connection.request(onegen::worker::Operation::Probe, payload.take(), 2s);
+      return connection.request(onegen::worker::Operation::Probe, payload.take(), 4s);
     });
     for (int attempt = 0; attempt < 80 && !std::filesystem::exists(cti.string() + ".probe-started"); ++attempt)
       std::this_thread::sleep_for(25ms);
     assert(std::filesystem::exists(cti.string() + ".probe-started"));
     assert(!connection.beginRetirement(100ms));
     connection.close();
-    (void)reply.get();
+    bool probe_failed = false;
+    try { (void)reply.get(); } catch (const std::exception&) { probe_failed = true; }
+    assert(probe_failed);
+    assert(!connection.alive());
+    assert(!std::filesystem::exists(cti.string() + ".shutdown"));
+    // The same producer starts a fresh worker after the forced termination.
+    onegen::worker::Connection restart(argv[0], cti);
+    restart.request(onegen::worker::Operation::Probe);
+    restart.close();
+    assert(std::filesystem::exists(cti.string() + ".shutdown"));
+    assert(line_count(cti.string() + ".starts") == 2);
   }
   // A same-CTI connection waits until the retiring worker has shut down.
   {

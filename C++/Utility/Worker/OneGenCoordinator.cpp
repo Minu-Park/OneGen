@@ -701,7 +701,11 @@ bool Coordinator::reset_idle_search(std::function<void()> afterIdleSnapshot)
     for (const auto& [key, connection] : *map) {
       (void)key;
       if (!connection || !closed.insert(connection.get()).second) continue;
-      connection->beginRetirement(std::chrono::seconds{2});
+      const bool drained = connection->beginRetirement(std::chrono::seconds{2});
+      if (!drained) {
+        qWarning().noquote() << QStringLiteral("[GenICam] idle reset drain timed out; closing worker: cti=%1")
+                                    .arg(QString::fromStdString(key.substr(0, key.find('\0'))));
+      }
       connection->close();
     }
   restoreLifecycles();
