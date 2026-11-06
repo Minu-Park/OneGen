@@ -134,6 +134,8 @@ private:
   std::shared_ptr<Connection> connection(const std::string& cti, const std::string& device = {});
   /** Retires a failed discovery worker only when no Interface or Device is using or opening it. */
   void retire_failed_discovery(const std::string& cti, Connection* expected, bool preserve_inactive = true);
+  /** Retires a discovery-only worker after a failed open so a fresh producer process can claim the Interface. */
+  bool retire_idle_discovery(const std::string& cti, Connection* expected);
   /** Retains successfully closed workers for rediscovery-free reconnects. */
   void release(const std::string& identity, const std::string& cti, bool reusable,
                Connection* dying = nullptr, std::uint32_t session = 0);
