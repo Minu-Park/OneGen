@@ -157,6 +157,10 @@ private:
     bool retiring = false;
   };
   std::shared_ptr<ProducerLifecycle> lifecycleFor(const std::string& cti);
+  /** Retires one worker under the shared per-CTI lifecycle contract. */
+  bool retireWorker(const std::string& cti, Connection* expected,
+                    const std::function<bool(const std::shared_ptr<Connection>&)>& allowed,
+                    bool removeDeviceConnections, bool requireDiscoveryIdle);
   std::mutex mutex_;
   std::mutex discovery_mutex_;
   std::unordered_map<std::string, std::shared_ptr<ProducerLifecycle>> producer_lifecycles_;

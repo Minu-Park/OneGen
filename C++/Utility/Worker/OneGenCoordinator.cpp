@@ -250,30 +250,25 @@ void Coordinator::open_interface(const InterfaceInfo& info) {
     Writer out; out.string(info.id);
     connection(info.cti_path)->request(Operation::OpenInterface, out.take());
   } catch (...) {
-    std::shared_ptr<Connection> failed;
+    const auto cti_key = producerKey(info.cti_path);
+    Connection* failed = nullptr;
     {
       std::lock_guard lock(mutex_);
       interface_sessions_.erase(resource);
-      const bool in_use = std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
-          [&](const auto& item) { return producerKey(item.second.cti_path) == producerKey(info.cti_path); })
-          || std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
-              [&](const auto& item) { return item.second.starts_with(producerKey(info.cti_path) + '\0'); });
-      if (!in_use) {
-        if (const auto found = connections_.find(producerKey(info.cti_path)); found != connections_.end()) {
-          failed = std::move(found->second);
-          connections_.erase(found);
-        }
-        std::erase_if(device_connections_, [&](const auto& item) { return item.second == failed; });
-      }
+      if (const auto found = connections_.find(cti_key); found != connections_.end())
+        failed = found->second.get();
     }
-    // A producer can retain native resources even after a failed TLOpenInterface.
-    // Destroy its idle worker before a subsequent explicit connection attempt.
-    if (failed) failed->close();
-    failed.reset();
+    if (failed) {
+      retireWorker(cti_key, failed, [&](const auto&) {
+        return std::none_of(interface_sessions_.begin(), interface_sessions_.end(),
+                   [&](const auto& item) { return producerKey(item.second.cti_path) == cti_key; })
+            && std::none_of(leased_interfaces_.begin(), leased_interfaces_.end(),
+                   [&](const auto& item) { return item.second.starts_with(cti_key + '\0'); });
+      }, true, true);
+    }
     throw;
   }
 }
-
 void Coordinator::close_interface(const InterfaceInfo& info) {
   std::lock_guard lock(mutex_);
   const auto key = producerKey(info.cti_path) + '\0' + info.id;
@@ -439,33 +434,12 @@ DiscoveryResult Coordinator::discover(ProgressFn progress)
   return result;
 }
 
-void Coordinator::retire_failed_discovery(const std::string& cti, Connection* expected, bool preserve_inactive)
+bool Coordinator::retireWorker(const std::string& cti, Connection* expected,
+                               const std::function<bool(const std::shared_ptr<Connection>&)>& allowed,
+                               bool removeDeviceConnections, bool requireDiscoveryIdle)
 {
-  const auto cti_key = producerKey(cti);
-  std::shared_ptr<Connection> failed;
-  {
-    std::lock_guard lock(mutex_);
-    const auto found = connections_.find(cti_key);
-    if (found == connections_.end() || found->second.get() != expected) return;
-    if (preserve_inactive && found->second->alive() && found->second->inactive()) return;
-    if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
-                    [&](const auto& item) { return producerKey(item.second.cti_path) == cti_key; })
-        || std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
-                       [&](const auto& item) { return item.second.starts_with(cti_key + '\0'); })) return;
-    failed = std::move(found->second);
-    connections_.erase(found);
-    std::erase_if(device_connections_, [&](const auto& item) { return item.second == failed; });
-  }
-  failed->close();
-  qDebug().noquote() << QStringLiteral("[GenICam] failed discovery worker retired: cti=%1")
-                          .arg(QString::fromStdString(cti));
-}
-
-bool Coordinator::retire_idle_discovery(const std::string& cti, Connection* expected)
-{
-  // Discovery owns the worker while discover() runs; never retire under an in-flight probe.
-  std::unique_lock discovery_lock(discovery_mutex_, std::try_to_lock);
-  if (!discovery_lock.owns_lock()) return false;
+  std::unique_lock<std::mutex> discovery_lock(discovery_mutex_, std::defer_lock);
+  if (requireDiscoveryIdle && !discovery_lock.try_lock()) return false;
   const auto cti_key = producerKey(cti);
   const auto lifecycle = lifecycleFor(cti_key);
   std::unique_lock lifecycle_lock(lifecycle->mutex);
@@ -475,33 +449,50 @@ bool Coordinator::retire_idle_discovery(const std::string& cti, Connection* expe
     std::lock_guard lock(mutex_);
     const auto found = connections_.find(cti_key);
     if (found == connections_.end() || found->second.get() != expected) return false;
-    if (std::any_of(device_connections_.begin(), device_connections_.end(),
-            [&](const auto& entry) { return entry.second == found->second; })) return false;
-    if (std::any_of(interface_sessions_.begin(), interface_sessions_.end(),
-            [&](const auto& entry) { return producerKey(entry.second.cti_path) == cti_key; })) return false;
-    if (std::any_of(leased_interfaces_.begin(), leased_interfaces_.end(),
-            [&](const auto& entry) { return entry.second.starts_with(cti_key + '\0'); })) return false;
+    if (!allowed(found->second)) return false;
     lifecycle->retiring = true;
     retired = std::move(found->second);
     connections_.erase(found);
+    if (removeDeviceConnections)
+      std::erase_if(device_connections_, [&](const auto& item) { return item.second == retired; });
   }
   lifecycle_lock.unlock();
-  // Drain outside the coordinator lock. Same-CTI connection/open calls wait on the
-  // per-producer lifecycle state; other CTIs use independent state.
   const bool drained = retired->beginRetirement(std::chrono::seconds{2});
   if (!drained) {
-    qWarning().noquote() << QStringLiteral("[GenICam] idle discovery worker drain timed out or was already retiring: cti=%1")
+    qWarning().noquote() << QStringLiteral("[GenICam] worker retirement drain timed out or was already retiring: cti=%1")
                                 .arg(QString::fromStdString(cti));
   }
   retired->close();
   lifecycle_lock.lock();
   lifecycle->retiring = false;
   lifecycle->cv.notify_all();
-  qDebug().noquote() << QStringLiteral("[GenICam] idle discovery worker retired after open failure: cti=%1 drained=%2")
+  qDebug().noquote() << QStringLiteral("[GenICam] worker retired: cti=%1 drained=%2")
                           .arg(QString::fromStdString(cti)).arg(drained);
-  return drained;
+  return true;
 }
-
+void Coordinator::retire_failed_discovery(const std::string& cti, Connection* expected, bool preserve_inactive)
+{
+  retireWorker(cti, expected, [&](const auto& worker) {
+    if (preserve_inactive && worker->alive() && worker->inactive()) return false;
+    const auto cti_key = producerKey(cti);
+    return std::none_of(interface_sessions_.begin(), interface_sessions_.end(),
+               [&](const auto& item) { return producerKey(item.second.cti_path) == cti_key; })
+        && std::none_of(leased_interfaces_.begin(), leased_interfaces_.end(),
+               [&](const auto& item) { return item.second.starts_with(cti_key + '\0'); });
+  }, true, false);
+}
+bool Coordinator::retire_idle_discovery(const std::string& cti, Connection* expected)
+{
+  const auto cti_key = producerKey(cti);
+  return retireWorker(cti, expected, [&](const auto& worker) {
+    return std::none_of(device_connections_.begin(), device_connections_.end(),
+               [&](const auto& entry) { return entry.second == worker; })
+        && std::none_of(interface_sessions_.begin(), interface_sessions_.end(),
+               [&](const auto& entry) { return producerKey(entry.second.cti_path) == cti_key; })
+        && std::none_of(leased_interfaces_.begin(), leased_interfaces_.end(),
+               [&](const auto& entry) { return entry.second.starts_with(cti_key + '\0'); });
+  }, false, true);
+}
 std::vector<DeviceInfo> Coordinator::merge(std::vector<DeviceInfo> devices)
 {
   std::sort(devices.begin(), devices.end(), [](const auto& left, const auto& right) {
@@ -639,27 +630,51 @@ bool Coordinator::reset_idle_search()
 {
   std::unique_lock discovery_lock(discovery_mutex_, std::try_to_lock);
   if (!discovery_lock.owns_lock()) return false;
+  std::vector<std::string> ctis;
+  {
+    std::lock_guard lock(mutex_);
+    if (!leased_.empty() || !interface_sessions_.empty()) return false;
+    for (const auto& [cti, connection] : connections_) { (void)connection; ctis.push_back(cti); }
+    for (const auto& [key, connection] : device_connections_) {
+      (void)connection;
+      ctis.push_back(key.substr(0, key.find('\0')));
+    }
+  }
+  std::sort(ctis.begin(), ctis.end());
+  ctis.erase(std::unique(ctis.begin(), ctis.end()), ctis.end());
+  std::vector<std::shared_ptr<ProducerLifecycle>> lifecycles;
+  lifecycles.reserve(ctis.size());
+  for (const auto& cti : ctis) {
+    auto lifecycle = lifecycleFor(cti);
+    std::lock_guard lock(lifecycle->mutex);
+    if (!lifecycle->retiring) {
+      lifecycle->retiring = true;
+      lifecycles.push_back(lifecycle);
+    }
+  }
   std::unordered_map<std::string, std::shared_ptr<Connection>> connections;
   std::unordered_map<std::string, std::shared_ptr<Connection>> devices;
   {
     std::lock_guard lock(mutex_);
-    if (!leased_.empty() || !interface_sessions_.empty()) return false;
     connections.swap(connections_);
     devices.swap(device_connections_);
     interface_inventory_.clear();
     session_channels_.clear();
     leased_interfaces_.clear();
   }
-  // Both maps can reference the same worker. Close each process before returning.
   std::unordered_set<Connection*> closed;
   for (const auto& map : {&connections, &devices})
     for (const auto& [key, connection] : *map) {
       (void)key;
       if (connection && closed.insert(connection.get()).second) connection->close();
     }
+  for (const auto& lifecycle : lifecycles) {
+    std::lock_guard lock(lifecycle->mutex);
+    lifecycle->retiring = false;
+    lifecycle->cv.notify_all();
+  }
   return true;
 }
-
 void Coordinator::shutdown()
 {
   std::unordered_map<std::string, std::shared_ptr<Connection>> connections;
