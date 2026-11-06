@@ -587,6 +587,25 @@ int runTests(int argc, char** argv)
     assert(std::filesystem::exists(cti.string() + ".shutdown"));
 #endif
   }
+  // A timed-out retirement is explicit and force-closes instead of waiting forever.
+  {
+    const auto boards = root / "slow-timeout-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SlowProbeTimeout.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    onegen::worker::Writer payload;
+    payload.scalar(std::uint32_t{1000});
+    auto reply = std::async(std::launch::async, [&] {
+      return connection.request(onegen::worker::Operation::Probe, payload.take(), 2s);
+    });
+    for (int attempt = 0; attempt < 80 && !std::filesystem::exists(cti.string() + ".probe-started"); ++attempt)
+      std::this_thread::sleep_for(25ms);
+    assert(std::filesystem::exists(cti.string() + ".probe-started"));
+    assert(!connection.beginRetirement(100ms));
+    connection.close();
+    (void)reply.get();
+  }
   // A same-CTI connection waits until the retiring worker has shut down.
   {
     const auto boards = root / "slow-retry-coordinator";

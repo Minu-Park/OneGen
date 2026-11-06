@@ -363,7 +363,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
         std::cout.flush();
         return 71;
       }
-      if (cti.stem() == "SlowProbe") {
+      if (cti.stem() == "SlowProbe" || cti.stem() == "SlowProbeTimeout") {
         std::ofstream(cti.string() + ".probe-started").put('1');
         std::this_thread::sleep_for(std::chrono::milliseconds{300});
       }
