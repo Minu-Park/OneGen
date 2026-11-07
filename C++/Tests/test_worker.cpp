@@ -1202,6 +1202,221 @@ int runTests(int argc, char** argv)
     assert(retained.lease->bytes()[0] == 1);
     connection.close();
   }
+  // A detached pool with a retained lease stays charged until the last lease dies.
+  {
+    const auto boards = root / "shared-budget-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SharedPoolBudgetBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<onegen::worker::SharedFrame> frames;
+    connection.setSharedFrameCallback([&](const auto& frame) {
+      {
+        std::lock_guard lock(mutex);
+        frames.push_back(frame);
+      }
+      ready.notify_all();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 3, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    onegen::worker::SharedFrame retained;
+    {
+      std::unique_lock lock(mutex);
+      assert(ready.wait_for(lock, 30s, [&] { return !frames.empty(); }));
+      retained = frames.front();
+      frames.clear();
+    }
+    connection.destroyFramePool(1);
+    error.clear();
+    assert(!connection.createFramePool(1, 3, 4096, error));
+    assert(error.find("byte budget exceeded") != std::string::npos);
+    retained = {};
+    assert(connection.createFramePool(1, 3, 4096, error));
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.destroyFramePool(1);
+    connection.close();
+  }
+  // Impossible row layouts and unknown PFNC formats fail closed without delivery.
+  {
+    const auto boards = root / "shared-malformed-format-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "MalformedFormatBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<onegen::worker::SharedFrame> frames;
+    connection.setSharedFrameCallback([&](const auto& frame) {
+      {
+        std::lock_guard lock(mutex);
+        frames.push_back(frame);
+      }
+      ready.notify_all();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 3, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    for (int invalid = 0; invalid < 2; ++invalid) {
+      connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+      std::this_thread::sleep_for(200ms);
+      std::lock_guard lock(mutex);
+      assert(frames.empty());
+    }
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    std::unique_lock lock(mutex);
+    assert(ready.wait_for(lock, 30s, [&] { return !frames.empty(); }));
+    assert(frames.front().descriptor.used_bytes == 1);
+    lock.unlock();
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.destroyFramePool(1);
+    connection.close();
+  }
+  // Detach drains an active callback, then discards the already-admitted second frame.
+  {
+    const auto boards = root / "shared-fence-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SharedFenceBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::atomic<int> started{0};
+    std::promise<void> first_entered;
+    auto first_signal = first_entered.get_future();
+    std::promise<void> new_entered;
+    auto new_signal = new_entered.get_future();
+    std::promise<void> release_first;
+    auto release = release_first.get_future();
+    std::uint64_t first_epoch = 0;
+    connection.setSharedFrameCallback([&](const onegen::worker::SharedFrame& frame) {
+      if (++started == 1) {
+        first_epoch = frame.descriptor.epoch;
+        first_entered.set_value();
+        release.wait();
+      } else if (frame.descriptor.epoch != first_epoch) {
+        new_entered.set_value();
+      }
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 2, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    assert(first_signal.wait_for(30s) == std::future_status::ready);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    bool second_slot_held = false;
+    try { connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1); }
+    catch (const std::exception& failure) {
+      second_slot_held = std::string(failure.what()).find("no free slot") != std::string::npos;
+    }
+    assert(second_slot_held);
+    std::promise<void> detached;
+    auto detach_signal = detached.get_future();
+    std::thread detacher([&] {
+      connection.destroyFramePool(1);
+      detached.set_value();
+    });
+    bool detach_requested = false;
+    for (int attempt = 0; attempt < 300 && !detach_requested; ++attempt) {
+      detach_requested = std::filesystem::exists(cti.string() + ".detached");
+      if (!detach_requested) std::this_thread::sleep_for(10ms);
+    }
+    assert(detach_requested);
+    assert(detach_signal.wait_for(200ms) == std::future_status::timeout);
+    release_first.set_value();
+    assert(detach_signal.wait_for(30s) == std::future_status::ready);
+    detacher.join();
+    assert(connection.createFramePool(1, 1, 4096, error));
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    assert(new_signal.wait_for(30s) == std::future_status::ready);
+    assert(started.load() == 2);
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.destroyFramePool(1);
+    connection.close();
+  }
+  // A callback may detach its own pool without waiting on itself.
+  {
+    const auto boards = root / "shared-reentrant-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SharedPoolBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::atomic<bool> detached{false};
+    std::promise<void> callback_done;
+    auto done = callback_done.get_future();
+    connection.setSharedFrameCallback([&](const auto&) {
+      connection.destroyFramePool(1);
+      detached.store(true);
+      callback_done.set_value();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 1, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    assert(done.wait_for(30s) == std::future_status::ready);
+    assert(detached.load());
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.close();
+  }
+  // Same-session attach/detach transitions stay ordered under concurrent reconnect.
+  {
+    const auto boards = root / "shared-lifecycle-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SharedPoolBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::atomic<int> delivered{0};
+    connection.setSharedFrameCallback([&](const auto&) { ++delivered; }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 1, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    for (int iteration = 0; iteration < 25; ++iteration) {
+      std::promise<void> start;
+      auto start_signal = start.get_future().share();
+      std::atomic<int> failed_creates{0};
+      std::vector<std::thread> threads;
+      for (int worker = 0; worker < 2; ++worker) {
+        threads.emplace_back([&] {
+          start_signal.wait();
+          connection.destroyFramePool(1);
+          std::string local_error;
+          if (!connection.createFramePool(1, 1, 4096, local_error)) ++failed_creates;
+        });
+      }
+      start.set_value();
+      for (auto& thread : threads) thread.join();
+      assert(failed_creates <= 1);
+      connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+      for (int wait = 0; wait < 300 && delivered.load() == 0; ++wait)
+        std::this_thread::sleep_for(10ms);
+      assert(delivered.load() > 0);
+      delivered.store(0);
+    }
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.destroyFramePool(1);
+    connection.close();
+  }
   std::filesystem::remove_all(root);
   std::cout << "test_worker ok\n";
   return 0;

@@ -88,9 +88,68 @@ struct ReleaseMailbox {
   bool closed = false;
 };
 
-/** @brief Detach flag shared by a pool and its outstanding leases. */
+/** @brief Detach fence shared by a pool, its leases and queued deliveries. */
 struct PoolValidity {
   std::atomic<bool> detached{false};
+  std::mutex mutex;
+  std::condition_variable cv;
+  int active_callbacks = 0;
+  std::thread::id delivery_thread;
+
+  /** @brief Registers a callback before it starts; false once the pool is detached. */
+  bool beginDelivery() noexcept
+  {
+    std::lock_guard lock(mutex);
+    if (detached.load(std::memory_order_acquire)) return false;
+    ++active_callbacks;
+    delivery_thread = std::this_thread::get_id();
+    return true;
+  }
+
+  void endDelivery() noexcept
+  {
+    std::lock_guard lock(mutex);
+    if (active_callbacks > 0) --active_callbacks;
+    cv.notify_all();
+  }
+
+  /** @brief Invalidates the epoch without waiting inside a callback. */
+  void invalidate() noexcept
+  {
+    std::lock_guard lock(mutex);
+    detached.store(true, std::memory_order_release);
+  }
+
+  /** @brief Waits for started callbacks; a callback that detaches re-enters safely. */
+  void waitForCallbacks()
+  {
+    std::unique_lock lock(mutex);
+    if (!active_callbacks) return;
+    if (delivery_thread == std::this_thread::get_id()) return;
+    cv.wait(lock, [&] { return active_callbacks == 0; });
+  }
+};
+
+/** @brief Per-session accounting for active and retired lease-backed pool mappings. */
+struct FramePoolBudget {
+  std::mutex mutex;
+  std::map<std::uint32_t, std::uint64_t> used;
+};
+
+/** @brief Keeps reserved bytes charged until the last pool or lease owner dies. */
+struct PoolBudgetReservation {
+  std::shared_ptr<FramePoolBudget> budget;
+  std::uint32_t session = 0;
+  std::uint64_t bytes = 0;
+  ~PoolBudgetReservation()
+  {
+    if (!budget || !bytes) return;
+    std::lock_guard lock(budget->mutex);
+    const auto found = budget->used.find(session);
+    if (found == budget->used.end()) return;
+    if (found->second <= bytes) budget->used.erase(found);
+    else found->second -= bytes;
+  }
 };
 
 struct FramePoolState {
@@ -102,6 +161,7 @@ struct FramePoolState {
   std::uint64_t slot_bytes = 0;
   std::shared_ptr<ReleaseMailbox> mailbox;
   std::shared_ptr<PoolValidity> validity;
+  std::shared_ptr<PoolBudgetReservation> reservation;
   std::mutex mutex;
   std::map<std::uint32_t, std::uint64_t> last_generation;
   std::uint64_t last_sequence = 0;
@@ -125,27 +185,155 @@ void releaseSharedSlot(const std::shared_ptr<FramePoolState>& pool, const FrameD
   }
 }
 
+/** @brief Returns the packed bits per pixel for PFNC formats the shared image path supports. */
+bool sharedImageBitsPerPixel(const std::uint64_t format, std::uint32_t& bits, bool& ycbcr) noexcept
+{
+  ycbcr = format == 0x0210001f || format == 0x02100032;
+  switch (static_cast<std::uint32_t>(format)) {
+    case 0x01080001:
+    case 0x01080008:
+    case 0x01080009:
+    case 0x0108000a:
+    case 0x0108000b:
+    case 0x021000a5:
+    case 0x021000a6:
+      bits = 8;
+      return true;
+    case 0x01100003:
+    case 0x01100005:
+    case 0x01100007:
+    case 0x01100025:
+    case 0x0110000c:
+    case 0x0110000d:
+    case 0x0110000e:
+    case 0x0110000f:
+    case 0x01100010:
+    case 0x01100011:
+    case 0x01100012:
+    case 0x01100013:
+    case 0x0110002a:
+    case 0x0110002b:
+    case 0x0110002c:
+    case 0x0110002d:
+    case 0x0110002e:
+    case 0x0110002f:
+    case 0x01100030:
+    case 0x01100031:
+    case 0x0210001f:
+    case 0x02100032:
+      bits = 16;
+      return true;
+    case 0x010a0046:
+      bits = 10;
+      return true;
+    case 0x010c0047:
+      bits = 12;
+      return true;
+    case 0x010a0052:
+    case 0x010a0054:
+    case 0x010a0056:
+    case 0x010a0058:
+    case 0x021400a8:
+    case 0x021400aa:
+    case 0x022000a7:
+    case 0x022000a9:
+      bits = 10;
+      return true;
+    case 0x010c0053:
+    case 0x010c0055:
+    case 0x010c0057:
+    case 0x010c0059:
+    case 0x021800ac:
+    case 0x021800ae:
+    case 0x022000ab:
+    case 0x022000ad:
+      bits = 12;
+      return true;
+    case 0x02180014:
+    case 0x02180015:
+      bits = 24;
+      return true;
+    case 0x02200016:
+    case 0x02200017:
+      bits = 32;
+      return true;
+    case 0x02300018:
+    case 0x02300019:
+      bits = 30;
+      return true;
+    case 0x0230001a:
+    case 0x0230001b:
+      bits = 36;
+      return true;
+    case 0x02300033:
+      bits = 48;
+      return true;
+    default:
+      return false;
+  }
+}
+
 /** @brief Checks single-image metadata that must be valid before any consumer sees the slot. */
 bool sharedMetadataValid(const FrameDescriptor& descriptor)
 {
-  if (descriptor.payload_type != 0 && descriptor.payload_type != 5) return false;
+  // Shared descriptors cover uncompressed single images only. GenTL IMAGE is 1;
+  // the fake peer uses 0 for its test image. Other payload types keep the owned path.
+  if (descriptor.payload_type != 0 && descriptor.payload_type != 1) return false;
   if (!descriptor.width || !descriptor.height || !descriptor.stride) return false;
   if (descriptor.stride > descriptor.used_bytes) return false;
-  if (descriptor.stride > (std::numeric_limits<std::uint64_t>::max)() / 8) return false;
-  if (descriptor.width > descriptor.stride * 8) return false;
   if (descriptor.height > descriptor.used_bytes / descriptor.stride) return false;
   if (descriptor.stream_id.size() > 4096) return false;
-  return true;
+  std::uint32_t bits = 0;
+  bool ycbcr = false;
+  if (!sharedImageBitsPerPixel(descriptor.pixel_format, bits, ycbcr)) return false;
+  if (ycbcr && (descriptor.width % 2U)) return false;
+  if (descriptor.width > (std::numeric_limits<std::uint64_t>::max)() / bits) return false;
+  const auto row_bytes = (static_cast<std::uint64_t>(descriptor.width) * bits + 7U) / 8U;
+  return row_bytes != 0 && descriptor.stride >= row_bytes;
+}
+
+/** @brief Reserves pool bytes against the per-session three-slot budget. */
+std::shared_ptr<PoolBudgetReservation> reservePoolBytes(
+    const std::shared_ptr<FramePoolBudget>& budget, const std::uint32_t session,
+    const std::uint64_t bytes, const std::uint64_t limit, std::string& error)
+{
+  std::lock_guard lock(budget->mutex);
+  const auto found = budget->used.find(session);
+  const auto retained = found == budget->used.end() ? std::uint64_t{0} : found->second;
+  if (bytes > limit || retained > limit - bytes) {
+    error = "frame pool byte budget exceeded: session=" + std::to_string(session)
+        + " requested=" + std::to_string(bytes) + " retained=" + std::to_string(retained)
+        + " limit=" + std::to_string(limit);
+    return {};
+  }
+  budget->used[session] = retained + bytes;
+  auto reservation = std::make_shared<PoolBudgetReservation>();
+  reservation->budget = budget;
+  reservation->session = session;
+  reservation->bytes = bytes;
+  return reservation;
 }
 
 } // namespace
 
 SharedFrameLease::SharedFrameLease(std::shared_ptr<const void> region,
     std::span<const std::uint8_t> bytes, FrameDescriptor descriptor,
-    std::shared_ptr<ReleaseMailbox> mailbox, std::shared_ptr<PoolValidity> validity)
+    std::shared_ptr<ReleaseMailbox> mailbox, std::shared_ptr<PoolValidity> validity,
+    std::shared_ptr<PoolBudgetReservation> reservation)
     : region_(std::move(region)), bytes_(bytes), descriptor_(std::move(descriptor)),
-      mailbox_(std::move(mailbox)), validity_(std::move(validity))
+      mailbox_(std::move(mailbox)), validity_(std::move(validity)),
+      reservation_(std::move(reservation))
 {
+}
+
+bool SharedFrameLease::beginDelivery() const noexcept
+{
+  return !validity_ || validity_->beginDelivery();
+}
+
+void SharedFrameLease::endDelivery() const noexcept
+{
+  if (validity_) validity_->endDelivery();
 }
 
 SharedFrameLease::~SharedFrameLease()
@@ -176,6 +364,8 @@ struct Connection::Impl {
   std::queue<SharedFrame> shared_frames;
   std::map<std::uint32_t, Message> replies;
   std::map<std::uint32_t, std::shared_ptr<FramePoolState>> pools;
+  std::shared_ptr<FramePoolBudget> frame_pool_budget = std::make_shared<FramePoolBudget>();
+  std::map<std::uint32_t, std::shared_ptr<std::mutex>> pool_lifecycles;
   std::shared_ptr<ReleaseMailbox> release_mailbox = std::make_shared<ReleaseMailbox>();
   bool frame_trace = onegen::frame_trace_enabled();
   std::uint32_t next_id = 1;
@@ -202,6 +392,14 @@ struct Connection::Impl {
     std::lock_guard lock(lifecycle_mutex);
     if (active_requests > 0) --active_requests;
     lifecycle_cv.notify_all();
+  }
+  /** @brief Serializes attach/detach transitions for one session without blocking others. */
+  std::shared_ptr<std::mutex> poolLifecycle(const std::uint32_t session)
+  {
+    std::lock_guard lock(mutex);
+    auto& lifecycle = pool_lifecycles[session];
+    if (!lifecycle) lifecycle = std::make_shared<std::mutex>();
+    return lifecycle;
   }
   bool beginRetirement(const std::chrono::milliseconds timeout)
   {
@@ -273,6 +471,11 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         }
       }
       if (shared_delivery) {
+        if (!shared.lease || !shared.lease->beginDelivery()) continue;
+        struct DeliveryCompletion {
+          const SharedFrameLease* lease;
+          ~DeliveryCompletion() { lease->endDelivery(); }
+        } delivery_completion{shared.lease.get()};
         try { if (shared_callback) shared_callback(shared); }
         catch (...) {
           qWarning().noquote() << QStringLiteral(
@@ -517,7 +720,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
                 pool->region->data() + offset, static_cast<std::size_t>(descriptor.used_bytes));
             auto lease = std::shared_ptr<SharedFrameLease>(
                 new SharedFrameLease(pool->region, bytes, descriptor, pool->mailbox,
-                                     pool->validity));
+                                     pool->validity, pool->reservation));
             SharedFrame shared;
             shared.descriptor = std::move(descriptor);
             shared.lease = std::move(lease);
@@ -631,7 +834,7 @@ void Connection::close()
     std::lock_guard lock(impl_->mutex);
     for (auto& [session, pool] : impl_->pools) {
       (void)session;
-      if (pool->validity) pool->validity->detached = true;
+      if (pool->validity) pool->validity->invalidate();
     }
     impl_->pools.clear();
   }
@@ -721,6 +924,8 @@ void Connection::set_invalidate_callback(InvalidateFn callback, std::uint32_t se
 bool Connection::createFramePool(std::uint32_t session, std::uint32_t slotCount,
                                  std::uint64_t slotBytes, std::string& error)
 {
+  const auto lifecycle = impl_->poolLifecycle(session);
+  std::lock_guard lifecycle_lock(*lifecycle);
   if (!slotCount || slotCount > 16 || !slotBytes) {
     error = "invalid frame pool geometry";
     return false;
@@ -734,6 +939,21 @@ bool Connection::createFramePool(std::uint32_t session, std::uint32_t slotCount,
     error = "frame pool exceeds the address space";
     return false;
   }
+  if (slotBytes > (std::numeric_limits<std::uint64_t>::max)() / 3) {
+    error = "frame pool byte budget overflows";
+    return false;
+  }
+  const auto budget_bytes = slotBytes * 3;
+  {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->pools.count(session)) {
+      error = "frame pool is already attached";
+      return false;
+    }
+  }
+  auto reservation = reservePoolBytes(impl_->frame_pool_budget, session, bytes,
+                                      budget_bytes, error);
+  if (!reservation) return false;
   auto region = onegen::SharedMemoryRegion::create(static_cast<std::size_t>(bytes), error);
   if (!region) return false;
   std::random_device random;
@@ -753,12 +973,9 @@ bool Connection::createFramePool(std::uint32_t session, std::uint32_t slotCount,
   pool->slot_bytes = slotBytes;
   pool->mailbox = impl_->release_mailbox;
   pool->validity = std::make_shared<PoolValidity>();
+  pool->reservation = reservation;
   {
     std::lock_guard lock(impl_->mutex);
-    if (impl_->pools.count(session)) {
-      error = "frame pool is already attached";
-      return false;
-    }
     impl_->pools[session] = pool;
   }
   try {
@@ -776,16 +993,21 @@ bool Connection::createFramePool(std::uint32_t session, std::uint32_t slotCount,
 
 void Connection::destroyFramePool(std::uint32_t session)
 {
+  const auto lifecycle = impl_->poolLifecycle(session);
   std::shared_ptr<FramePoolState> pool;
   {
-    std::lock_guard lock(impl_->mutex);
-    const auto found = impl_->pools.find(session);
-    if (found == impl_->pools.end()) return;
-    pool = found->second;
-    impl_->pools.erase(found);
+    std::lock_guard lifecycle_lock(*lifecycle);
+    {
+      std::lock_guard lock(impl_->mutex);
+      const auto found = impl_->pools.find(session);
+      if (found == impl_->pools.end()) return;
+      pool = found->second;
+      impl_->pools.erase(found);
+    }
+    if (pool->validity) pool->validity->invalidate();
+    try { request(Operation::FramePoolDetach, {}, std::chrono::seconds{2}, session); } catch (...) {}
   }
-  if (pool->validity) pool->validity->detached = true;
-  try { request(Operation::FramePoolDetach, {}, std::chrono::seconds{2}, session); } catch (...) {}
+  if (pool->validity) pool->validity->waitForCallbacks();
 }
 
 } // namespace onegen::worker

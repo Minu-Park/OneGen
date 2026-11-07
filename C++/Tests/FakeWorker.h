@@ -216,6 +216,8 @@ inline int fakeWorker(const std::filesystem::path& cti)
       continue;
     }
     if (request.operation == Operation::FramePoolDetach) {
+      if (cti.stem() == "SharedFenceBoard")
+        std::ofstream(cti.string() + ".detached").put('1');
       shared_pools.erase(request.session);
       transmit({request.operation, request.id, true, {}, {}, request.session});
       continue;
@@ -425,7 +427,9 @@ inline int fakeWorker(const std::filesystem::path& cti)
     }
     if (request.operation == Operation::Trigger && live.count(request.session)) {
       const bool shared_stem = cti.stem() == "SharedPoolBoard"
-          || cti.stem() == "MalformedPoolBoard" || cti.stem() == "CrashPoolBoard";
+          || cti.stem() == "SharedPoolBudgetBoard" || cti.stem() == "SharedFenceBoard"
+          || cti.stem() == "MalformedPoolBoard" || cti.stem() == "MalformedFormatBoard"
+          || cti.stem() == "CrashPoolBoard";
       if (shared_stem) {
         const auto found = shared_pools.find(request.session);
         if (found == shared_pools.end()) {
@@ -476,6 +480,15 @@ inline int fakeWorker(const std::filesystem::path& cti)
         descriptor.stream_id = produced.stream_id;
         if (cti.stem() == "MalformedPoolBoard" && descriptor.sequence == 1)
           descriptor.used_bytes = pool.slot_bytes + 1;
+        if (cti.stem() == "MalformedFormatBoard") descriptor.payload_type = 1; // GenTL IMAGE
+        if (cti.stem() == "MalformedFormatBoard" && descriptor.sequence == 1) {
+          descriptor.width = 1000;
+          descriptor.height = 2;
+          descriptor.stride = 200;
+          descriptor.used_bytes = 400;
+        }
+        if (cti.stem() == "MalformedFormatBoard" && descriptor.sequence == 2)
+          descriptor.pixel_format = 0x010800ff;
         Writer descriptor_payload;
         write(descriptor_payload, descriptor);
         transmit({Operation::FrameReady, 0, true, {}, descriptor_payload.take(), request.session});
