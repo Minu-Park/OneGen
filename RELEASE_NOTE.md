@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add the internal R3a bounded frame-write boundary: eligible Mono8/BayerRG8 single images copy once from the pinned GenTL buffer into caller-owned storage with exactly-once requeue, unsupported layouts are rejected without a fallback, and the owned path now runs the same core. `grab_one_into` has no production caller; the worker still uses the owned payload path.
 - Add the experimental host-owned shared-slot control plane (protocol v15): ordered random-region attach/detach, validated `FrameReady` descriptors with PFNC storage-size row/stride checks, exact `SlotRelease` tokens, per-session retired-pool byte accounting, detach callback fencing with in-flight/duplicate-detach drain and reentrant detach, malformed-descriptor recovery without sequence poisoning, and retained-mapping safety. Production acquisition keeps the existing owned-payload transport until the direct GenTL-to-SHM path is validated.
 - Add opt-in frame transport tracing (`ONEGEN_TRACE_FRAMES=1`) that correlates worker, host and adapter stages by producer FrameID, Debug-level Interface/Device lifecycle counts, and a manual 127 MB synthetic transport profile. With the variable unset, no per-frame record or counter is added.
 

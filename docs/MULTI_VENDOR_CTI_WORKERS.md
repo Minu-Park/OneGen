@@ -284,6 +284,23 @@ rejects pool attach until the direct GenTL-to-SHM acquisition path lands, so
 the optimized transport is not enabled and the existing owned-payload path
 remains the live default.
 
+R3a adds an internal bounded-write boundary (`Internal/FramePayload.h`,
+`Internal/PinnedAcquisition.h`). For an eligible Mono8 or BayerRG8 single-image
+payload, `grab_one_into` copies from the pinned GenTL buffer directly into
+caller-owned storage with one `memcpy` before `DSQueueBuffer`. The borrowed
+frame view, transport span and part spans are valid only during the synchronous
+visit on the visiting thread; no GenTL pointer or handle escapes, and the
+types are non-copyable and non-movable. Every obtained buffer is requeued
+exactly once, explicitly on normal completion and from the guard on exceptions.
+Unsupported layouts (JPEG, planar, multipart, chunk-bearing, non-image, other
+PFNC formats) return `UnsupportedLayout` after that single requeue; malformed
+descriptors throw without writing the destination. Incomplete buffers keep the
+owned path's truncated height and diagnostic. The production worker does not
+use this boundary yet: `Camera::Impl::grab_one` delegates to the shared owned
+path (`grab_owned` -> `visit_pinned_buffer`), `grab_one_into` has no production
+caller, the worker still rejects pool attach, and the owned-payload path stays
+the live default.
+
 ## Non-Goals
 
 - Implementing vendor discovery protocols outside GenTL.

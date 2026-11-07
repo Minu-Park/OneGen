@@ -8,6 +8,7 @@
 #include "Internal/StageLog.h"
 #include "Internal/OneGenImpl.h"
 #include "Internal/FramePayload.h"
+#include "Internal/PinnedAcquisition.h"
 #include "Internal/CoordinateFormat.h"
 #include "Internal/Scan3dGeometry.h"
 
@@ -28,6 +29,7 @@
 #include <string_view>
 #include <set>
 #include <thread>
+#include <utility>
 
 namespace onegen {
 namespace {
@@ -40,7 +42,17 @@ public:
   BufferRequeue(Gentl* gentl, GenTL::DS_HANDLE stream, GenTL::BUFFER_HANDLE buffer)
       : gentl_(gentl), stream_(stream), buffer_(buffer) {}
   ~BufferRequeue() { if (gentl_ && buffer_) gentl_->DSQueueBuffer(stream_, buffer_); }
-  void release() noexcept { buffer_ = nullptr; }
+
+  /** Requeues once and disarms the guard; a repeat call is a no-op. */
+  GenTL::GC_ERROR requeue() noexcept {
+    if (!gentl_ || !buffer_) return GenTL::GC_ERR_SUCCESS;
+    auto* const gentl = gentl_;
+    const auto stream = stream_;
+    const auto buffer = buffer_;
+    gentl_ = nullptr;
+    buffer_ = nullptr;
+    return gentl->DSQueueBuffer(stream, buffer);
+  }
 
 private:
   Gentl* gentl_ = nullptr;
@@ -241,6 +253,7 @@ struct Camera::Impl {
   void start_stream(uint64_t n_frames);
   std::size_t payload_size();
   Frame grab_one(uint64_t timeout_ms);
+  detail::AcquisitionContext context();
   void cmd(const char* name);
   bool try_trigger();
   void set_locked(int64_t v);
@@ -778,18 +791,70 @@ void Camera::Impl::start_stream(uint64_t n_frames) {
   }
 }
 
+detail::AcquisitionContext Camera::Impl::context() {
+  detail::AcquisitionContext out;
+  out.gentl = g;
+  out.stream = hds;
+  out.new_buffer_event = hev;
+  out.features = &features;
+  out.stream_features = &stream_features;
+  out.stream_index = stream_index;
+  out.stream_id = &stream_id;
+  out.scan3d_geometry = &scan3d_geometry;
+  out.components = &components;
+  return out;
+}
+
 Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
+  return detail::grab_owned(context(), timeout_ms);
+}
+
+namespace detail {
+namespace {
+
+void grab_owned_visit(void* user, PinnedBuffer& buffer) {
+  auto& metadata = buffer.metadata();
+  if (!metadata.parts.empty()) {
+    const auto parts = buffer.parts();
+    for (std::size_t index = 0; index < parts.size() && index < metadata.parts.size(); ++index)
+      metadata.parts[index].payload.assign(parts[index].base,
+                                           parts[index].base + parts[index].size);
+  } else {
+    const auto transport = buffer.transport();
+    copy_single_payload(metadata, transport.data(), transport.size());
+  }
+  *static_cast<Frame*>(user) = std::move(metadata);
+}
+
+struct BorrowedState {
+  FrameDestination destination;
+  BorrowedGrabResult result;
+};
+
+void grab_borrowed_visit(void* user, PinnedBuffer& buffer) {
+  auto& state = *static_cast<BorrowedState*>(user);
+  if (buffer.borrowable()) {
+    const BorrowedFrameView view(buffer.metadata(), buffer.transport());
+    state.result.write = write_frame(view, state.destination);
+  }
+  state.result.metadata = std::move(buffer.metadata());
+}
+
+}  // namespace
+
+void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                         PinnedExtraction extraction, PinnedVisitFn visit, void* user) {
   GenTL::EVENT_NEW_BUFFER_DATA data{};
   size_t size = sizeof(data);
-  auto err = g->EventGetData(hev, &data, &size, timeout_ms);
+  auto err = context.gentl->EventGetData(context.new_buffer_event, &data, &size, timeout_ms);
   if (err == GenTL::GC_ERR_TIMEOUT) throw Error("grab timeout");
-  if (err != GenTL::GC_ERR_SUCCESS) g->fail("EventGetData", err);
+  if (err != GenTL::GC_ERR_SUCCESS) context.gentl->fail("EventGetData", err);
   if (!data.BufferHandle) throw Error("grab: null buffer handle");
-  BufferRequeue requeue(g, hds, data.BufferHandle);
+  BufferRequeue requeue(context.gentl, context.stream, data.BufferHandle);
 
   Frame f;
   auto u64 = [&](GenTL::BUFFER_INFO_CMD cmd) {
-    return buffer_info(g, hds, data.BufferHandle, cmd);
+    return buffer_info(context.gentl, context.stream, data.BufferHandle, cmd);
   };
   f.buffer_info.capacity = static_cast<std::size_t>(u64(GenTL::BUFFER_INFO_SIZE));
   f.buffer_info.size_filled = static_cast<std::size_t>(u64(GenTL::BUFFER_INFO_SIZE_FILLED));
@@ -821,7 +886,8 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   f.format_namespace = u64(GenTL::BUFFER_INFO_PIXELFORMAT_NAMESPACE);
   f.pixel_endianness = static_cast<std::uint32_t>(u64(GenTL::BUFFER_INFO_PIXEL_ENDIANNESS));
   const auto integer_feature = [&](const char* name) -> std::uint64_t {
-    auto node = features.find(name);
+    if (!context.features) return 0;
+    auto node = context.features->find(name);
     if (!node.valid() || !node.is_readable()) return 0;
     try {
       return static_cast<std::uint64_t>(node.get_int());
@@ -831,8 +897,8 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   };
   if (!f.width) f.width = static_cast<std::uint32_t>(integer_feature("Width"));
   if (!f.height) f.height = static_cast<std::uint32_t>(integer_feature("Height"));
-  if (!f.pixel_format) {
-    auto node = features.find("PixelFormat");
+  if (!f.pixel_format && context.features) {
+    auto node = context.features->find("PixelFormat");
     if (node.valid() && node.is_readable()) {
       try {
         f.pixel_format = static_cast<std::uint64_t>(node.get_enum_value());
@@ -857,179 +923,227 @@ Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
     const auto rows = usable / f.stride;
     if (rows && rows < f.height) f.height = static_cast<std::uint32_t>(rows);
   }
-  if (f.buffer_info.incomplete) {
-    f.buffer_info.diagnostic = incomplete_error(g, hds, f.buffer_info, stream_features, f.width,
+  if (f.buffer_info.incomplete && context.stream_features) {
+    f.buffer_info.diagnostic = incomplete_error(context.gentl, context.stream, f.buffer_info,
+                                                *context.stream_features, f.width,
                                                 f.height, f.pixel_format,
                                                 u64(GenTL::BUFFER_INFO_FRAMEID));
   }
   f.frame_id = u64(GenTL::BUFFER_INFO_FRAMEID);
   f.timestamp = u64(GenTL::BUFFER_INFO_TIMESTAMP);
   f.timestamp_ns = u64(GenTL::BUFFER_INFO_TIMESTAMP_NS);
-  f.stream_index = stream_index;
-  f.stream_id = stream_id;
-  f.scan3d_geometry = scan3d_geometry;
-  f.components = components;
-  if (base && filled && g->DSGetBufferChunkData) {
-    size_t chunk_count = 0;
-    auto chunk_error = g->DSGetBufferChunkData(hds, data.BufferHandle, nullptr, &chunk_count);
-    if ((chunk_error == GenTL::GC_ERR_SUCCESS || chunk_error == GenTL::GC_ERR_BUFFER_TOO_SMALL)
-        && chunk_count) {
-      if (chunk_count > filled) throw Error("grab: chunk count exceeds delivered storage");
-      std::vector<GenTL::SINGLE_CHUNK_DATA> chunks(chunk_count);
-      const auto chunk_capacity = chunk_count;
-      if (g->DSGetBufferChunkData(hds, data.BufferHandle, chunks.data(), &chunk_count)
-          == GenTL::GC_ERR_SUCCESS) {
-        if (chunk_count > chunk_capacity) throw Error("grab: invalid returned chunk count");
-        for (std::size_t index = 0; index < chunk_count; ++index) {
-          const auto& chunk = chunks[index];
-          if (chunk.ChunkOffset > filled || chunk.ChunkLength > filled - chunk.ChunkOffset)
-            throw Error("grab: chunk exceeds delivered data");
-          Frame::Chunk owned;
-          owned.id = chunk.ChunkID;
-          owned.offset = chunk.ChunkOffset;
-          owned.payload.assign(base + chunk.ChunkOffset,
-                               base + chunk.ChunkOffset + chunk.ChunkLength);
-          f.chunks.push_back(std::move(owned));
-        }
-        auto* map = static_cast<GenApi::CNodeMapRef*>(features.raw_nodemap());
-        if (map && map->_Ptr) {
-          std::vector<GenApi::SingleChunkData_t> generic_chunks;
-          generic_chunks.reserve(chunk_count);
-          for (std::size_t index = 0; index < chunk_count; ++index)
-            generic_chunks.push_back({chunks[index].ChunkID, chunks[index].ChunkOffset,
-                                      chunks[index].ChunkLength});
-          try {
-            GenApi::CChunkAdapterGeneric adapter(map->_Ptr);
-            adapter.AttachBuffer(const_cast<std::uint8_t*>(base), generic_chunks.data(),
-                                 static_cast<std::int64_t>(generic_chunks.size()));
-            if (auto geometry = read_scan3d_geometry(features, "Chunk",
-                    f.scan3d_geometry ? &*f.scan3d_geometry : nullptr)) {
-              if (f.scan3d_geometry
-                  && geometry->distance_unit == f.scan3d_geometry->distance_unit
-                  && geometry->output_mode == f.scan3d_geometry->output_mode
-                  && geometry->coordinate_system == f.scan3d_geometry->coordinate_system) {
-                for (std::size_t axis = 0; axis < 3; ++axis) {
-                  if (!geometry->calibrated_axes[axis] && f.scan3d_geometry->calibrated_axes[axis]) {
-                    geometry->scale[axis] = f.scan3d_geometry->scale[axis];
-                    geometry->offset[axis] = f.scan3d_geometry->offset[axis];
-                    geometry->invalid_enabled[axis] = f.scan3d_geometry->invalid_enabled[axis];
-                    geometry->invalid_value[axis] = f.scan3d_geometry->invalid_value[axis];
-                    geometry->calibrated_axes[axis] = true;
+  f.stream_index = context.stream_index;
+  if (context.stream_id) f.stream_id = *context.stream_id;
+  if (context.scan3d_geometry) f.scan3d_geometry = *context.scan3d_geometry;
+  if (context.components) f.components = *context.components;
+
+  std::vector<PinnedPart> part_spans;
+  bool borrowable = false;
+  if (extraction == PinnedExtraction::Owned) {
+    if (base && filled && context.gentl->DSGetBufferChunkData) {
+      size_t chunk_count = 0;
+      auto chunk_error = context.gentl->DSGetBufferChunkData(context.stream, data.BufferHandle,
+                                                             nullptr, &chunk_count);
+      if ((chunk_error == GenTL::GC_ERR_SUCCESS || chunk_error == GenTL::GC_ERR_BUFFER_TOO_SMALL)
+          && chunk_count) {
+        if (chunk_count > filled) throw Error("grab: chunk count exceeds delivered storage");
+        std::vector<GenTL::SINGLE_CHUNK_DATA> chunks(chunk_count);
+        const auto chunk_capacity = chunk_count;
+        if (context.gentl->DSGetBufferChunkData(context.stream, data.BufferHandle, chunks.data(),
+                                                &chunk_count) == GenTL::GC_ERR_SUCCESS) {
+          if (chunk_count > chunk_capacity) throw Error("grab: invalid returned chunk count");
+          for (std::size_t index = 0; index < chunk_count; ++index) {
+            const auto& chunk = chunks[index];
+            if (chunk.ChunkOffset > filled || chunk.ChunkLength > filled - chunk.ChunkOffset)
+              throw Error("grab: chunk exceeds delivered data");
+            Frame::Chunk owned;
+            owned.id = chunk.ChunkID;
+            owned.offset = chunk.ChunkOffset;
+            owned.payload.assign(base + chunk.ChunkOffset,
+                                 base + chunk.ChunkOffset + chunk.ChunkLength);
+            f.chunks.push_back(std::move(owned));
+          }
+          auto* map = context.features
+              ? static_cast<GenApi::CNodeMapRef*>(context.features->raw_nodemap()) : nullptr;
+          if (map && map->_Ptr) {
+            std::vector<GenApi::SingleChunkData_t> generic_chunks;
+            generic_chunks.reserve(chunk_count);
+            for (std::size_t index = 0; index < chunk_count; ++index)
+              generic_chunks.push_back({chunks[index].ChunkID, chunks[index].ChunkOffset,
+                                        chunks[index].ChunkLength});
+            try {
+              GenApi::CChunkAdapterGeneric adapter(map->_Ptr);
+              adapter.AttachBuffer(const_cast<std::uint8_t*>(base), generic_chunks.data(),
+                                   static_cast<std::int64_t>(generic_chunks.size()));
+              if (auto geometry = read_scan3d_geometry(*context.features, "Chunk",
+                      f.scan3d_geometry ? &*f.scan3d_geometry : nullptr)) {
+                if (f.scan3d_geometry
+                    && geometry->distance_unit == f.scan3d_geometry->distance_unit
+                    && geometry->output_mode == f.scan3d_geometry->output_mode
+                    && geometry->coordinate_system == f.scan3d_geometry->coordinate_system) {
+                  for (std::size_t axis = 0; axis < 3; ++axis) {
+                    if (!geometry->calibrated_axes[axis] && f.scan3d_geometry->calibrated_axes[axis]) {
+                      geometry->scale[axis] = f.scan3d_geometry->scale[axis];
+                      geometry->offset[axis] = f.scan3d_geometry->offset[axis];
+                      geometry->invalid_enabled[axis] = f.scan3d_geometry->invalid_enabled[axis];
+                      geometry->invalid_value[axis] = f.scan3d_geometry->invalid_value[axis];
+                      geometry->calibrated_axes[axis] = true;
+                    }
                   }
                 }
+                f.scan3d_geometry = std::move(geometry);
               }
-              f.scan3d_geometry = std::move(geometry);
-            }
-            // Harness-only diagnostics must read chunk nodes while the buffer is attached.
-            if (std::getenv("ONEGEN_SINGLE_DIAGNOSTICS_DIR")) {
-              const auto report = [&](const char* name, std::int64_t part) {
-                try {
-                  auto node = features.find(name);
-                  if (!node.is_readable()) {
-                    std::cerr << "[INFO] chunk metadata: part=" << part << " node=" << name << " readable=false\n";
-                    return;
+              // Harness-only diagnostics must read chunk nodes while the buffer is attached.
+              if (std::getenv("ONEGEN_SINGLE_DIAGNOSTICS_DIR")) {
+                const auto report = [&](const char* name, std::int64_t part) {
+                  try {
+                    auto node = context.features->find(name);
+                    if (!node.is_readable()) {
+                      std::cerr << "[INFO] chunk metadata: part=" << part << " node=" << name << " readable=false\n";
+                      return;
+                    }
+                    std::string value;
+                    switch (node.kind()) {
+                      case NodeKind::Integer: value = std::to_string(node.get_int()); break;
+                      case NodeKind::Float: { std::ostringstream out; out.precision(17); out << node.get_float(); value = out.str(); break; }
+                      case NodeKind::Boolean: value = node.get_bool() ? "true" : "false"; break;
+                      case NodeKind::Enumeration: value = node.get_enum(); break;
+                      case NodeKind::String: value = node.get_string(); break;
+                      default: value = "unsupported-value-kind"; break;
+                    }
+                    std::cerr << "[INFO] chunk metadata: frame=" << f.frame_id << " part=" << part
+                              << " node=" << name << " value=" << value << "\n";
+                  } catch (const std::exception& e) {
+                    std::cerr << "[WARNING] chunk metadata read failed: node=" << name << " reason=" << e.what() << "\n";
                   }
-                  std::string value;
-                  switch (node.kind()) {
-                    case NodeKind::Integer: value = std::to_string(node.get_int()); break;
-                    case NodeKind::Float: { std::ostringstream out; out.precision(17); out << node.get_float(); value = out.str(); break; }
-                    case NodeKind::Boolean: value = node.get_bool() ? "true" : "false"; break;
-                    case NodeKind::Enumeration: value = node.get_enum(); break;
-                    case NodeKind::String: value = node.get_string(); break;
-                    default: value = "unsupported-value-kind"; break;
+                };
+                // The consumer supplies vendor diagnostics; acquisition never interprets them.
+                const auto reportList = [&](const char* variable, std::int64_t part) {
+                  const auto* configured = std::getenv(variable);
+                  if (!configured) return;
+                  std::istringstream names(configured);
+                  std::string name;
+                  while (std::getline(names, name, ','))
+                    if (!name.empty()) report(name.c_str(), part);
+                };
+                reportList("ONEGEN_DIAGNOSTIC_CHUNK_NODES", -1);
+                const auto* selectorName = std::getenv("ONEGEN_DIAGNOSTIC_CHUNK_SELECTOR");
+                const auto* countName = std::getenv("ONEGEN_DIAGNOSTIC_CHUNK_COUNT");
+                auto selector = context.features->find(selectorName ? selectorName : "");
+                auto count = context.features->find(countName ? countName : "");
+                if (selector.is_readable() && selector.is_writable() && count.is_readable()
+                    && selector.kind() == NodeKind::Integer && count.kind() == NodeKind::Integer) {
+                  const auto original = selector.get_int();
+                  try {
+                    const auto parts = count.get_int();
+                    if (parts < 0 || parts > 256) throw Error("Diagnostic chunk part count is outside supported bounds");
+                    for (std::int64_t part = 0; part < parts; ++part) {
+                      selector.set_int(part);
+                      reportList("ONEGEN_DIAGNOSTIC_SELECTED_CHUNK_NODES", part);
+                    }
+                  } catch (...) {
+                    selector.set_int(original);
+                    throw;
                   }
-                  std::cerr << "[INFO] chunk metadata: frame=" << f.frame_id << " part=" << part
-                            << " node=" << name << " value=" << value << "\n";
-                } catch (const std::exception& e) {
-                  std::cerr << "[WARNING] chunk metadata read failed: node=" << name << " reason=" << e.what() << "\n";
-                }
-              };
-              // The consumer supplies vendor diagnostics; acquisition never interprets them.
-              const auto reportList = [&](const char* variable, std::int64_t part) {
-                const auto* configured = std::getenv(variable);
-                if (!configured) return;
-                std::istringstream names(configured);
-                std::string name;
-                while (std::getline(names, name, ','))
-                  if (!name.empty()) report(name.c_str(), part);
-              };
-              reportList("ONEGEN_DIAGNOSTIC_CHUNK_NODES", -1);
-              const auto* selectorName = std::getenv("ONEGEN_DIAGNOSTIC_CHUNK_SELECTOR");
-              const auto* countName = std::getenv("ONEGEN_DIAGNOSTIC_CHUNK_COUNT");
-              auto selector = features.find(selectorName ? selectorName : "");
-              auto count = features.find(countName ? countName : "");
-              if (selector.is_readable() && selector.is_writable() && count.is_readable()
-                  && selector.kind() == NodeKind::Integer && count.kind() == NodeKind::Integer) {
-                const auto original = selector.get_int();
-                try {
-                  const auto parts = count.get_int();
-                  if (parts < 0 || parts > 256) throw Error("Diagnostic chunk part count is outside supported bounds");
-                  for (std::int64_t part = 0; part < parts; ++part) {
-                    selector.set_int(part);
-                    reportList("ONEGEN_DIAGNOSTIC_SELECTED_CHUNK_NODES", part);
-                  }
-                } catch (...) {
                   selector.set_int(original);
-                  throw;
                 }
-                selector.set_int(original);
               }
+              adapter.DetachBuffer();
+            } catch (...) {
             }
-            adapter.DetachBuffer();
-          } catch (...) {
           }
         }
       }
     }
-  }
-  std::uint32_t part_count = 0;
-  if (g->DSGetNumBufferParts && g->DSGetBufferPartInfo &&
-      g->DSGetNumBufferParts(hds, data.BufferHandle, &part_count) == GenTL::GC_ERR_SUCCESS) {
-    if (part_count > filled) throw Error("grab: part count exceeds delivered storage");
-    f.parts.reserve(part_count);
-    for (std::uint32_t index = 0; index < part_count; ++index) {
-      Frame::Part part;
-      auto info = [&](GenTL::BUFFER_PART_INFO_CMD cmd) {
-        return part_info(g, hds, data.BufferHandle, index, cmd);
-      };
-      const auto* part_base = reinterpret_cast<const std::uint8_t*>(
-          static_cast<uintptr_t>(info(GenTL::BUFFER_PART_INFO_BASE)));
-      const auto part_size = static_cast<std::size_t>(info(GenTL::BUFFER_PART_INFO_DATA_SIZE));
-      part.width = static_cast<std::uint32_t>(info(GenTL::BUFFER_PART_INFO_WIDTH));
-      part.height = static_cast<std::uint32_t>(info(GenTL::BUFFER_PART_INFO_DELIVERED_IMAGEHEIGHT));
-      if (!part.height)
-        part.height = static_cast<std::uint32_t>(info(GenTL::BUFFER_PART_INFO_HEIGHT));
-      part.data_type = info(GenTL::BUFFER_PART_INFO_DATA_TYPE);
-      part.data_format = info(GenTL::BUFFER_PART_INFO_DATA_FORMAT);
-      part.format_namespace = info(GenTL::BUFFER_PART_INFO_DATA_FORMAT_NAMESPACE);
-      part.source_id = info(GenTL::BUFFER_PART_INFO_SOURCE_ID);
-      part.region_id = info(GenTL::BUFFER_PART_INFO_REGION_ID);
-      part.purpose_id = info(GenTL::BUFFER_PART_INFO_DATA_PURPOSE_ID);
-      const auto layout = coordinate_format(part.data_format);
-      const auto bits = layout.planar ? layout.sample_bits
-          : static_cast<std::size_t>((part.data_format >> 16U) & 0xffU);
-      const auto padding = static_cast<std::size_t>(info(GenTL::BUFFER_PART_INFO_XPADDING));
-      if (bits && part.width <= ((std::numeric_limits<std::size_t>::max)() - 7U) / bits) {
-        const auto packed = (static_cast<std::size_t>(part.width) * bits + 7U) / 8U;
-        if (padding <= (std::numeric_limits<std::size_t>::max)() - packed)
-          part.stride = packed + padding;
+    std::uint32_t part_count = 0;
+    if (context.gentl->DSGetNumBufferParts && context.gentl->DSGetBufferPartInfo
+        && context.gentl->DSGetNumBufferParts(context.stream, data.BufferHandle, &part_count)
+            == GenTL::GC_ERR_SUCCESS) {
+      if (part_count > filled) throw Error("grab: part count exceeds delivered storage");
+      f.parts.reserve(part_count);
+      part_spans.reserve(part_count);
+      for (std::uint32_t index = 0; index < part_count; ++index) {
+        Frame::Part part;
+        auto info = [&](GenTL::BUFFER_PART_INFO_CMD cmd) {
+          return part_info(context.gentl, context.stream, data.BufferHandle, index, cmd);
+        };
+        const auto* part_base = reinterpret_cast<const std::uint8_t*>(
+            static_cast<uintptr_t>(info(GenTL::BUFFER_PART_INFO_BASE)));
+        const auto part_size = static_cast<std::size_t>(info(GenTL::BUFFER_PART_INFO_DATA_SIZE));
+        part.width = static_cast<std::uint32_t>(info(GenTL::BUFFER_PART_INFO_WIDTH));
+        part.height = static_cast<std::uint32_t>(info(GenTL::BUFFER_PART_INFO_DELIVERED_IMAGEHEIGHT));
+        if (!part.height)
+          part.height = static_cast<std::uint32_t>(info(GenTL::BUFFER_PART_INFO_HEIGHT));
+        part.data_type = info(GenTL::BUFFER_PART_INFO_DATA_TYPE);
+        part.data_format = info(GenTL::BUFFER_PART_INFO_DATA_FORMAT);
+        part.format_namespace = info(GenTL::BUFFER_PART_INFO_DATA_FORMAT_NAMESPACE);
+        part.source_id = info(GenTL::BUFFER_PART_INFO_SOURCE_ID);
+        part.region_id = info(GenTL::BUFFER_PART_INFO_REGION_ID);
+        part.purpose_id = info(GenTL::BUFFER_PART_INFO_DATA_PURPOSE_ID);
+        const auto layout = coordinate_format(part.data_format);
+        const auto bits = layout.planar ? layout.sample_bits
+            : static_cast<std::size_t>((part.data_format >> 16U) & 0xffU);
+        const auto padding = static_cast<std::size_t>(info(GenTL::BUFFER_PART_INFO_XPADDING));
+        if (bits && part.width <= ((std::numeric_limits<std::size_t>::max)() - 7U) / bits) {
+          const auto packed = (static_cast<std::size_t>(part.width) * bits + 7U) / 8U;
+          if (padding <= (std::numeric_limits<std::size_t>::max)() - packed)
+            part.stride = packed + padding;
+        }
+        const auto base_address = reinterpret_cast<std::uintptr_t>(base);
+        const auto part_address = reinterpret_cast<std::uintptr_t>(part_base);
+        const bool contained = base && part_base && part_address >= base_address
+            && part_address - base_address <= filled
+            && part_size <= filled - (part_address - base_address);
+        if (!contained && part_size) throw Error("grab: part exceeds delivered data");
+        if (part_size) {
+          f.parts.push_back(std::move(part));
+          part_spans.push_back({part_base, part_size});
+        }
       }
-      const auto base_address = reinterpret_cast<std::uintptr_t>(base);
-      const auto part_address = reinterpret_cast<std::uintptr_t>(part_base);
-      const bool contained = base && part_base && part_address >= base_address
-          && part_address - base_address <= filled
-          && part_size <= filled - (part_address - base_address);
-      if (!contained && part_size) throw Error("grab: part exceeds delivered data");
-      if (contained && part_size) part.payload.assign(part_base, part_base + part_size);
-      if (!part.payload.empty()) f.parts.push_back(std::move(part));
+    }
+  } else {
+    borrowable = f.payload_type == GenTL::PAYLOAD_TYPE_IMAGE
+        && !f.buffer_info.contains_chunk_data;
+    if (borrowable && context.gentl->DSGetBufferChunkData) {
+      size_t chunk_count = 0;
+      const auto chunk_error = context.gentl->DSGetBufferChunkData(
+          context.stream, data.BufferHandle, nullptr, &chunk_count);
+      if ((chunk_error == GenTL::GC_ERR_SUCCESS || chunk_error == GenTL::GC_ERR_BUFFER_TOO_SMALL)
+          && chunk_count)
+        borrowable = false;
+    }
+    if (borrowable && context.gentl->DSGetNumBufferParts && context.gentl->DSGetBufferPartInfo) {
+      std::uint32_t part_count = 0;
+      if (context.gentl->DSGetNumBufferParts(context.stream, data.BufferHandle, &part_count)
+              == GenTL::GC_ERR_SUCCESS
+          && part_count)
+        borrowable = false;
     }
   }
-  if (f.parts.empty()) copy_single_payload(f, base, filled);
-  const auto queue_error = g->DSQueueBuffer(hds, data.BufferHandle);
-  requeue.release();
-  if (queue_error != GenTL::GC_ERR_SUCCESS) g->fail("DSQueueBuffer", queue_error);
-  return f;
+
+  const std::span<const std::uint8_t> transport_span(base, filled);
+  const std::span<const PinnedPart> parts_span(part_spans);
+  PinnedBuffer buffer(f, transport_span, parts_span, borrowable);
+  visit(user, buffer);
+  const auto queue_error = requeue.requeue();
+  if (queue_error != GenTL::GC_ERR_SUCCESS) context.gentl->fail("DSQueueBuffer", queue_error);
 }
+
+Frame grab_owned(const AcquisitionContext& context, std::uint64_t timeout_ms) {
+  Frame frame;
+  visit_pinned_buffer(context, timeout_ms, PinnedExtraction::Owned, &grab_owned_visit, &frame);
+  return frame;
+}
+
+BorrowedGrabResult grab_one_into(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                                 FrameDestination destination) {
+  BorrowedState state{destination, {}};
+  visit_pinned_buffer(context, timeout_ms, PinnedExtraction::BorrowedImageOnly,
+                      &grab_borrowed_visit, &state);
+  return std::move(state.result);
+}
+
+}  // namespace detail
 
 std::vector<Frame> Camera::single(std::size_t n) {
   ConnectTiming timing("single");
