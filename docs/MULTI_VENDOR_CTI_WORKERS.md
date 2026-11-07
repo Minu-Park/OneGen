@@ -265,10 +265,10 @@ remains experimental until the physical acceptance gate in #348 passes.
   arbitrary thread.
 - **Failure policy:** descriptors and releases are validated before use
   (bounds, stride, layout, epoch, generation, duplicate slot). Malformed input
-  fails closed for that frame; worker/session epochs are invalidated before
-  stale work can be delivered; all waits wake on stop, close, exit and
-  reconnect. No silent loss: source, admitted, delivered, rejected and
-  policy-dropped counts stay separate.
+  fails closed for that frame and does not advance the accepted generation or
+  sequence; worker/session epochs are invalidated before stale work can be
+  delivered; all waits wake on stop, close, exit and reconnect. No silent loss:
+  source, admitted, delivered, rejected and policy-dropped counts stay separate.
 - **Protocol:** worker protocol v15 carries the pool attach/detach,
   `FrameReady` and `SlotRelease` messages. Mismatched peers are rejected; no
   compatibility shim is added before v1.0.0.

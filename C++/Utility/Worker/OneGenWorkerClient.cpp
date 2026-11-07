@@ -681,16 +681,9 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
               continue;
             }
             bool stale = false;
-            bool invalid = false;
             {
               std::lock_guard pool_lock(pool->mutex);
-              if (descriptor.generation <= pool->last_generation[descriptor.slot]) {
-                stale = true;
-              } else {
-                pool->last_generation[descriptor.slot] = descriptor.generation;
-                if (descriptor.sequence <= pool->last_sequence) invalid = true;
-                else pool->last_sequence = descriptor.sequence;
-              }
+              stale = descriptor.generation <= pool->last_generation[descriptor.slot];
             }
             if (stale) {
               qDebug().noquote() << QStringLiteral(
@@ -707,6 +700,13 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
                   .arg(descriptor.slot).arg(static_cast<qulonglong>(descriptor.used_bytes));
               releaseSharedSlot(pool, descriptor);
               continue;
+            }
+            bool invalid = false;
+            {
+              std::lock_guard pool_lock(pool->mutex);
+              pool->last_generation[descriptor.slot] = descriptor.generation;
+              if (descriptor.sequence <= pool->last_sequence) invalid = true;
+              else pool->last_sequence = descriptor.sequence;
             }
             if (invalid) {
               qWarning().noquote() << QStringLiteral(

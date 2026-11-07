@@ -1283,6 +1283,43 @@ int runTests(int argc, char** argv)
     connection.destroyFramePool(1);
     connection.close();
   }
+  // A malformed descriptor must not poison subsequent valid frame acceptance.
+  {
+    const auto boards = root / "shared-malformed-sequence-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "MalformedSequenceBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<onegen::worker::SharedFrame> frames;
+    connection.setSharedFrameCallback([&](const auto& frame) {
+      {
+        std::lock_guard lock(mutex);
+        frames.push_back(frame);
+      }
+      ready.notify_all();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 3, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1); // malformed sequence
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1); // valid sequence 2
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1); // valid sequence 3
+    std::unique_lock lock(mutex);
+    assert(ready.wait_for(lock, 30s, [&] { return frames.size() >= 2; }));
+    assert(frames.size() == 2);
+    assert(frames[0].descriptor.sequence == 2);
+    assert(frames[1].descriptor.sequence == 3);
+    lock.unlock();
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.destroyFramePool(1);
+    connection.close();
+  }
   // Detach drains an active callback, then discards the already-admitted second frame.
   {
     const auto boards = root / "shared-fence-board";

@@ -428,7 +428,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
     if (request.operation == Operation::Trigger && live.count(request.session)) {
       const bool shared_stem = cti.stem() == "SharedPoolBoard"
           || cti.stem() == "SharedPoolBudgetBoard" || cti.stem() == "SharedFenceBoard"
-          || cti.stem() == "FormatStorageBoard"
+          || cti.stem() == "FormatStorageBoard" || cti.stem() == "MalformedSequenceBoard"
           || cti.stem() == "MalformedPoolBoard" || cti.stem() == "MalformedFormatBoard"
           || cti.stem() == "CrashPoolBoard";
       if (shared_stem) {
@@ -490,6 +490,10 @@ inline int fakeWorker(const std::filesystem::path& cti)
         }
         if (cti.stem() == "MalformedFormatBoard" && descriptor.sequence == 2)
           descriptor.pixel_format = 0x010800ff;
+        if (cti.stem() == "MalformedSequenceBoard" && descriptor.sequence == 1) {
+          descriptor.sequence = 1000000;
+          descriptor.used_bytes = pool.slot_bytes + 1;
+        }
         if (cti.stem() == "FormatStorageBoard") {
           descriptor.payload_type = 1; // GenTL IMAGE
           descriptor.width = 1000;
