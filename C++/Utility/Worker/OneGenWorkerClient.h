@@ -1,22 +1,56 @@
-﻿#pragma once
+#pragma once
 
 #include "OneGenWorkerProtocol.h"
 #include "OneGenTypes.h"
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace onegen::worker {
 
+struct ReleaseMailbox;
+struct PoolValidity;
+class SharedFrameLease;
+
+/** @brief Validated slot-backed frame; the lease keeps the host mapping and slot alive. */
+struct SharedFrame {
+  FrameDescriptor descriptor;
+  std::shared_ptr<const SharedFrameLease> lease;
+};
+
+/** @brief Releases its exact slot token when the last consumer reference dies. */
+class SharedFrameLease {
+public:
+  ~SharedFrameLease();
+  SharedFrameLease(const SharedFrameLease&) = delete;
+  SharedFrameLease& operator=(const SharedFrameLease&) = delete;
+  [[nodiscard]] const FrameDescriptor& descriptor() const noexcept { return descriptor_; }
+  [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept { return bytes_; }
+
+private:
+  friend class Connection;
+  SharedFrameLease(std::shared_ptr<const void> region, std::span<const std::uint8_t> bytes,
+                   FrameDescriptor descriptor, std::shared_ptr<ReleaseMailbox> mailbox,
+                   std::shared_ptr<PoolValidity> validity);
+  std::shared_ptr<const void> region_;
+  std::span<const std::uint8_t> bytes_;
+  FrameDescriptor descriptor_;
+  std::shared_ptr<ReleaseMailbox> mailbox_;
+  std::shared_ptr<PoolValidity> validity_;
+};
+
 /** @brief Isolates worker failures and reports C++ errors without escaping client IO threads. */
 class Connection {
 public:
   using FrameFn = std::function<void(const Frame&)>;
+  using SharedFrameFn = std::function<void(const SharedFrame&)>;
   using ErrorFn = std::function<void(std::string_view)>;
   using InvalidateFn = std::function<void(int, std::string_view)>;
   using ClaimFn = std::function<std::shared_ptr<void>(const InterfaceInfo& interface)>;
@@ -42,10 +76,17 @@ public:
   void close();
   /** @brief Reports callback exceptions to diagnostics while retaining frame acknowledgement. */
   void set_frame_callback(FrameFn callback, std::uint32_t session = 0);
+  /** @brief Delivers validated shared-slot frames; the lease owns the exact release token. */
+  void setSharedFrameCallback(SharedFrameFn callback, std::uint32_t session = 0);
   /** @brief Registers error delivery; callback exceptions fail the connection and wake requests. */
   void set_error_callback(ErrorFn callback, std::uint32_t session = 0);
   /** @brief Registers invalidation delivery with the same failure boundary as error callbacks. */
   void set_invalidate_callback(InvalidateFn callback, std::uint32_t session = 0);
+  /** @brief Creates the host-owned pool and attaches it to one worker session. */
+  bool createFramePool(std::uint32_t session, std::uint32_t slotCount, std::uint64_t slotBytes,
+                       std::string& error);
+  /** @brief Detaches a pool; retained leases keep the host mapping valid. */
+  void destroyFramePool(std::uint32_t session);
 
 private:
   struct Impl;

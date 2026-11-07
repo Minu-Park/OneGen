@@ -5,6 +5,7 @@
 #include "Internal/Match.h"
 #include "Internal/ConnectTiming.h"
 #include "Internal/NodeMap.h"
+#include "Internal/StageLog.h"
 #include "Internal/OneGenImpl.h"
 #include "Internal/FramePayload.h"
 #include "Internal/CoordinateFormat.h"
@@ -509,6 +510,10 @@ void Camera::open_impl(std::string_view query, std::string_view producer, std::s
   impl_->opened = true;
   og->open_keys.insert(key);
   ++hit->producer->active_devices[hit->if_id];
+  stage_log_debug(
+      "device lifecycle: event=DeviceOpen device=%s interface=%s cti=%s interfaceDevices=%u",
+      hit->info.id.c_str(), hit->if_id.c_str(), hit->info.cti_path.c_str(),
+      hit->producer->active_devices[hit->if_id]);
 }
 
 void Camera::Impl::cmd(const char* name) {
@@ -625,6 +630,9 @@ void Camera::close() {
   for (auto& producer : og->producers) if (producer->path.string() == impl_->info.cti_path) {
     auto& count = producer->active_devices[impl_->info.interface_id];
     if (count) --count;
+    stage_log_debug(
+        "device lifecycle: event=DeviceClose device=%s interface=%s cti=%s interfaceDevices=%u",
+        impl_->info.id.c_str(), impl_->info.interface_id.c_str(), impl_->info.cti_path.c_str(), count);
   }
   impl_->hdev = nullptr;
   impl_->hif = nullptr;

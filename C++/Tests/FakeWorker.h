@@ -1,9 +1,12 @@
-﻿#pragma once
+#pragma once
 #include "OneGenWorkerMessages.h"
 #include "OneGenParameterMessages.h"
+#include "Internal/FrameTrace.h"
+#include "Internal/SharedMemoryRegion.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -48,6 +51,17 @@ inline int fakeWorker(const std::filesystem::path& cti)
   std::map<std::uint32_t, Message> pending_single;
   std::map<std::uint32_t, std::uint32_t> streams;
   std::map<std::uint32_t, std::uint64_t> stream_generations;
+  struct SharedPool {
+    std::shared_ptr<onegen::SharedMemoryRegion> region;
+    std::uint64_t epoch = 0;
+    std::uint64_t token = 0;
+    std::uint32_t slot_count = 0;
+    std::uint64_t slot_bytes = 0;
+    std::vector<std::uint64_t> generations;
+    std::uint64_t next_generation = 1;
+    std::uint64_t sequence = 0;
+  };
+  std::map<std::uint32_t, SharedPool> shared_pools;
   std::map<std::uint32_t, std::map<std::string, onegen::FeatureNode>> parameter_nodes;
   std::map<std::uint32_t, int> parameter_writes;
   std::set<std::pair<std::uint32_t, std::string>> post_write_read_failures;
@@ -111,12 +125,23 @@ inline int fakeWorker(const std::filesystem::path& cti)
     for (auto& [key, selector] : selectors) result.node.selecting_features.push_back(selector);
     return result;
   };
-  const auto transmit = [](Message response) {
+  struct SendTiming {
+    double encode_ms = 0;
+    double write_ms = 0;
+  };
+  const auto transmit = [](Message response, SendTiming* timing = nullptr) {
+    const auto encode_started = std::chrono::steady_clock::now();
     const auto body = encode(std::move(response));
+    const auto encoded = std::chrono::steady_clock::now();
     const auto header = frameSize(static_cast<std::uint32_t>(body.size()));
     std::cout.write(reinterpret_cast<const char*>(header.data()), header.size());
     std::cout.write(reinterpret_cast<const char*>(body.data()), body.size());
     std::cout.flush();
+    if (timing) {
+      const auto written = std::chrono::steady_clock::now();
+      timing->encode_ms = onegen::frame_trace_ms(encode_started, encoded);
+      timing->write_ms = onegen::frame_trace_ms(encoded, written);
+    }
   };
   int probes = 0;
   int interface_closes = 0;
@@ -125,6 +150,17 @@ inline int fakeWorker(const std::filesystem::path& cti)
   std::map<std::uint32_t, unsigned int> frame_counts;
   const auto frame = [&streams, &cti, &frame_counts](std::uint32_t session) {
     onegen::Frame result;
+    if (cti.stem() == "LargeFrameBoard") {
+      const auto count = ++frame_counts[session];
+      result.width = 13376; result.height = 9528; result.stride = 13376;
+      result.pixel_format = 0x01080001; result.payload_type = 0;
+      result.payload.assign(13376U * 9528U, 0x5a);
+      result.buffer_info.image_present = true;
+      result.buffer_info.size_filled = result.payload.size();
+      result.stream_index = streams[session];
+      result.frame_id = count;
+      return result;
+    }
     result.payload = {1}; result.width = 1; result.height = 1;
     result.pixel_format = 0x01080001; result.stride = 1;
     result.buffer_info.image_present = true; result.stream_index = streams[session];
@@ -148,6 +184,52 @@ inline int fakeWorker(const std::filesystem::path& cti)
     if (inactive && request.operation != Operation::Shutdown) {
       transmit({Operation::ProducerInactive, request.id, false,
                 "Producer inactive: GCInitLib failed (-1001)", {}, request.session});
+      continue;
+    }
+    if (request.operation == Operation::FramePoolAttach) {
+      Reader input(request.payload);
+      const auto attach = readFramePoolAttach(input);
+      std::string error;
+      bool valid = !attach.region.empty() && attach.region.size() <= 128
+          && attach.slot_count > 0 && attach.slot_count <= 16 && attach.slot_bytes > 0
+          && attach.epoch && attach.token
+          && attach.slot_bytes <= (std::numeric_limits<std::uint64_t>::max)() / attach.slot_count
+          && attach.region_bytes == attach.slot_count * attach.slot_bytes;
+      if (valid) {
+        auto region = onegen::SharedMemoryRegion::open(attach.region,
+            static_cast<std::size_t>(attach.region_bytes), error);
+        if (!region) valid = false;
+        else {
+          SharedPool pool;
+          pool.region = std::move(region);
+          pool.epoch = attach.epoch;
+          pool.token = attach.token;
+          pool.slot_count = attach.slot_count;
+          pool.slot_bytes = attach.slot_bytes;
+          pool.generations.assign(attach.slot_count, 0);
+          shared_pools[request.session] = std::move(pool);
+        }
+      }
+      transmit({request.operation, request.id, valid,
+                valid ? std::string{} : (error.empty() ? "Invalid frame pool attach." : error),
+                {}, request.session});
+      continue;
+    }
+    if (request.operation == Operation::FramePoolDetach) {
+      shared_pools.erase(request.session);
+      transmit({request.operation, request.id, true, {}, {}, request.session});
+      continue;
+    }
+    if (request.operation == Operation::SlotRelease) {
+      Reader input(request.payload);
+      const auto release = readSlotRelease(input);
+      if (const auto found = shared_pools.find(request.session); found != shared_pools.end()) {
+        auto& pool = found->second;
+        if (release.epoch == pool.epoch && release.token == pool.token
+            && release.slot < pool.slot_count && release.generation
+            && pool.generations[release.slot] == release.generation)
+          pool.generations[release.slot] = 0;
+      }
       continue;
     }
     if (request.operation == Operation::Close && cti.stem() == "ApiCloseFailBoard" && !close_failure_delivered) {
@@ -342,8 +424,87 @@ inline int fakeWorker(const std::filesystem::path& cti)
       }
     }
     if (request.operation == Operation::Trigger && live.count(request.session)) {
-      Writer frame_payload; write(frame_payload, frame(request.session));
-      transmit({Operation::Frame, 0, true, {}, frame_payload.take(), request.session});
+      const bool shared_stem = cti.stem() == "SharedPoolBoard"
+          || cti.stem() == "MalformedPoolBoard" || cti.stem() == "CrashPoolBoard";
+      if (shared_stem) {
+        const auto found = shared_pools.find(request.session);
+        if (found == shared_pools.end()) {
+          transmit({request.operation, request.id, false, "Shared frame pool is not attached.",
+                    {}, request.session});
+          continue;
+        }
+        auto& pool = found->second;
+        if (cti.stem() == "CrashPoolBoard" && pool.sequence >= 1) std::_Exit(71);
+        std::uint32_t slot = pool.slot_count;
+        for (std::uint32_t index = 0; index < pool.slot_count; ++index)
+          if (!pool.generations[index]) { slot = index; break; }
+        if (slot == pool.slot_count) {
+          transmit({request.operation, request.id, false,
+                    "Shared frame pool has no free slot.", {}, request.session});
+          continue;
+        }
+        auto produced = frame(request.session);
+        if (produced.payload.size() > pool.slot_bytes) {
+          transmit({request.operation, request.id, false,
+                    "Frame exceeds the shared slot size.", {}, request.session});
+          continue;
+        }
+        const auto generation = pool.next_generation++;
+        pool.generations[slot] = generation;
+        const auto offset = static_cast<std::size_t>(slot)
+            * static_cast<std::size_t>(pool.slot_bytes);
+        if (!produced.payload.empty())
+          std::memcpy(pool.region->writable() + offset, produced.payload.data(),
+                      produced.payload.size());
+        FrameDescriptor descriptor;
+        descriptor.session = request.session;
+        descriptor.epoch = pool.epoch;
+        descriptor.token = pool.token;
+        descriptor.slot = slot;
+        descriptor.generation = generation;
+        descriptor.frame_id = produced.frame_id;
+        descriptor.sequence = ++pool.sequence;
+        descriptor.used_bytes = produced.payload.size();
+        descriptor.width = produced.width;
+        descriptor.height = produced.height;
+        descriptor.stride = produced.stride;
+        descriptor.pixel_format = produced.pixel_format;
+        descriptor.format_namespace = produced.format_namespace;
+        descriptor.pixel_endianness = produced.pixel_endianness;
+        descriptor.payload_type = produced.payload_type;
+        descriptor.stream_index = produced.stream_index;
+        descriptor.stream_id = produced.stream_id;
+        if (cti.stem() == "MalformedPoolBoard" && descriptor.sequence == 1)
+          descriptor.used_bytes = pool.slot_bytes + 1;
+        Writer descriptor_payload;
+        write(descriptor_payload, descriptor);
+        transmit({Operation::FrameReady, 0, true, {}, descriptor_payload.take(), request.session});
+      } else {
+        const bool trace = cti.stem() == "LargeFrameBoard" && onegen::frame_trace_enabled();
+        const auto started = trace ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
+        auto produced = frame(request.session);
+        const auto produced_at = trace ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
+        const auto frame_id = produced.frame_id;
+        const auto bytes = produced.payload.size();
+        Writer frame_payload; write(frame_payload, produced);
+        const auto serialized = trace ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
+        SendTiming send;
+        transmit({Operation::Frame, 0, true, {}, frame_payload.take(), request.session},
+            trace ? &send : nullptr);
+        if (trace) {
+          const auto written = std::chrono::steady_clock::now();
+          onegen::stage_log_debug(
+              "frame transport: side=fake-worker session=%u frame=%llu bytes=%zu produce_ms=%.3f "
+              "serialize_ms=%.3f encode_ms=%.3f write_ms=%.3f",
+              request.session, static_cast<unsigned long long>(frame_id), bytes,
+              onegen::frame_trace_ms(started, produced_at),
+              onegen::frame_trace_ms(produced_at, serialized), send.encode_ms,
+              onegen::frame_trace_ms(serialized, written));
+        }
+      }
     }
     if (request.operation == Operation::ProbeInterface) {
       const bool empty = cti.stem() == "EmptyBoard";

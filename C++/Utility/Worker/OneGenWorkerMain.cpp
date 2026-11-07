@@ -4,11 +4,13 @@
 
 #include "OneGen.h"
 #include "Internal/ConnectTiming.h"
+#include "Internal/FrameTrace.h"
 #include "Internal/StageLog.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <filesystem>
@@ -59,15 +61,29 @@ bool readMessage(Message& message)
   return true;
 }
 
-void send(Message message)
+struct SendTiming {
+  double encode_ms = 0;
+  double write_ms = 0;
+};
+
+void send(Message message, SendTiming* timing = nullptr)
 {
+  const auto encode_started = timing ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
   const auto body = onegen::worker::encode(std::move(message));
+  const auto encoded = timing ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
   const auto header = onegen::worker::frameSize(static_cast<std::uint32_t>(body.size()));
   std::lock_guard lock(output_mutex);
   if (std::fwrite(header.data(), 1, header.size(), protocol_output) != header.size()
       || std::fwrite(body.data(), 1, body.size(), protocol_output) != body.size()
       || std::fflush(protocol_output) != 0)
     throw std::runtime_error("Could not write OneGen worker response.");
+  if (timing) {
+    const auto written = std::chrono::steady_clock::now();
+    timing->encode_ms = onegen::frame_trace_ms(encode_started, encoded);
+    timing->write_ms = onegen::frame_trace_ms(encoded, written);
+  }
 }
 
 /** Camera acquisition state scoped to a channel in the shared producer worker. */
@@ -92,9 +108,9 @@ struct CameraSession {
   }
 };
 
-void sendFor(std::uint32_t session, Message message) {
+void sendFor(std::uint32_t session, Message message, SendTiming* timing = nullptr) {
   message.session = session;
-  send(std::move(message));
+  send(std::move(message), timing);
 }
 
 int moduleIndex(onegen::Camera::Module module)
@@ -325,15 +341,38 @@ int main(int argc, char** argv)
               sendFor(request.session, {Operation::Error, 0, false, std::string("Feature event setup failed: ") + error.what()});
             }
             opened.set_frame_callback([&channel, session = request.session](const onegen::Frame& frame) {
+              const bool trace = onegen::frame_trace_enabled();
+              const auto started = trace ? std::chrono::steady_clock::now()
+                                         : std::chrono::steady_clock::time_point{};
               Writer out;
               onegen::worker::write(out, frame);
+              const auto serialized = trace ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
               {
                 std::lock_guard lock(channel.ack_mutex);
                 channel.frame_acked = false;
               }
-              sendFor(session, {Operation::Frame, 0, true, {}, out.take()});
+              SendTiming sent;
+              sendFor(session, {Operation::Frame, 0, true, {}, out.take()}, trace ? &sent : nullptr);
+              const auto written = trace ? std::chrono::steady_clock::now()
+                                         : std::chrono::steady_clock::time_point{};
               std::unique_lock lock(channel.ack_mutex);
               channel.ack_ready.wait(lock, [&channel] { return channel.frame_acked || channel.stopping; });
+              if (trace) {
+                const auto acknowledged_at = std::chrono::steady_clock::now();
+                const bool acknowledged = channel.frame_acked;
+                lock.unlock();
+                onegen::WorkerFrameTrace record;
+                record.session = session;
+                record.frame_id = frame.frame_id;
+                record.bytes = frame.payload.size();
+                record.serialize_ms = onegen::frame_trace_ms(started, serialized);
+                record.encode_ms = sent.encode_ms;
+                record.write_ms = sent.write_ms;
+                record.ack_wait_ms = onegen::frame_trace_ms(written, acknowledged_at);
+                record.acknowledged = acknowledged;
+                onegen::trace_worker_frame(record);
+              }
             });
             timing.mark("callbacks-and-event-setup");
             break;

@@ -98,6 +98,19 @@ Producer& producer_for(std::vector<std::unique_ptr<Producer>>& producers, const 
   if (!error) for (auto& producer : producers) if (producer->path == path) return *producer;
   throw Error("Interface producer is unavailable: " + info.cti_path);
 }
+
+/** @brief Records physical Interface ownership transitions with retained claim counts. */
+void log_interface_lifecycle(const Producer& producer, const char* event, const std::string& id) {
+  std::size_t active_devices = 0;
+  for (const auto& [key, count] : producer.active_devices) {
+    (void)key;
+    active_devices += count;
+  }
+  stage_log_debug(
+      "interface lifecycle: event=%s interface=%s cti=%s opened=%zu pinned=%zu activeDevices=%zu",
+      event, id.c_str(), producer.path.string().c_str(), producer.interfaces.size(),
+      producer.pinned.size(), active_devices);
+}
 }
 
 void close_interfaces(Producer& producer) {
@@ -106,6 +119,9 @@ void close_interfaces(Producer& producer) {
     (void)id;
     if (hif) producer.api.IFClose(hif);
   }
+  if (!producer.interfaces.empty())
+    stage_log_debug("interface lifecycle: event=IFCloseAll cti=%s closed=%zu",
+        producer.path.string().c_str(), producer.interfaces.size());
   producer.interfaces.clear();
   producer.claims.clear();
   producer.pinned.clear();
@@ -113,13 +129,16 @@ void close_interfaces(Producer& producer) {
 
 void close_interface(Producer& producer, const std::string& id) {
   if (producer.active_devices[id]) throw Error("Disconnect this interface's cameras before release.");
+  bool closed = false;
   if (const auto found = producer.interfaces.find(id); found != producer.interfaces.end()) {
     producer.interface_maps.erase(id);
     producer.api.check(producer.api.IFClose(found->second), "IFClose");
     producer.interfaces.erase(found);
     producer.claims.erase(id);
+    closed = true;
   }
   producer.pinned.erase(id);
+  if (closed) log_interface_lifecycle(producer, "IFClose", id);
 }
 
 InterfaceInfo interface_info(Producer& producer, const std::string& id) {
@@ -158,6 +177,7 @@ GenTL::IF_HANDLE ensure_interface(Producer& producer, const std::string& id) {
   }
   producer.interfaces.emplace(id, handle);
   producer.claims[id] = std::move(claim);
+  log_interface_lifecycle(producer, "IFOpen", id);
   return handle;
 }
 
@@ -311,6 +331,7 @@ void OneGen::open_interface(std::string_view id) {
   for (auto& producer : impl_->producers) if (producer->path.string() == match->cti_path) {
     ensure_interface(*producer, match->id);
     producer->pinned.insert(match->id);
+    log_interface_lifecycle(*producer, "pin", match->id);
   }
 }
 
@@ -319,6 +340,7 @@ void OneGen::open_interface(const InterfaceInfo& info) {
   auto& producer = producer_for(impl_->producers, info);
   ensure_interface(producer, info.id);
   producer.pinned.insert(info.id);
+  log_interface_lifecycle(producer, "pin", info.id);
 }
 
 void OneGen::release_interface(std::string_view id) {
@@ -341,7 +363,10 @@ void OneGen::release_idle_interfaces() {
     std::vector<std::string> idle;
     for (const auto& [id, handle] : producer->interfaces)
       if (!producer->pinned.count(id) && !producer->active_devices[id]) idle.push_back(id);
-    for (const auto& id : idle) close_interface(*producer, id);
+    for (const auto& id : idle) {
+      log_interface_lifecycle(*producer, "idle-release", id);
+      close_interface(*producer, id);
+    }
   }
 }
 

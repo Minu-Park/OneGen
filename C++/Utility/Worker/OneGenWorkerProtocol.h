@@ -12,7 +12,7 @@
 
 namespace onegen::worker {
 
-inline constexpr std::uint32_t protocol_version = 14;
+inline constexpr std::uint32_t protocol_version = 15;
 inline constexpr std::uint32_t maximum_message_size = 256U * 1024U * 1024U;
 
 enum class Operation : std::uint8_t {
@@ -23,6 +23,46 @@ enum class Operation : std::uint8_t {
   ClaimInterface, ReleaseInterfaceClaim, OpenInterface, ProbeInterface, CloseInterface,
   ObserveNode, WriteNodeChecked,
   ProducerInactive,
+  FramePoolAttach, FramePoolDetach, FrameReady, SlotRelease,
+};
+
+/** @brief Host-created pool handshake; the worker validates bounds before mapping. */
+struct FramePoolAttach {
+  std::string region;
+  std::uint64_t region_bytes = 0;
+  std::uint32_t slot_count = 0;
+  std::uint64_t slot_bytes = 0;
+  std::uint64_t epoch = 0;
+  std::uint64_t token = 0;
+};
+
+/** @brief Small published-frame record; pixel bytes remain in the shared slot. */
+struct FrameDescriptor {
+  std::uint32_t session = 0;
+  std::uint64_t epoch = 0;
+  std::uint64_t token = 0;
+  std::uint32_t slot = 0;
+  std::uint64_t generation = 0;
+  std::uint64_t frame_id = 0;
+  std::uint64_t sequence = 0;
+  std::uint64_t used_bytes = 0;
+  std::uint32_t width = 0;
+  std::uint32_t height = 0;
+  std::uint64_t stride = 0;
+  std::uint64_t pixel_format = 0;
+  std::uint64_t format_namespace = 0;
+  std::uint32_t pixel_endianness = 0;
+  std::uint64_t payload_type = 0;
+  std::uint32_t stream_index = 0;
+  std::string stream_id;
+};
+
+/** @brief Exact slot identity, never a bool-only acknowledgement. */
+struct SlotRelease {
+  std::uint64_t epoch = 0;
+  std::uint64_t token = 0;
+  std::uint32_t slot = 0;
+  std::uint64_t generation = 0;
 };
 
 struct Message {
@@ -98,6 +138,90 @@ private:
   const std::vector<std::byte>& data_;
   std::size_t offset_ = 0;
 };
+
+inline void write(Writer& out, const FramePoolAttach& value)
+{
+  out.string(value.region);
+  out.scalar(value.region_bytes);
+  out.scalar(value.slot_count);
+  out.scalar(value.slot_bytes);
+  out.scalar(value.epoch);
+  out.scalar(value.token);
+}
+
+inline FramePoolAttach readFramePoolAttach(Reader& in)
+{
+  FramePoolAttach value;
+  value.region = in.string();
+  value.region_bytes = in.scalar<std::uint64_t>();
+  value.slot_count = in.scalar<std::uint32_t>();
+  value.slot_bytes = in.scalar<std::uint64_t>();
+  value.epoch = in.scalar<std::uint64_t>();
+  value.token = in.scalar<std::uint64_t>();
+  return value;
+}
+
+inline void write(Writer& out, const FrameDescriptor& value)
+{
+  out.scalar(value.session);
+  out.scalar(value.epoch);
+  out.scalar(value.token);
+  out.scalar(value.slot);
+  out.scalar(value.generation);
+  out.scalar(value.frame_id);
+  out.scalar(value.sequence);
+  out.scalar(value.used_bytes);
+  out.scalar(value.width);
+  out.scalar(value.height);
+  out.scalar(value.stride);
+  out.scalar(value.pixel_format);
+  out.scalar(value.format_namespace);
+  out.scalar(value.pixel_endianness);
+  out.scalar(value.payload_type);
+  out.scalar(value.stream_index);
+  out.string(value.stream_id);
+}
+
+inline FrameDescriptor readFrameDescriptor(Reader& in)
+{
+  FrameDescriptor value;
+  value.session = in.scalar<std::uint32_t>();
+  value.epoch = in.scalar<std::uint64_t>();
+  value.token = in.scalar<std::uint64_t>();
+  value.slot = in.scalar<std::uint32_t>();
+  value.generation = in.scalar<std::uint64_t>();
+  value.frame_id = in.scalar<std::uint64_t>();
+  value.sequence = in.scalar<std::uint64_t>();
+  value.used_bytes = in.scalar<std::uint64_t>();
+  value.width = in.scalar<std::uint32_t>();
+  value.height = in.scalar<std::uint32_t>();
+  value.stride = in.scalar<std::uint64_t>();
+  value.pixel_format = in.scalar<std::uint64_t>();
+  value.format_namespace = in.scalar<std::uint64_t>();
+  value.pixel_endianness = in.scalar<std::uint32_t>();
+  value.payload_type = in.scalar<std::uint64_t>();
+  value.stream_index = in.scalar<std::uint32_t>();
+  value.stream_id = in.string();
+  return value;
+}
+
+inline void write(Writer& out, const SlotRelease& value)
+{
+  out.scalar(value.epoch);
+  out.scalar(value.token);
+  out.scalar(value.slot);
+  out.scalar(value.generation);
+}
+
+inline SlotRelease readSlotRelease(Reader& in)
+{
+  SlotRelease value;
+  value.epoch = in.scalar<std::uint64_t>();
+  value.token = in.scalar<std::uint64_t>();
+  value.slot = in.scalar<std::uint32_t>();
+  value.generation = in.scalar<std::uint64_t>();
+  return value;
+}
 
 inline std::array<std::byte, 4> frameSize(std::uint32_t size)
 {

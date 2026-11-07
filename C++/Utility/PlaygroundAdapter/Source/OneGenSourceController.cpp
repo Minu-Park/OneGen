@@ -4,10 +4,12 @@
 #include "OneGenCoordinator.h"
 #include "OneGenGraphicsFrameAdapter.h"
 #include "SessionFrame.h"
+#include "Internal/FrameTrace.h"
 
 #include <QDebug>
 #include <QString>
 #include <QStringList>
+#include <chrono>
 #include <functional>
 #include <exception>
 #include <QtConcurrent>
@@ -347,8 +349,13 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
           : QString::fromStdString(source.buffer_info.diagnostic);
       qWarning().noquote() << "[GenICam] incomplete frame delivered:" << diagnostic;
     }
+    const bool frameTrace = onegen::frame_trace_enabled();
+    const auto conversionStarted = frameTrace ? std::chrono::steady_clock::now()
+                                              : std::chrono::steady_clock::time_point{};
     std::string rejectionReason;
     auto payload = oneGenGraphicsFrame(source, sequence, &rejectionReason);
+    const auto converted = frameTrace ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
       {
@@ -393,7 +400,21 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     }
     if (firstConverted) qInfo().noquote() << QStringLiteral("[GenICam] first frame converted: images=%1 ranges=%2 pointClouds=%3; forwarding to presentation")
         .arg(frame.payload.images.size()).arg(frame.payload.ranges.size()).arg(frame.payload.pointClouds.size());
+    const auto consumerStarted = frameTrace ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
     consumer(std::move(frame), source.stream_index);
+    if (frameTrace) {
+      const auto consumerFinished = std::chrono::steady_clock::now();
+      qDebug().noquote() << QStringLiteral(
+          "[GenICam] frame transport: side=adapter camera=%1 sequence=%2 frame=%3 bytes=%4 "
+          "conversion_ms=%5 consumer_ms=%6")
+          .arg(QString::fromStdString(sourceName))
+          .arg(static_cast<qulonglong>(sequence))
+          .arg(static_cast<qulonglong>(source.frame_id))
+          .arg(static_cast<qulonglong>(source.payload.size()))
+          .arg(onegen::frame_trace_ms(conversionStarted, converted), 0, 'f', 3)
+          .arg(onegen::frame_trace_ms(consumerStarted, consumerFinished), 0, 'f', 3);
+    }
   } catch (const std::exception& error) {
     qWarning() << "[GenICam] frame delivery failed:" << error.what();
   } catch (...) {

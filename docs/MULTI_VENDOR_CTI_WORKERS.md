@@ -74,7 +74,7 @@ Discovery runs are serialized per coordinator; process isolation does not confer
 exclusive ownership of hardware shared by different producer installations.
 Shutdown suppresses pending GUI updates and joins discovery before teardown.
 
-Probe responses in protocol v14 carry both Devices and producer-scoped Interface
+Probe responses in protocol v15 carry both Devices and producer-scoped Interface
 failure details. An individual Interface failure preserves other Interfaces and
 their Devices, appears in the cumulative result, and is not retried as an empty
 inventory. Successful empty inventories retain the initial-discovery budget.
@@ -147,7 +147,7 @@ for reconnect; shutdown releases them.
 ## Multiple Sessions
 
 The plugin owns one coordinator. An explicitly connected Interface pins one
-producer worker and its Device channels share that worker through protocol v14.
+producer worker and its Device channels share that worker through protocol v15.
 Standalone Device connections retain the existing worker-isolation policy.
 
 - Duplicate local opens of the same complete Device identity are rejected.
@@ -170,6 +170,115 @@ acquisitions. Ten buffers are announced by default, or the producer's
 smaller. A producer may mark a buffer incomplete while still delivering image
 bytes. OneGen keeps that frame and rejects it only when it cannot form an
 image.
+
+## Frame transport diagnostics
+
+Set `ONEGEN_TRACE_FRAMES=1` in the environment before starting Playground and
+enable Debug capture. The worker inherits the variable. Records use the
+producer FrameID as `frame`, so worker, host and adapter stages correlate; a
+producer that reports FrameID 0 remains uncorrelated. The flag is read once per
+process; leave it unset for normal operation. With the variable unset, no
+per-frame record, allocation or counter update is added, and
+delivery/acknowledgement behavior is unchanged. Host and adapter records are
+Debug records and are discarded when Debug capture is off; the worker record is
+controlled by the variable because the worker cannot observe the consumer's
+toggle.
+
+- Worker: `serialize_ms` (Frame copy into the protocol Writer), `encode_ms`
+  (protocol envelope), `write_ms` (stdout write and flush), `ack_wait_ms`
+  (delivery acknowledgement wait).
+- Host: `read_ms` (QProcess read plus `QByteArray` append, attributed to the
+  first Frame parsed from that read), `extract_ms` / `decode_ms`
+  (`takeMessage` body handling and decode), `payload_ms` (`readFrame` payload
+  copy), `queue_ms` (message to delivery thread), `callback_ms` (delivery
+  callback).
+- Adapter: `conversion_ms` (`oneGenGraphicsFrame`), `consumer_ms`
+  (SessionFrame admission).
+
+Owned live-path copies are: GenTL buffer -> `Frame.payload`, `Frame` ->
+protocol Writer, Writer -> encoded message, stdout -> `QByteArray`, message
+decode, `readFrame`, delivery queue handoff, and adapter
+`make_shared<vector>` storage. The intermediate SHM milestone removes the
+stdout, decode and adapter copies; the final milestone retains only the
+GenTL -> SHM copy.
+
+The manual 127 MB synthetic baseline uses the test executable as its own fake
+worker. Run it from the OneGen build directory with three or more frames:
+
+```sh
+ONEGEN_TRACE_FRAMES=1 test_worker --profile-large-frames 3
+```
+
+The fake peer emits 13376x9528 Mono8 frames (127,446,528 bytes each) with
+sequential FrameIDs. This mode is not part of the default CTest suite and does
+not replace physical camera acceptance.
+
+The physical live profile uses the real worker and an explicitly selected
+producer directory and device:
+
+```sh
+ONEGEN_TRACE_FRAMES=1 test_worker --profile-live <OneGenWorker> <cti-directory> <device-id> 20
+```
+
+`--profile-discovery <OneGenWorker> <cti-directory>` prints the producer-scoped
+device IDs. The live profile records worker and host stages; presentation and
+script stages remain Playground-owned measurements.
+
+Interface and device lifecycle detail records are Debug records. `IFOpen`,
+`IFClose`, `IFCloseAll`, `pin`, `idle-release`, `DeviceOpen` and `DeviceClose`
+include retained `opened`, `pinned` and `activeDevices` counts with the CTI
+path.
+
+## Bounded frame transport contract (approved)
+
+This contract was approved on 2026-11-07 for the R1/R3 implementation and
+remains experimental until the physical acceptance gate in #348 passes.
+
+- **Pool ownership:** the host creates the OS-backed region and maps it
+  read-only; the worker opens the unguessable region name and maps it
+  read/write. A worker crash cannot unmap bytes that consumer leases still
+  reference. The host releases the old mapping only after the last lease dies.
+- **Budget:** three slots of the selected payload size per session. For
+  `13376x9528` BayerRG8 this is `3 * 127,446,528 = 382,339,584` bytes. Retired
+  but referenced pools remain in the accounting; allocation fails explicitly
+  instead of growing without bound.
+- **Slot states:** `free -> reserved -> filling -> ready -> released` with an
+  exact `(poolEpoch, session, slot, slotGeneration)` identity. A slot is
+  reusable only after a matching release. Duplicate, stale and unknown
+  releases are ignored and diagnosable in Debug.
+- **Publication:** the worker copies the GenTL image into the reserved slot
+  while the borrowed buffer is pinned, then publishes only a small
+  `FrameReady` descriptor. No GenTL pointer, writable mapping or 127 MB body
+  crosses the stdout protocol on the optimized path.
+- **Backpressure:** frame and byte credits are bounded per session. When no
+  slot is free, acquisition paces at the single documented source admission
+  boundary. Ordered and Strict policy remain unchanged; LatestOnly stays
+  opt-in with explicit loss accounting. No new wait is stacked on the existing
+  acknowledgement, Framegrabber permit or SessionFrame admission.
+- **Copy target:** direct GenTL -> SHM for eligible single-image payloads; one
+  intentional image copy. Unsupported layouts use the existing owned payload
+  path explicitly and are counted; the intermediate `Frame.payload -> SHM`
+  milestone is not a permanent product path.
+- **Lifetime:** callback completion is not proof that the last consumer
+  released the frame. The host storage owner enqueues `SlotRelease` from its
+  destructor without touching a QProcess or an application mutex in an
+  arbitrary thread.
+- **Failure policy:** descriptors and releases are validated before use
+  (bounds, stride, layout, epoch, generation, duplicate slot). Malformed input
+  fails closed for that frame; worker/session epochs are invalidated before
+  stale work can be delivered; all waits wake on stop, close, exit and
+  reconnect. No silent loss: source, admitted, delivered, rejected and
+  policy-dropped counts stay separate.
+- **Protocol:** worker protocol v15 carries the pool attach/detach,
+  `FrameReady` and `SlotRelease` messages. Mismatched peers are rejected; no
+  compatibility shim is added before v1.0.0.
+
+R1 currently implements the host client and the fake test peer: pool
+attach/detach, descriptor validation, bounded slot accounting, exact releases,
+malformed-frame rejection and retained-mapping safety are covered by
+`test_worker`. The production worker rejects pool attach until the direct
+GenTL-to-SHM acquisition path lands, so the optimized transport is not enabled
+and the existing owned-payload path remains the live default.
 
 ## Non-Goals
 

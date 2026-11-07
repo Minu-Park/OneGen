@@ -6,13 +6,16 @@
 
 #include <QCoreApplication>
 #include <QDebug>
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <future>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <thread>
 #include <set>
 #include <map>
@@ -67,6 +70,10 @@ int runTests(int argc, char** argv)
       std::cout << "Discovery: producers=" << result.finished_producers << '/' << result.total_producers
                 << " interfaces=" << result.interfaces.size() << " devices=" << result.devices.size()
                 << " failed-producers=" << result.failures.size() << '\n';
+      for (const auto& device : result.devices)
+        std::cout << "Device: id=" << device.id << " interface=" << device.interface_id
+                  << " model=" << device.model << " serial=" << device.serial
+                  << " cti=" << device.cti_path << '\n';
       for (const auto& failure : result.failures) std::cout << "Failure: " << failure << '\n';
       coordinator.shutdown();
       return result.completed ? 0 : 1;
@@ -146,6 +153,106 @@ int runTests(int argc, char** argv)
       std::cerr << error.what() << '\n';
       return 1;
     }
+  }
+  if ((argc == 6 || argc == 7) && std::string_view(argv[1]) == "--profile-live") {
+    try {
+      using namespace std::chrono_literals;
+      const auto expected = std::clamp(std::stoi(argv[5]), 1, 600);
+      const auto discovery_timeout = argc == 7 ? std::chrono::milliseconds{std::stoll(argv[6])}
+                                               : std::chrono::seconds{2};
+      onegen::worker::Coordinator coordinator(argv[2], argv[3], discovery_timeout);
+      const auto discovery = coordinator.discover();
+      const auto selected = std::find_if(discovery.devices.begin(), discovery.devices.end(),
+          [&](const auto& device) { return device.id == argv[4]; });
+      if (selected == discovery.devices.end()) throw std::runtime_error("Live profile camera not found");
+      auto lease = coordinator.open(*selected);
+      std::mutex mutex;
+      std::condition_variable ready;
+      int frames = 0;
+      std::size_t bytes = 0;
+      std::uint64_t last_frame = 0;
+      lease->set_frame_callback([&](const auto& frame) {
+        {
+          std::lock_guard lock(mutex);
+          ++frames;
+          bytes = frame.payload.size();
+          last_frame = frame.frame_id;
+        }
+        ready.notify_all();
+      });
+      const auto started = std::chrono::steady_clock::now();
+      lease->live();
+      std::unique_lock lock(mutex);
+      if (!ready.wait_for(lock, 120s, [&] { return frames >= expected; }))
+        throw std::runtime_error("Live profile timed out: frames=" + std::to_string(frames));
+      lock.unlock();
+      const auto elapsed = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      lease->stop();
+      lease.reset();
+      coordinator.shutdown();
+      std::cout << "Live profile: frames=" << frames << " bytes=" << bytes
+                << " last_frame=" << last_frame << " elapsed_ms=" << elapsed
+                << " fps=" << (frames * 1000.0 / elapsed) << '\n';
+      return 0;
+    } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+  }
+  if (argc == 3 && std::string_view(argv[1]) == "--profile-large-frames") {
+    try {
+      using namespace std::chrono_literals;
+      const auto count = std::clamp(std::stoi(argv[2]), 1, 60);
+      const auto root = std::filesystem::temp_directory_path() / "onegen-large-frame-profile";
+      std::filesystem::create_directories(root);
+      const auto cti = root / "LargeFrameBoard.cti";
+      std::ofstream(cti).put('\0');
+      onegen::worker::Connection connection(argv[0], cti);
+      std::mutex mutex;
+      std::condition_variable ready;
+      int delivered = 0;
+      std::uint64_t last_frame = 0;
+      std::size_t last_bytes = 0;
+      connection.set_frame_callback([&](const auto& frame) {
+        {
+          std::lock_guard lock(mutex);
+          ++delivered;
+          last_frame = frame.frame_id;
+          last_bytes = frame.payload.size();
+        }
+        ready.notify_all();
+      }, 1);
+      onegen::worker::Writer open;
+      open.string("fast");
+      open.string("board");
+      connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+      connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+      const auto started = std::chrono::steady_clock::now();
+      double minimum = 0, maximum = 0, total = 0;
+      for (int index = 0; index < count; ++index) {
+        const auto trigger_started = std::chrono::steady_clock::now();
+        connection.request(onegen::worker::Operation::Trigger, {}, 60s, 1);
+        std::unique_lock lock(mutex);
+        if (!ready.wait_for(lock, 120s, [&] { return delivered > index; }))
+          throw std::runtime_error("Large-frame profile timed out.");
+        const auto elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - trigger_started).count();
+        minimum = index ? std::min(minimum, elapsed) : elapsed;
+        maximum = std::max(maximum, elapsed);
+        total += elapsed;
+        std::cout << "Large frame=" << last_frame << " bytes=" << last_bytes
+                  << " round_trip_ms=" << elapsed << '\n';
+      }
+      const auto elapsed_total = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+      connection.close();
+      std::cout << "Large-frame profile: frames=" << count
+                << " bytes_per_frame=" << last_bytes
+                << " mean_ms=" << (total / count)
+                << " min_ms=" << minimum << " max_ms=" << maximum
+                << " elapsed_ms=" << elapsed_total
+                << " fps=" << (count * 1000.0 / elapsed_total) << '\n';
+      return 0;
+    } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
   }
   assert(argc == 2);
 
@@ -922,6 +1029,178 @@ int runTests(int argc, char** argv)
     assert(line_count(added.string() + ".starts") == 1);
     assert(coordinator.reset_idle_search());
     coordinator.shutdown();
+  }
+  // Host-owned shared slots: bounded reuse, exact release tokens and retained mapping safety.
+  {
+    const auto boards = root / "shared-pool-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SharedPoolBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<onegen::worker::SharedFrame> frames;
+    connection.setSharedFrameCallback([&](const auto& frame) {
+      {
+        std::lock_guard lock(mutex);
+        frames.push_back(frame);
+      }
+      ready.notify_all();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 3, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    for (int index = 0; index < 3; ++index) {
+      connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+      std::unique_lock lock(mutex);
+      assert(ready.wait_for(lock, 30s, [&] { return frames.size() > index; }));
+      assert(frames[index].descriptor.used_bytes == 1);
+      assert(frames[index].lease && frames[index].lease->bytes().size() == 1);
+      assert(frames[index].lease->bytes()[0] == 1);
+    }
+    bool busy = false;
+    try { connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1); }
+    catch (const std::exception& failure) {
+      busy = std::string(failure.what()).find("no free slot") != std::string::npos;
+    }
+    assert(busy);
+    {
+      std::lock_guard lock(mutex);
+      frames.resize(1);
+    }
+    bool delivered = false;
+    for (int attempt = 0; attempt < 100 && !delivered; ++attempt) {
+      try { connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1); }
+      catch (...) { std::this_thread::sleep_for(10ms); continue; }
+      std::unique_lock lock(mutex);
+      delivered = ready.wait_for(lock, 5s, [&] { return frames.size() > 1; });
+    }
+    assert(delivered);
+    {
+      std::lock_guard lock(mutex);
+      frames.clear();
+    }
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.destroyFramePool(1);
+    connection.close();
+  }
+  // A retained lease keeps its host mapping after detach and worker shutdown.
+  {
+    const auto boards = root / "shared-detach-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SharedPoolBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<onegen::worker::SharedFrame> frames;
+    connection.setSharedFrameCallback([&](const auto& frame) {
+      {
+        std::lock_guard lock(mutex);
+        frames.push_back(frame);
+      }
+      ready.notify_all();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 3, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    std::unique_lock lock(mutex);
+    assert(ready.wait_for(lock, 30s, [&] { return !frames.empty(); }));
+    auto retained = frames.front();
+    frames.clear();
+    lock.unlock();
+    connection.destroyFramePool(1);
+    connection.close();
+    assert(retained.lease && retained.lease->bytes().size() == 1);
+    assert(retained.lease->bytes()[0] == 1);
+  }
+  // Invalid metadata releases the slot without delivering or failing the connection.
+  {
+    const auto boards = root / "shared-malformed-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "MalformedPoolBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<onegen::worker::SharedFrame> frames;
+    connection.setSharedFrameCallback([&](const auto& frame) {
+      {
+        std::lock_guard lock(mutex);
+        frames.push_back(frame);
+      }
+      ready.notify_all();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 3, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    std::this_thread::sleep_for(200ms);
+    {
+      std::lock_guard lock(mutex);
+      assert(frames.empty());
+    }
+    bool delivered = false;
+    for (int attempt = 0; attempt < 100 && !delivered; ++attempt) {
+      try { connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1); }
+      catch (...) { std::this_thread::sleep_for(10ms); continue; }
+      std::unique_lock lock(mutex);
+      delivered = ready.wait_for(lock, 5s, [&] { return !frames.empty(); });
+    }
+    assert(delivered && connection.alive());
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.destroyFramePool(1);
+    connection.close();
+  }
+  // A worker exit with a retained lease leaves the host mapping readable.
+  {
+    const auto boards = root / "shared-crash-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "CrashPoolBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<onegen::worker::SharedFrame> frames;
+    connection.setSharedFrameCallback([&](const auto& frame) {
+      {
+        std::lock_guard lock(mutex);
+        frames.push_back(frame);
+      }
+      ready.notify_all();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 3, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    std::unique_lock lock(mutex);
+    assert(ready.wait_for(lock, 30s, [&] { return !frames.empty(); }));
+    auto retained = frames.front();
+    lock.unlock();
+    try { connection.request(onegen::worker::Operation::Trigger, {}, 5s, 1); } catch (...) {}
+    for (int attempt = 0; attempt < 200 && connection.alive(); ++attempt)
+      std::this_thread::sleep_for(10ms);
+    assert(!connection.alive());
+    assert(retained.lease && retained.lease->bytes().size() == 1);
+    assert(retained.lease->bytes()[0] == 1);
+    connection.close();
   }
   std::filesystem::remove_all(root);
   std::cout << "test_worker ok\n";

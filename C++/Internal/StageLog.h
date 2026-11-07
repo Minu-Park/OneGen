@@ -17,12 +17,16 @@ inline void stage_log_v(const char* level, const char* fmt, va_list args)
   const int length = std::vsnprintf(nullptr, 0, fmt, copy);
   va_end(copy);
   if (length < 0) return;
-  std::vector<char> buffer(static_cast<std::size_t>(length) + 1);
-  std::vsnprintf(buffer.data(), buffer.size(), fmt, args);
-  const std::string line = std::string("[GenICam] [") + level + "] " + buffer.data() + '\n';
-  static std::recursive_mutex mutex;
-  std::lock_guard lock(mutex);
-  std::clog << line << std::flush;
+  try {
+    std::vector<char> buffer(static_cast<std::size_t>(length) + 1);
+    std::vsnprintf(buffer.data(), buffer.size(), fmt, args);
+    const std::string line = std::string("[GenICam] [") + level + "] " + buffer.data() + '\n';
+    static std::recursive_mutex mutex;
+    std::lock_guard lock(mutex);
+    std::clog << line << std::flush;
+  } catch (...) {
+    // Diagnostics never fail acquisition or lifecycle transitions.
+  }
 }
 
 /** @brief Writes one flushed informational stage record without changing the worker protocol. */
@@ -31,6 +35,15 @@ inline void stage_log(const char* fmt, ...)
   va_list args;
   va_start(args, fmt);
   stage_log_v("INFO", fmt, args);
+  va_end(args);
+}
+
+/** @brief Writes an opt-in debug record that the consumer drops while Debug capture is off. */
+inline void stage_log_debug(const char* fmt, ...)
+{
+  va_list args;
+  va_start(args, fmt);
+  stage_log_v("DEBUG", fmt, args);
   va_end(args);
 }
 
