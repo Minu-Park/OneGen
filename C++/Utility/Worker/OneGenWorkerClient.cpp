@@ -10,6 +10,7 @@
 #include <QDebug>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <atomic>
@@ -128,6 +129,13 @@ struct PoolValidity {
     if (delivery_thread == std::this_thread::get_id()) return;
     cv.wait(lock, [&] { return active_callbacks == 0; });
   }
+
+  /** @brief True when no callback is using this detached epoch. */
+  bool idle() noexcept
+  {
+    std::lock_guard lock(mutex);
+    return active_callbacks == 0;
+  }
 };
 
 /** @brief Per-session accounting for active and retired lease-backed pool mappings. */
@@ -185,7 +193,7 @@ void releaseSharedSlot(const std::shared_ptr<FramePoolState>& pool, const FrameD
   }
 }
 
-/** @brief Returns the packed bits per pixel for PFNC formats the shared image path supports. */
+/** @brief Returns the PFNC storage bits per pixel for formats the shared image path supports. */
 bool sharedImageBitsPerPixel(const std::uint64_t format, std::uint32_t& bits, bool& ycbcr) noexcept
 {
   ycbcr = format == 0x0210001f || format == 0x02100032;
@@ -195,10 +203,6 @@ bool sharedImageBitsPerPixel(const std::uint64_t format, std::uint32_t& bits, bo
     case 0x01080009:
     case 0x0108000a:
     case 0x0108000b:
-    case 0x021000a5:
-    case 0x021000a6:
-      bits = 8;
-      return true;
     case 0x01100003:
     case 0x01100005:
     case 0x01100007:
@@ -221,53 +225,38 @@ bool sharedImageBitsPerPixel(const std::uint64_t format, std::uint32_t& bits, bo
     case 0x01100031:
     case 0x0210001f:
     case 0x02100032:
-      bits = 16;
-      return true;
     case 0x010a0046:
-      bits = 10;
-      return true;
     case 0x010c0047:
-      bits = 12;
-      return true;
     case 0x010a0052:
     case 0x010a0054:
     case 0x010a0056:
     case 0x010a0058:
-    case 0x021400a8:
-    case 0x021400aa:
-    case 0x022000a7:
-    case 0x022000a9:
-      bits = 10;
-      return true;
     case 0x010c0053:
     case 0x010c0055:
     case 0x010c0057:
     case 0x010c0059:
+    case 0x021000a5:
+    case 0x021000a6:
+    case 0x021400a8:
+    case 0x021400aa:
+    case 0x022000a7:
+    case 0x022000a9:
     case 0x021800ac:
     case 0x021800ae:
     case 0x022000ab:
     case 0x022000ad:
-      bits = 12;
-      return true;
     case 0x02180014:
     case 0x02180015:
-      bits = 24;
-      return true;
     case 0x02200016:
     case 0x02200017:
-      bits = 32;
-      return true;
     case 0x02300018:
     case 0x02300019:
-      bits = 30;
-      return true;
     case 0x0230001a:
     case 0x0230001b:
-      bits = 36;
-      return true;
     case 0x02300033:
-      bits = 48;
-      return true;
+      // PFNC bits 16-23 carry the stored size per pixel, including component packing.
+      bits = static_cast<std::uint32_t>((format >> 16U) & 0xffU);
+      return bits != 0;
     default:
       return false;
   }
@@ -364,6 +353,8 @@ struct Connection::Impl {
   std::queue<SharedFrame> shared_frames;
   std::map<std::uint32_t, Message> replies;
   std::map<std::uint32_t, std::shared_ptr<FramePoolState>> pools;
+  /** Detached epochs whose callbacks may still be active; guarded by mutex. */
+  std::map<std::uint32_t, std::vector<std::shared_ptr<PoolValidity>>> retiring_pools;
   std::shared_ptr<FramePoolBudget> frame_pool_budget = std::make_shared<FramePoolBudget>();
   std::map<std::uint32_t, std::shared_ptr<std::mutex>> pool_lifecycles;
   std::shared_ptr<ReleaseMailbox> release_mailbox = std::make_shared<ReleaseMailbox>();
@@ -400,6 +391,17 @@ struct Connection::Impl {
     auto& lifecycle = pool_lifecycles[session];
     if (!lifecycle) lifecycle = std::make_shared<std::mutex>();
     return lifecycle;
+  }
+  /** @brief Drops drained detach fences so repeated cycles stay bounded; caller holds mutex. */
+  void pruneRetiringPools(const std::uint32_t session)
+  {
+    const auto found = retiring_pools.find(session);
+    if (found == retiring_pools.end()) return;
+    auto& pools = found->second;
+    pools.erase(std::remove_if(pools.begin(), pools.end(), [](const auto& validity) {
+      return !validity || validity->idle();
+    }), pools.end());
+    if (pools.empty()) retiring_pools.erase(found);
   }
   bool beginRetirement(const std::chrono::milliseconds timeout)
   {
@@ -854,6 +856,10 @@ void Connection::close()
   }
   if (impl_->io.joinable()) impl_->io.join();
   if (impl_->delivery.joinable()) impl_->delivery.join();
+  {
+    std::lock_guard lock(impl_->mutex);
+    impl_->retiring_pools.clear();
+  }
 }
 
 std::vector<std::byte> Connection::request(Operation operation, std::vector<std::byte> payload,
@@ -950,6 +956,7 @@ bool Connection::createFramePool(std::uint32_t session, std::uint32_t slotCount,
       error = "frame pool is already attached";
       return false;
     }
+    impl_->pruneRetiringPools(session);
   }
   auto reservation = reservePoolBytes(impl_->frame_pool_budget, session, bytes,
                                       budget_bytes, error);
@@ -994,20 +1001,41 @@ bool Connection::createFramePool(std::uint32_t session, std::uint32_t slotCount,
 void Connection::destroyFramePool(std::uint32_t session)
 {
   const auto lifecycle = impl_->poolLifecycle(session);
-  std::shared_ptr<FramePoolState> pool;
+  std::vector<std::shared_ptr<PoolValidity>> draining;
   {
     std::lock_guard lifecycle_lock(*lifecycle);
+    std::shared_ptr<FramePoolState> pool;
     {
       std::lock_guard lock(impl_->mutex);
       const auto found = impl_->pools.find(session);
-      if (found == impl_->pools.end()) return;
-      pool = found->second;
-      impl_->pools.erase(found);
+      if (found != impl_->pools.end()) {
+        pool = found->second;
+        impl_->pools.erase(found);
+      }
     }
-    if (pool->validity) pool->validity->invalidate();
-    try { request(Operation::FramePoolDetach, {}, std::chrono::seconds{2}, session); } catch (...) {}
+    if (pool && pool->validity) {
+      pool->validity->invalidate();
+      std::lock_guard lock(impl_->mutex);
+      impl_->retiring_pools[session].push_back(pool->validity);
+    }
+    if (pool) {
+      try { request(Operation::FramePoolDetach, {}, std::chrono::seconds{2}, session); } catch (...) {}
+    }
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (const auto found = impl_->retiring_pools.find(session);
+          found != impl_->retiring_pools.end())
+        draining = found->second;
+    }
   }
-  if (pool->validity) pool->validity->waitForCallbacks();
+  for (const auto& validity : draining) {
+    if (validity) validity->waitForCallbacks();
+  }
+  {
+    std::lock_guard lifecycle_lock(*lifecycle);
+    std::lock_guard lock(impl_->mutex);
+    impl_->pruneRetiringPools(session);
+  }
 }
 
 } // namespace onegen::worker

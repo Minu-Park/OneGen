@@ -428,6 +428,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
     if (request.operation == Operation::Trigger && live.count(request.session)) {
       const bool shared_stem = cti.stem() == "SharedPoolBoard"
           || cti.stem() == "SharedPoolBudgetBoard" || cti.stem() == "SharedFenceBoard"
+          || cti.stem() == "FormatStorageBoard"
           || cti.stem() == "MalformedPoolBoard" || cti.stem() == "MalformedFormatBoard"
           || cti.stem() == "CrashPoolBoard";
       if (shared_stem) {
@@ -489,6 +490,57 @@ inline int fakeWorker(const std::filesystem::path& cti)
         }
         if (cti.stem() == "MalformedFormatBoard" && descriptor.sequence == 2)
           descriptor.pixel_format = 0x010800ff;
+        if (cti.stem() == "FormatStorageBoard") {
+          descriptor.payload_type = 1; // GenTL IMAGE
+          descriptor.width = 1000;
+          descriptor.height = 2;
+          switch (descriptor.sequence) {
+            case 1: // BiColorRGBG8 (16-bit storage), full rows.
+              descriptor.pixel_format = 0x021000a5;
+              descriptor.stride = 2000;
+              descriptor.used_bytes = 4000;
+              break;
+            case 2: // BiColorRGBG8 short row.
+              descriptor.pixel_format = 0x021000a5;
+              descriptor.stride = 1000;
+              descriptor.used_bytes = 2000;
+              break;
+            case 3: // RGB10 unpacked (48-bit storage), full rows.
+              descriptor.pixel_format = 0x02300018;
+              descriptor.stride = 6000;
+              descriptor.used_bytes = 12000;
+              break;
+            case 4: // RGB10 unpacked short row.
+              descriptor.pixel_format = 0x02300018;
+              descriptor.stride = 4000;
+              descriptor.used_bytes = 8000;
+              break;
+            case 5: // BiColorRGBG10p (20-bit storage), full rows.
+              descriptor.pixel_format = 0x021400a8;
+              descriptor.stride = 2500;
+              descriptor.used_bytes = 5000;
+              break;
+            case 6: // BiColorRGBG10p short row.
+              descriptor.pixel_format = 0x021400a8;
+              descriptor.stride = 1500;
+              descriptor.used_bytes = 3000;
+              break;
+            case 7: // BiColorRGBG8 short payload (one row missing).
+              descriptor.pixel_format = 0x021000a5;
+              descriptor.stride = 2000;
+              descriptor.used_bytes = 2000;
+              break;
+            case 8: // Marker frame after all format cases.
+              descriptor.pixel_format = 0x01080001;
+              descriptor.width = 1;
+              descriptor.height = 1;
+              descriptor.stride = 1;
+              descriptor.used_bytes = 1;
+              break;
+            default:
+              break;
+          }
+        }
         Writer descriptor_payload;
         write(descriptor_payload, descriptor);
         transmit({Operation::FrameReady, 0, true, {}, descriptor_payload.take(), request.session});

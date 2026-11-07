@@ -275,10 +275,10 @@ remains experimental until the physical acceptance gate in #348 passes.
 
 R1 currently implements the host client and the fake test peer: ordered pool
 attach/detach transitions, a per-session three-slot byte budget that keeps
-retired lease-backed mappings charged, PFNC row/stride validation, exact
-releases, detach callback fencing (an active callback drains before detach
-returns, queued frames are rejected, and a callback may detach its own pool),
-malformed-frame rejection and retained-mapping safety are covered by
+retired lease-backed mappings charged, PFNC storage-size row/stride validation,
+exact releases, detach callback fencing (every external detach drains the
+retiring epoch, queued frames are rejected, and a callback may detach its own
+pool), malformed-frame rejection and retained-mapping safety are covered by
 `test_worker`. The production worker
 rejects pool attach until the direct GenTL-to-SHM acquisition path lands, so
 the optimized transport is not enabled and the existing owned-payload path

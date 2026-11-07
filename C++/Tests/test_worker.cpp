@@ -1347,20 +1347,23 @@ int runTests(int argc, char** argv)
     connection.destroyFramePool(1);
     connection.close();
   }
-  // A callback may detach its own pool without waiting on itself.
+  // Duplicate external detach must wait for the same in-flight callback.
   {
-    const auto boards = root / "shared-reentrant-board";
+    const auto boards = root / "shared-duplicate-detach-board";
     std::filesystem::create_directories(boards);
-    const auto cti = boards / "SharedPoolBoard.cti";
+    const auto cti = boards / "SharedFenceBoard.cti";
     std::ofstream(cti).put('\0');
     onegen::worker::Connection connection(argv[0], cti);
-    std::atomic<bool> detached{false};
-    std::promise<void> callback_done;
-    auto done = callback_done.get_future();
+    std::atomic<int> started{0};
+    std::promise<void> entered;
+    auto entered_signal = entered.get_future();
+    std::promise<void> release_callback;
+    auto release = release_callback.get_future();
     connection.setSharedFrameCallback([&](const auto&) {
-      connection.destroyFramePool(1);
-      detached.store(true);
-      callback_done.set_value();
+      if (++started == 1) {
+        entered.set_value();
+        release.wait();
+      }
     }, 1);
     std::string error;
     assert(connection.createFramePool(1, 1, 4096, error));
@@ -1370,9 +1373,121 @@ int runTests(int argc, char** argv)
     connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
     connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
     connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
-    assert(done.wait_for(30s) == std::future_status::ready);
-    assert(detached.load());
+    assert(entered_signal.wait_for(30s) == std::future_status::ready);
+    std::promise<void> first_done;
+    std::promise<void> second_done;
+    auto first = first_done.get_future();
+    auto second = second_done.get_future();
+    std::thread first_detacher([&] {
+      connection.destroyFramePool(1);
+      first_done.set_value();
+    });
+    bool detach_requested = false;
+    for (int attempt = 0; attempt < 300 && !detach_requested; ++attempt) {
+      detach_requested = std::filesystem::exists(cti.string() + ".detached");
+      if (!detach_requested) std::this_thread::sleep_for(10ms);
+    }
+    assert(detach_requested);
+    std::thread second_detacher([&] {
+      connection.destroyFramePool(1);
+      second_done.set_value();
+    });
+    assert(first.wait_for(200ms) == std::future_status::timeout);
+    assert(second.wait_for(200ms) == std::future_status::timeout);
+    release_callback.set_value();
+    assert(first.wait_for(30s) == std::future_status::ready);
+    assert(second.wait_for(30s) == std::future_status::ready);
+    first_detacher.join();
+    second_detacher.join();
+    assert(started.load() == 1);
     connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.close();
+  }
+  // A callback may detach its own pool and an external detach still waits for it.
+  {
+    const auto boards = root / "shared-reentrant-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "SharedPoolBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::promise<void> internal_detached;
+    auto internal_signal = internal_detached.get_future();
+    std::promise<void> release_callback;
+    auto release = release_callback.get_future();
+    connection.setSharedFrameCallback([&](const auto&) {
+      connection.destroyFramePool(1);
+      internal_detached.set_value();
+      release.wait();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 1, 4096, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    assert(internal_signal.wait_for(30s) == std::future_status::ready);
+    std::promise<void> external_done;
+    auto external = external_done.get_future();
+    std::thread external_detacher([&] {
+      connection.destroyFramePool(1);
+      external_done.set_value();
+    });
+    assert(external.wait_for(200ms) == std::future_status::timeout);
+    release_callback.set_value();
+    assert(external.wait_for(30s) == std::future_status::ready);
+    external_detacher.join();
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.close();
+  }
+  // PFNC storage-size validation accepts full rows and rejects short ones.
+  {
+    const auto boards = root / "shared-format-storage-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "FormatStorageBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::mutex mutex;
+    std::vector<std::uint64_t> formats;
+    std::promise<void> marker;
+    auto marker_signal = marker.get_future();
+    connection.setSharedFrameCallback([&](const onegen::worker::SharedFrame& frame) {
+      {
+        std::lock_guard lock(mutex);
+        formats.push_back(frame.descriptor.pixel_format);
+      }
+      if (frame.descriptor.pixel_format == 0x01080001) marker.set_value();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 3, 16384, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    const auto trigger = [&] {
+      for (int attempt = 0; attempt < 100; ++attempt) {
+        try {
+          connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+          return;
+        } catch (const std::exception& failure) {
+          if (std::string(failure.what()).find("no free slot") == std::string::npos) throw;
+          std::this_thread::sleep_for(10ms);
+        }
+      }
+      assert(false);
+    };
+    for (int index = 0; index < 8; ++index) trigger();
+    assert(marker_signal.wait_for(30s) == std::future_status::ready);
+    {
+      std::lock_guard lock(mutex);
+      const std::vector<std::uint64_t> expected{
+          0x021000a5, 0x02300018, 0x021400a8, 0x01080001};
+      assert(formats == expected);
+    }
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.destroyFramePool(1);
     connection.close();
   }
   // Same-session attach/detach transitions stay ordered under concurrent reconnect.
