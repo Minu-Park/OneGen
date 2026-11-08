@@ -12,8 +12,12 @@
 
 namespace onegen::worker {
 
-inline constexpr std::uint32_t protocol_version = 15;
+inline constexpr std::uint32_t protocol_version = 16;
 inline constexpr std::uint32_t maximum_message_size = 256U * 1024U * 1024U;
+inline constexpr std::uint32_t maximum_frame_ready_size = 64U * 1024U;
+inline constexpr std::uint32_t maximum_metadata_components = 1024;
+inline constexpr std::uint32_t maximum_metadata_string_bytes = 4096;
+inline constexpr std::uint32_t maximum_metadata_diagnostic_bytes = 16384;
 
 enum class Operation : std::uint8_t {
   Probe, Open, Close, ListStreams, SelectStream, DescribeFeatures, NodeRead, NodeWrite,
@@ -36,7 +40,18 @@ struct FramePoolAttach {
   std::uint64_t token = 0;
 };
 
-/** @brief Small published-frame record; pixel bytes remain in the shared slot. */
+/** @brief Exact slot identity carried by a published direct frame. */
+struct SlotIdentity {
+  std::uint32_t session = 0;
+  std::uint64_t epoch = 0;
+  std::uint64_t token = 0;
+  std::uint32_t slot = 0;
+  std::uint64_t generation = 0;
+  std::uint64_t sequence = 0;
+  std::uint64_t used_bytes = 0;
+};
+
+/** @brief Derived host view; this struct is never encoded on the v16 wire. */
 struct FrameDescriptor {
   std::uint32_t session = 0;
   std::uint64_t epoch = 0;
@@ -116,6 +131,23 @@ public:
     offset_ += size;
     return value;
   }
+  /** @brief Reads a string only after its declared length passes the metadata bound. */
+  [[nodiscard]] std::string string(std::uint32_t maximum)
+  {
+    const auto size = scalar<std::uint32_t>();
+    if (size > maximum) throw std::runtime_error("OneGen worker string exceeds its limit.");
+    require(size);
+    std::string value(reinterpret_cast<const char*>(data_.data() + offset_), size);
+    offset_ += size;
+    return value;
+  }
+  /** @brief Reads a strict wire bool and rejects every value except zero or one. */
+  [[nodiscard]] bool boolean()
+  {
+    const auto value = scalar<std::uint8_t>();
+    if (value > 1) throw std::runtime_error("OneGen worker boolean is not 0 or 1.");
+    return value != 0;
+  }
   void read(void* destination, std::size_t size)
   {
     require(size);
@@ -123,6 +155,7 @@ public:
     offset_ += size;
   }
   [[nodiscard]] bool empty() const noexcept { return offset_ == data_.size(); }
+  [[nodiscard]] std::size_t remainingSize() const noexcept { return data_.size() - offset_; }
   [[nodiscard]] std::vector<std::byte> remaining()
   {
     std::vector<std::byte> value(data_.begin() + static_cast<std::ptrdiff_t>(offset_), data_.end());
@@ -161,47 +194,27 @@ inline FramePoolAttach readFramePoolAttach(Reader& in)
   return value;
 }
 
-inline void write(Writer& out, const FrameDescriptor& value)
+inline void write(Writer& out, const SlotIdentity& value)
 {
   out.scalar(value.session);
   out.scalar(value.epoch);
   out.scalar(value.token);
   out.scalar(value.slot);
   out.scalar(value.generation);
-  out.scalar(value.frame_id);
   out.scalar(value.sequence);
   out.scalar(value.used_bytes);
-  out.scalar(value.width);
-  out.scalar(value.height);
-  out.scalar(value.stride);
-  out.scalar(value.pixel_format);
-  out.scalar(value.format_namespace);
-  out.scalar(value.pixel_endianness);
-  out.scalar(value.payload_type);
-  out.scalar(value.stream_index);
-  out.string(value.stream_id);
 }
 
-inline FrameDescriptor readFrameDescriptor(Reader& in)
+inline SlotIdentity readSlotIdentity(Reader& in)
 {
-  FrameDescriptor value;
+  SlotIdentity value;
   value.session = in.scalar<std::uint32_t>();
   value.epoch = in.scalar<std::uint64_t>();
   value.token = in.scalar<std::uint64_t>();
   value.slot = in.scalar<std::uint32_t>();
   value.generation = in.scalar<std::uint64_t>();
-  value.frame_id = in.scalar<std::uint64_t>();
   value.sequence = in.scalar<std::uint64_t>();
   value.used_bytes = in.scalar<std::uint64_t>();
-  value.width = in.scalar<std::uint32_t>();
-  value.height = in.scalar<std::uint32_t>();
-  value.stride = in.scalar<std::uint64_t>();
-  value.pixel_format = in.scalar<std::uint64_t>();
-  value.format_namespace = in.scalar<std::uint64_t>();
-  value.pixel_endianness = in.scalar<std::uint32_t>();
-  value.payload_type = in.scalar<std::uint64_t>();
-  value.stream_index = in.scalar<std::uint32_t>();
-  value.stream_id = in.string();
   return value;
 }
 

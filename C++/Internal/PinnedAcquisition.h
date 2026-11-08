@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Internal/DirectFrameSink.h"
 #include "Internal/FramePayload.h"
 #include "Internal/Gentl.h"
 #include "Internal/NodeMap.h"
@@ -12,6 +13,10 @@
 #include <string>
 #include <type_traits>
 #include <vector>
+
+namespace onegen {
+class Camera;
+}
 
 namespace onegen::detail {
 
@@ -27,7 +32,7 @@ struct AcquisitionContext {
   const std::vector<Frame::ComponentIdentity>* components = nullptr;
 };
 
-enum class PinnedExtraction : std::uint8_t { Owned, BorrowedImageOnly };
+enum class PinnedExtraction : std::uint8_t { Owned, BorrowedImageOnly, DirectOrOwned };
 
 struct PinnedPart {
   const std::uint8_t* base = nullptr;
@@ -94,5 +99,28 @@ struct BorrowedGrabResult {
 
 BorrowedGrabResult grab_one_into(const AcquisitionContext& context, std::uint64_t timeout_ms,
                                  FrameDestination destination);
+
+enum class DirectStatus : std::uint8_t { SharedReady, OwnedFallback, CapacityFailure };
+
+struct DirectAcquisition {
+  DirectStatus status = DirectStatus::OwnedFallback;
+  FallbackReason reason = FallbackReason::None;
+  std::size_t used_bytes = 0;
+  std::size_t required_bytes = 0;
+  Frame frame;
+};
+
+/** Direct pinned-to-destination acquisition without a worker sink. */
+DirectAcquisition acquire_into_or_owned(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                                        FrameDestination destination);
+
+enum class DirectStep : std::uint8_t { Published, Fallback, CapacityFailed, NoPool, Stopped };
+
+/** Reserve -> pinned direct/owned conversion -> publish/cancel; fallback_out is valid for Fallback. */
+DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                           DirectFrameSink& sink, Frame& fallback_out);
+
+/** Installs or clears the optional direct sink; only the live loop observes it. */
+void set_direct_frame_sink(Camera& camera, std::shared_ptr<DirectFrameSink> sink);
 
 }  // namespace onegen::detail

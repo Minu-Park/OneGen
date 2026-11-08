@@ -1478,6 +1478,57 @@ int runTests(int argc, char** argv)
     connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
     connection.close();
   }
+  // Legacy host acceptance stays separate from direct layout capability.
+  {
+    const auto boards = root / "layout-class-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "LayoutClassBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<onegen::worker::SharedFrame> frames;
+    connection.setSharedFrameCallback([&](const auto& frame) {
+      {
+        std::lock_guard lock(mutex);
+        frames.push_back(frame);
+      }
+      ready.notify_all();
+    }, 1);
+    std::string error;
+    assert(connection.createFramePool(1, 3, 1024, error));
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+
+    const std::uint64_t formats[] = {0, 0x02180014, 0x02100032, 0x010a0046,
+        0x01100007, 0x0110002a, 0x010a0046, 0x021000a5, 0x02180021, 0x01080001};
+    const std::uint64_t used[] = {0, 32, 16, 160, 16, 12, 8, 12, 0, 1};
+    for (int sequence = 1; sequence <= 9; ++sequence) {
+      connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+      if (sequence == 8) {
+        std::this_thread::sleep_for(200ms);
+        std::lock_guard lock(mutex);
+        assert(frames.empty());
+        continue;
+      }
+      std::unique_lock lock(mutex);
+      assert(ready.wait_for(lock, 30s, [&] { return !frames.empty(); }));
+      const auto frame = frames.front();
+      frames.clear();
+      lock.unlock();
+      assert(frame.lease);
+      assert(frame.descriptor.used_bytes == used[sequence]);
+      assert(frame.lease->bytes().size() == used[sequence]);
+      assert(frame.lease->metadata().pixel_format == formats[sequence]);
+      if (sequence == 4) assert(frame.lease->metadata().pixel_endianness == 2);
+    }
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.destroyFramePool(1);
+    connection.close();
+  }
   // PFNC storage-size validation accepts full rows and rejects short ones.
   {
     const auto boards = root / "shared-format-storage-board";
@@ -1568,6 +1619,25 @@ int runTests(int argc, char** argv)
     connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
     connection.destroyFramePool(1);
     connection.close();
+  }
+  // A v15 producer reply is rejected without leaving the request pending.
+  {
+    const auto boards = root / "legacy-protocol-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "LegacyProtocolBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::string failure;
+    bool rejected = false;
+    try {
+      connection.request(onegen::worker::Operation::Probe, {}, 2s);
+    } catch (const std::exception& error) {
+      rejected = true;
+      failure = error.what();
+    }
+    assert(rejected);
+    assert(failure.find("Unsupported OneGen worker protocol version") != std::string::npos);
+    assert(!connection.alive());
   }
   std::filesystem::remove_all(root);
   std::cout << "test_worker ok\n";

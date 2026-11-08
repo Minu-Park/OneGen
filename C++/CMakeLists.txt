@@ -52,6 +52,12 @@ if(ONEGEN_BUILD_TESTS)
   target_include_directories(FailingInitProducer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(FailingInitProducer PRIVATE genicam::genicam)
   set_target_properties(FailingInitProducer PROPERTIES PREFIX "" SUFFIX ".cti")
+
+  add_library(SyntheticGenTL SHARED Tests/SyntheticGenTL.cpp)
+  target_compile_features(SyntheticGenTL PRIVATE cxx_std_20)
+  target_include_directories(SyntheticGenTL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(SyntheticGenTL PRIVATE genicam::genicam)
+  set_target_properties(SyntheticGenTL PROPERTIES PREFIX "" SUFFIX ".cti")
   add_executable(test_gentl_init Tests/test_gentl_init.cpp)
   target_link_libraries(test_gentl_init PRIVATE onegen)
   add_dependencies(test_gentl_init FailingInitProducer)
@@ -77,7 +83,19 @@ if(ONEGEN_BUILD_TESTS)
   add_executable(test_pinned_acquisition Tests/test_pinned_acquisition.cpp)
   target_link_libraries(test_pinned_acquisition PRIVATE onegen)
   add_test(NAME test_pinned_acquisition COMMAND test_pinned_acquisition)
-  foreach(_test test_open_query test_node test_worker_protocol test_pinned_acquisition)
+
+  add_executable(test_pixel_layout Tests/test_pixel_layout.cpp)
+  target_link_libraries(test_pixel_layout PRIVATE onegen)
+  add_test(NAME test_pixel_layout COMMAND test_pixel_layout)
+
+  add_executable(test_worker_frame_pool Tests/test_worker_frame_pool.cpp
+    Utility/Worker/WorkerFramePool.cpp)
+  target_include_directories(test_worker_frame_pool PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Worker")
+  target_link_libraries(test_worker_frame_pool PRIVATE onegen)
+  add_test(NAME test_worker_frame_pool COMMAND test_worker_frame_pool)
+  foreach(_test test_open_query test_node test_worker_protocol test_pinned_acquisition
+      test_pixel_layout test_worker_frame_pool)
     target_compile_options(${_test} PRIVATE
       $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
       $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
@@ -111,7 +129,9 @@ if(ONEGEN_BUILD_WORKER)
   add_executable(OneGenWorker
     Utility/Worker/OneGenWorkerMain.cpp
     Utility/Worker/OneGenWorkerMessages.h
-    Utility/Worker/OneGenWorkerProtocol.h)
+    Utility/Worker/OneGenWorkerProtocol.h
+    Utility/Worker/WorkerFramePool.cpp
+    Utility/Worker/WorkerFramePool.h)
   target_include_directories(OneGenWorker PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Worker")
   target_link_libraries(OneGenWorker PRIVATE onegen)
@@ -171,6 +191,17 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
       $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
       $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
     add_test(NAME test_worker COMMAND test_worker $<TARGET_FILE:OneGenWorker>)
+    add_executable(test_worker_direct_shm Tests/test_worker_direct_shm.cpp)
+    target_link_libraries(test_worker_direct_shm PRIVATE OneGen::WorkerClient)
+    target_compile_options(test_worker_direct_shm PRIVATE
+      $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+      $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+    add_dependencies(test_worker_direct_shm OneGenWorker SyntheticGenTL)
+    add_test(NAME test_worker_direct_shm COMMAND test_worker_direct_shm
+      $<TARGET_FILE:OneGenWorker> $<TARGET_FILE:SyntheticGenTL>)
+    set_tests_properties(test_worker_direct_shm PROPERTIES TIMEOUT 300
+      ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
     add_test(NAME test_worker_inactive_producer COMMAND test_worker --inactive-producer
       $<TARGET_FILE:OneGenWorker> $<TARGET_FILE:FailingInitProducer>)
     add_executable(test_worker_errors Tests/test_worker_errors.cpp)

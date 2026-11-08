@@ -203,6 +203,7 @@ struct Camera::Impl {
   std::thread live_thread;
   FrameFn on_frame;
   ErrorFn on_error;
+  std::shared_ptr<detail::DirectFrameSink> direct_sink;
   std::mutex callback_mu;
 
   Gentl* g = nullptr;
@@ -578,6 +579,7 @@ void Camera::Impl::snapshot_scan3d_geometry() {
 void Camera::Impl::stop_acquisition() {
   ConnectTiming timing("acquisition-stop");
   stop_live = true;
+  if (direct_sink) direct_sink->wake();
   if (g && hev) g->EventKill(hev);
   if (live_thread.joinable() && live_thread.get_id() != std::this_thread::get_id())
     live_thread.join();
@@ -805,6 +807,13 @@ detail::AcquisitionContext Camera::Impl::context() {
   return out;
 }
 
+namespace detail {
+void set_direct_frame_sink(Camera& camera, std::shared_ptr<DirectFrameSink> sink) {
+  std::lock_guard<std::mutex> lock(camera.impl_->acq_mu);
+  camera.impl_->direct_sink = std::move(sink);
+}
+}  // namespace detail
+
 Frame Camera::Impl::grab_one(uint64_t timeout_ms) {
   return detail::grab_owned(context(), timeout_ms);
 }
@@ -840,7 +849,125 @@ void grab_borrowed_visit(void* user, PinnedBuffer& buffer) {
   state.result.metadata = std::move(buffer.metadata());
 }
 
+void convert_owned(PinnedBuffer& buffer, Frame& frame) {
+  auto& metadata = buffer.metadata();
+  if (!metadata.parts.empty()) {
+    const auto parts = buffer.parts();
+    for (std::size_t index = 0; index < parts.size() && index < metadata.parts.size(); ++index)
+      metadata.parts[index].payload.assign(parts[index].base,
+                                           parts[index].base + parts[index].size);
+  } else {
+    const auto transport = buffer.transport();
+    copy_single_payload(metadata, transport.data(), transport.size());
+  }
+  frame = std::move(metadata);
+}
+
+FallbackReason non_borrowable_reason(const PinnedBuffer& buffer) {
+  const auto& metadata = buffer.metadata();
+  if (metadata.payload_type == GenTL::PAYLOAD_TYPE_JPEG) return FallbackReason::Jpeg;
+  if (metadata.payload_type != GenTL::PAYLOAD_TYPE_IMAGE)
+    return FallbackReason::NonImagePayload;
+  if (metadata.buffer_info.contains_chunk_data || !metadata.chunks.empty())
+    return FallbackReason::ChunkData;
+  if (!metadata.parts.empty()) return FallbackReason::MultiPart;
+  return FallbackReason::NonImagePayload;
+}
+
+struct DirectState {
+  DirectFrameSink* sink = nullptr;
+  FrameDestination destination;
+  DirectAcquisition result;
+};
+
+void direct_or_owned_visit(void* user, PinnedBuffer& buffer) {
+  auto& state = *static_cast<DirectState*>(user);
+  auto& metadata = buffer.metadata();
+  const auto fallback = [&](FallbackReason reason) {
+    convert_owned(buffer, state.result.frame);
+    state.result.status = DirectStatus::OwnedFallback;
+    state.result.reason = reason;
+  };
+
+  if (!buffer.borrowable()) {
+    fallback(non_borrowable_reason(buffer));
+    return;
+  }
+  if (metadata.buffer_info.incomplete) {
+    fallback(FallbackReason::Incomplete);
+    return;
+  }
+  const auto transport = buffer.transport();
+  const auto check = check_direct_image(metadata, transport);
+  if (check.verdict == LayoutVerdict::Malformed) throw Error(check.malformed_message);
+  if (check.verdict == LayoutVerdict::Fallback) {
+    fallback(check.reason);
+    return;
+  }
+  if (state.sink) {
+    const auto gate = state.sink->metadata_gate(metadata);
+    if (gate != FallbackReason::None) {
+      fallback(gate);
+      return;
+    }
+  }
+  if (check.span.bytes() > state.destination.bytes.size()) {
+    state.result.status = DirectStatus::CapacityFailure;
+    state.result.required_bytes = check.span.bytes();
+    state.result.frame = std::move(metadata);
+    return;
+  }
+
+  const auto write = write_checked(check.span, transport, state.destination);
+  if (write.status == FrameWriteStatus::Written) {
+    state.result.status = DirectStatus::SharedReady;
+    state.result.used_bytes = write.used_bytes;
+    state.result.required_bytes = write.required_bytes;
+    state.result.frame = std::move(metadata);
+    return;
+  }
+  state.result.status = DirectStatus::CapacityFailure;
+  state.result.required_bytes = write.required_bytes;
+  state.result.frame = std::move(metadata);
+}
+
+class ReservationGuard {
+public:
+  ReservationGuard(DirectFrameSink& sink, const DirectReservation& reservation) noexcept
+      : sink_(&sink), reservation_(reservation) {}
+  ~ReservationGuard() {
+    if (armed_) sink_->cancel(reservation_, cause_);
+  }
+  ReservationGuard(const ReservationGuard&) = delete;
+  ReservationGuard& operator=(const ReservationGuard&) = delete;
+
+  void set_cause(CancelCause cause) noexcept { cause_ = cause; }
+  void cancel_now(CancelCause cause) noexcept {
+    cause_ = cause;
+    if (armed_) {
+      armed_ = false;
+      sink_->cancel(reservation_, cause);
+    }
+  }
+  void disarm() noexcept { armed_ = false; }
+
+private:
+  DirectFrameSink* sink_ = nullptr;
+  DirectReservation reservation_;
+  CancelCause cause_ = CancelCause::Exception;
+  bool armed_ = true;
+};
+
 }  // namespace
+
+DirectAcquisition acquire_into_or_owned(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                                        FrameDestination destination) {
+  DirectState state;
+  state.destination = destination;
+  with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned,
+                     [&](PinnedBuffer& buffer) { direct_or_owned_visit(&state, buffer); });
+  return std::move(state.result);
+}
 
 void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout_ms,
                          PinnedExtraction extraction, PinnedVisitFn visit, void* user) {
@@ -939,7 +1066,28 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
 
   std::vector<PinnedPart> part_spans;
   bool borrowable = false;
-  if (extraction == PinnedExtraction::Owned) {
+  if (extraction == PinnedExtraction::BorrowedImageOnly
+      || extraction == PinnedExtraction::DirectOrOwned) {
+    borrowable = f.payload_type == GenTL::PAYLOAD_TYPE_IMAGE
+        && !f.buffer_info.contains_chunk_data;
+    if (borrowable && context.gentl->DSGetBufferChunkData) {
+      size_t chunk_count = 0;
+      const auto chunk_error = context.gentl->DSGetBufferChunkData(
+          context.stream, data.BufferHandle, nullptr, &chunk_count);
+      if ((chunk_error == GenTL::GC_ERR_SUCCESS || chunk_error == GenTL::GC_ERR_BUFFER_TOO_SMALL)
+          && chunk_count)
+        borrowable = false;
+    }
+    if (borrowable && context.gentl->DSGetNumBufferParts && context.gentl->DSGetBufferPartInfo) {
+      std::uint32_t part_count = 0;
+      if (context.gentl->DSGetNumBufferParts(context.stream, data.BufferHandle, &part_count)
+              == GenTL::GC_ERR_SUCCESS
+          && part_count)
+        borrowable = false;
+    }
+  }
+  if (extraction == PinnedExtraction::Owned
+      || (extraction == PinnedExtraction::DirectOrOwned && !borrowable)) {
     if (base && filled && context.gentl->DSGetBufferChunkData) {
       size_t chunk_count = 0;
       auto chunk_error = context.gentl->DSGetBufferChunkData(context.stream, data.BufferHandle,
@@ -1101,24 +1249,6 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
         }
       }
     }
-  } else {
-    borrowable = f.payload_type == GenTL::PAYLOAD_TYPE_IMAGE
-        && !f.buffer_info.contains_chunk_data;
-    if (borrowable && context.gentl->DSGetBufferChunkData) {
-      size_t chunk_count = 0;
-      const auto chunk_error = context.gentl->DSGetBufferChunkData(
-          context.stream, data.BufferHandle, nullptr, &chunk_count);
-      if ((chunk_error == GenTL::GC_ERR_SUCCESS || chunk_error == GenTL::GC_ERR_BUFFER_TOO_SMALL)
-          && chunk_count)
-        borrowable = false;
-    }
-    if (borrowable && context.gentl->DSGetNumBufferParts && context.gentl->DSGetBufferPartInfo) {
-      std::uint32_t part_count = 0;
-      if (context.gentl->DSGetNumBufferParts(context.stream, data.BufferHandle, &part_count)
-              == GenTL::GC_ERR_SUCCESS
-          && part_count)
-        borrowable = false;
-    }
   }
 
   const std::span<const std::uint8_t> transport_span(base, filled);
@@ -1141,6 +1271,46 @@ BorrowedGrabResult grab_one_into(const AcquisitionContext& context, std::uint64_
   visit_pinned_buffer(context, timeout_ms, PinnedExtraction::BorrowedImageOnly,
                       &grab_borrowed_visit, &state);
   return std::move(state.result);
+}
+
+DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                           DirectFrameSink& sink, Frame& fallback_out) {
+  DirectReservation reservation;
+  const auto reserved = sink.reserve(reservation);
+  if (reserved == ReserveStatus::NoPool) return DirectStep::NoPool;
+  if (reserved == ReserveStatus::Stopped) return DirectStep::Stopped;
+
+  ReservationGuard guard(sink, reservation);
+  DirectState state;
+  state.sink = &sink;
+  state.destination = FrameDestination{reservation.destination};
+  try {
+    with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned,
+                       [&](PinnedBuffer& buffer) { direct_or_owned_visit(&state, buffer); });
+  } catch (const Error& error) {
+    if (std::string_view(error.what()) == "grab timeout") guard.set_cause(CancelCause::Timeout);
+    throw;
+  } catch (...) {
+    throw;
+  }
+
+  switch (state.result.status) {
+    case DirectStatus::SharedReady:
+      guard.disarm();
+      sink.publish(reservation, state.result.frame, state.result.used_bytes);
+      return DirectStep::Published;
+    case DirectStatus::OwnedFallback:
+      guard.cancel_now(CancelCause::Fallback);
+      sink.note_fallback(state.result.reason, state.result.frame);
+      fallback_out = std::move(state.result.frame);
+      return DirectStep::Fallback;
+    case DirectStatus::CapacityFailure:
+      guard.cancel_now(CancelCause::Capacity);
+      sink.report_capacity_failure(state.result.frame, state.result.required_bytes,
+                                   reservation.destination.size());
+      return DirectStep::CapacityFailed;
+  }
+  return DirectStep::Stopped;
 }
 
 }  // namespace detail
@@ -1203,7 +1373,8 @@ void Camera::live() {
   }
   impl_->live = true;
   try {
-    impl_->live_thread = std::thread([this] {
+    auto direct_sink = impl_->direct_sink;
+    impl_->live_thread = std::thread([this, direct_sink] {
       bool error_reported = false;
       const auto report_error = [&](const std::string_view message) {
         if (error_reported) return;
@@ -1220,7 +1391,27 @@ void Camera::live() {
       };
       while (!impl_->stop_live.load()) {
         try {
-          Frame f = impl_->grab_one(500);
+          Frame f;
+          if (direct_sink) {
+            Frame fallback;
+            const auto step = detail::run_direct_step(impl_->context(), 500, *direct_sink,
+                                                      fallback);
+            if (step == detail::DirectStep::NoPool) {
+              f = impl_->grab_one(500);
+            } else if (step == detail::DirectStep::CapacityFailed) {
+              report_error("direct-shm capacity failure");
+              continue;
+            } else if (step == detail::DirectStep::Stopped) {
+              continue;
+            } else if (step == detail::DirectStep::Fallback) {
+              f = std::move(fallback);
+            } else {
+              error_reported = false;
+              continue;
+            }
+          } else {
+            f = impl_->grab_one(500);
+          }
           FrameFn callback;
           {
             std::lock_guard<std::mutex> lk(impl_->callback_mu);
@@ -1257,6 +1448,7 @@ void Camera::stop() {
   if (impl_->live_thread.joinable()
       && impl_->live_thread.get_id() == std::this_thread::get_id()) {
     impl_->stop_live = true;
+    if (impl_->direct_sink) impl_->direct_sink->wake();
     if (impl_->g && impl_->hev) impl_->g->EventKill(impl_->hev);
     return;
   }

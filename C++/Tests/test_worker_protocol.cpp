@@ -2,8 +2,11 @@
 #include "OneGenParameterMessages.h"
 #include "../Internal/FramePayload.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstring>
+#include <limits>
 
 int main()
 {
@@ -177,4 +180,184 @@ int main()
   chunk_only.buffer_info.image_present = false;
   onegen::copy_single_payload(chunk_only, transport.data(), transport.size());
   assert(chunk_only.payload == transport && chunk_only.chunks.size() == 2);
+
+  onegen::worker::SlotIdentity identity;
+  identity.session = 7;
+  identity.epoch = 11;
+  identity.token = 13;
+  identity.slot = 1;
+  identity.generation = 17;
+  identity.sequence = 19;
+  identity.used_bytes = 4;
+  onegen::Frame metadata;
+  metadata.components = {{1, "Intensity"}, {65281, "Phase"}};
+  metadata.buffer_info.capacity = 8192;
+  metadata.buffer_info.size_filled = 4;
+  metadata.buffer_info.data_size = 4;
+  metadata.buffer_info.image_offset = 2;
+  metadata.buffer_info.y_padding = 8;
+  metadata.buffer_info.delivered_image_height = 2;
+  metadata.buffer_info.incomplete = false;
+  metadata.buffer_info.image_present = true;
+  metadata.buffer_info.contains_chunk_data = false;
+  metadata.buffer_info.diagnostic = "complete";
+  metadata.scan3d_geometry.emplace();
+  metadata.scan3d_geometry->scale = {0.1, 0.2, 0.3};
+  metadata.scan3d_geometry->offset = {1, 2, 3};
+  metadata.scan3d_geometry->invalid_value = {-1, -2, -3};
+  metadata.scan3d_geometry->invalid_enabled = {true, false, true};
+  metadata.scan3d_geometry->distance_unit = "mm";
+  metadata.scan3d_geometry->output_mode = "RectifiedC";
+  metadata.scan3d_geometry->coordinate_system = "Cartesian";
+  metadata.scan3d_geometry->calibrated_axes = {false, true, true};
+  metadata.scan3d_geometry->focal_length = 12.5;
+  metadata.scan3d_geometry->baseline = 80;
+  metadata.scan3d_geometry->principal_u = 1;
+  metadata.scan3d_geometry->principal_v = 2;
+  metadata.width = 2;
+  metadata.height = 2;
+  metadata.stride = 2;
+  metadata.payload_type = 1;
+  metadata.pixel_format = 0x01080001;
+  metadata.format_namespace = 0;
+  metadata.pixel_endianness = 2;
+  metadata.frame_id = 23;
+  metadata.timestamp = 29;
+  metadata.timestamp_ns = 31;
+  metadata.stream_index = 2;
+  metadata.stream_id = "stream-0";
+  const onegen::worker::FrameReadyRecord ready{identity, &metadata};
+  onegen::worker::Writer ready_writer;
+  onegen::worker::write(ready_writer, ready);
+  const auto ready_bytes = ready_writer.take();
+  onegen::worker::Reader ready_reader(ready_bytes);
+  const auto decoded_ready = onegen::worker::readFrameReady(ready_reader);
+  assert(ready_reader.empty());
+  assert(decoded_ready.identity.session == identity.session);
+  assert(decoded_ready.identity.used_bytes == identity.used_bytes);
+  assert(decoded_ready.metadata.payload.empty());
+  assert(decoded_ready.metadata.parts.empty());
+  assert(decoded_ready.metadata.chunks.empty());
+  assert(decoded_ready.metadata.components.size() == 2);
+  assert(decoded_ready.metadata.components[1].name == "Phase");
+  assert(decoded_ready.metadata.pixel_endianness == 2);
+  assert(decoded_ready.metadata.buffer_info.capacity == 8192);
+  assert(decoded_ready.metadata.buffer_info.size_filled == 4);
+  assert(decoded_ready.metadata.buffer_info.data_size == 4);
+  assert(decoded_ready.metadata.buffer_info.image_offset == 2);
+  assert(decoded_ready.metadata.buffer_info.y_padding == 8);
+  assert(decoded_ready.metadata.buffer_info.delivered_image_height == 2);
+  assert(decoded_ready.metadata.buffer_info.image_present);
+  assert(decoded_ready.metadata.buffer_info.diagnostic == "complete");
+  assert(decoded_ready.metadata.scan3d_geometry);
+  assert(decoded_ready.metadata.scan3d_geometry->scale == metadata.scan3d_geometry->scale);
+  assert(decoded_ready.metadata.scan3d_geometry->offset == metadata.scan3d_geometry->offset);
+  assert(decoded_ready.metadata.scan3d_geometry->invalid_value == metadata.scan3d_geometry->invalid_value);
+  assert(decoded_ready.metadata.scan3d_geometry->invalid_enabled == metadata.scan3d_geometry->invalid_enabled);
+  assert(decoded_ready.metadata.scan3d_geometry->distance_unit == "mm");
+  assert(decoded_ready.metadata.scan3d_geometry->output_mode == "RectifiedC");
+  assert(decoded_ready.metadata.scan3d_geometry->coordinate_system == "Cartesian");
+  assert(decoded_ready.metadata.scan3d_geometry->calibrated_axes == metadata.scan3d_geometry->calibrated_axes);
+  assert(decoded_ready.metadata.scan3d_geometry->focal_length == 12.5);
+  assert(decoded_ready.metadata.scan3d_geometry->baseline == 80);
+  assert(decoded_ready.metadata.scan3d_geometry->principal_u == 1);
+  assert(decoded_ready.metadata.scan3d_geometry->principal_v == 2);
+  assert(decoded_ready.metadata.width == 2 && decoded_ready.metadata.height == 2);
+  assert(decoded_ready.metadata.stride == 2);
+  assert(decoded_ready.metadata.payload_type == 1);
+  assert(decoded_ready.metadata.pixel_format == 0x01080001);
+  assert(decoded_ready.metadata.frame_id == 23);
+  assert(decoded_ready.metadata.timestamp == 29);
+  assert(decoded_ready.metadata.timestamp_ns == 31);
+  assert(decoded_ready.metadata.stream_index == 2);
+  assert(decoded_ready.metadata.stream_id == "stream-0");
+  const auto derived = onegen::worker::describeFrame(decoded_ready.identity, decoded_ready.metadata);
+  assert(derived.session == identity.session && derived.slot == identity.slot);
+  assert(derived.sequence == identity.sequence && derived.used_bytes == identity.used_bytes);
+  assert(derived.frame_id == metadata.frame_id);
+  assert(derived.stream_id == metadata.stream_id);
+
+  onegen::worker::Writer tail_writer;
+  onegen::worker::writeFrameMetadataTail(tail_writer, metadata);
+  const auto tail_bytes = tail_writer.take();
+  assert(ready_bytes.size() == 48 + tail_bytes.size());
+  assert(std::equal(tail_bytes.begin(), tail_bytes.end(), ready_bytes.begin() + 48));
+  onegen::Frame owned_source = metadata;
+  owned_source.payload = {1, 2, 3, 4};
+  onegen::worker::Writer owned_writer;
+  onegen::worker::write(owned_writer, owned_source);
+  const auto owned_bytes = owned_writer.take();
+  assert(owned_bytes.size() >= tail_bytes.size());
+  assert(std::equal(tail_bytes.begin(), tail_bytes.end(),
+                    owned_bytes.end() - static_cast<std::ptrdiff_t>(tail_bytes.size())));
+  assert(onegen::worker::encodedFrameReadySize(metadata) == ready_bytes.size());
+
+  const auto decode_throws = [](std::vector<std::byte> bytes) {
+    try {
+      onegen::worker::Reader reader(bytes);
+      onegen::worker::readFrameReady(reader);
+    } catch (const std::runtime_error&) {
+      return true;
+    }
+    return false;
+  };
+  auto truncated = ready_bytes;
+  truncated.pop_back();
+  assert(decode_throws(std::move(truncated)));
+  auto trailing = ready_bytes;
+  trailing.push_back(std::byte{0});
+  assert(decode_throws(std::move(trailing)));
+  auto invalid_bool = ready_bytes;
+  const auto component_bytes = (8U + 4U + metadata.components[0].name.size())
+      + (8U + 4U + metadata.components[1].name.size());
+  const auto incomplete_offset = 48U + 4U + component_bytes + 40U + 4U;
+  invalid_bool[incomplete_offset] = std::byte{2};
+  assert(decode_throws(std::move(invalid_bool)));
+  auto oversized_count = ready_bytes;
+  const std::uint32_t too_many = onegen::worker::maximum_metadata_components + 1;
+  std::memcpy(oversized_count.data() + 48, &too_many, sizeof(too_many));
+  assert(decode_throws(std::move(oversized_count)));
+  auto oversized_name = ready_bytes;
+  const std::uint32_t too_long = onegen::worker::maximum_metadata_string_bytes + 1;
+  std::memcpy(oversized_name.data() + 48 + 4 + 8, &too_long, sizeof(too_long));
+  assert(decode_throws(std::move(oversized_name)));
+
+  onegen::Frame boundary;
+  boundary.buffer_info.diagnostic.assign(onegen::worker::maximum_metadata_diagnostic_bytes, 'd');
+  boundary.stream_id.assign(onegen::worker::maximum_metadata_string_bytes, 's');
+  boundary.components.resize(1024);
+  std::size_t name_bytes = 0;
+  for (std::size_t index = 0; index < boundary.components.size(); ++index) {
+    boundary.components[index].id = index;
+    const auto remaining = 32588 - name_bytes;
+    const auto length = index + 1 == boundary.components.size() ? remaining : 31;
+    boundary.components[index].name.assign(length, 'c');
+    name_bytes += length;
+  }
+  assert(name_bytes == 32588);
+  assert(onegen::worker::encodedFrameReadySize(boundary) ==
+         onegen::worker::maximum_frame_ready_size);
+  assert(onegen::worker::frameMetadataWithinLimits(boundary));
+  onegen::worker::Writer boundary_writer;
+  onegen::worker::write(boundary_writer, onegen::worker::FrameReadyRecord{identity, &boundary});
+  const auto boundary_bytes = boundary_writer.take();
+  assert(boundary_bytes.size() == onegen::worker::maximum_frame_ready_size);
+  onegen::worker::Reader boundary_reader(boundary_bytes);
+  const auto boundary_copy = onegen::worker::readFrameReady(boundary_reader);
+  assert(boundary_copy.metadata.components.size() == 1024);
+  boundary.components.back().name.push_back('c');
+  assert(onegen::worker::encodedFrameReadySize(boundary) ==
+         onegen::worker::maximum_frame_ready_size + 1);
+  assert(!onegen::worker::frameMetadataWithinLimits(boundary));
+  onegen::worker::Writer oversized_writer;
+  bool oversized_rejected = false;
+  try {
+    onegen::worker::write(oversized_writer, onegen::worker::FrameReadyRecord{identity, &boundary});
+  } catch (const std::length_error&) {
+    oversized_rejected = true;
+  }
+  assert(oversized_rejected);
+  auto oversized_body = boundary_bytes;
+  oversized_body.push_back(std::byte{0});
+  assert(decode_throws(std::move(oversized_body)));
 }

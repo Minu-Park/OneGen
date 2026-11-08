@@ -129,9 +129,11 @@ inline int fakeWorker(const std::filesystem::path& cti)
     double encode_ms = 0;
     double write_ms = 0;
   };
-  const auto transmit = [](Message response, SendTiming* timing = nullptr) {
+  const auto transmit = [&cti](Message response, SendTiming* timing = nullptr) {
     const auto encode_started = std::chrono::steady_clock::now();
-    const auto body = encode(std::move(response));
+    auto body = encode(std::move(response));
+    if (cti.stem() == "LegacyProtocolBoard" && !body.empty())
+      body.front() = std::byte(onegen::worker::protocol_version - 1);
     const auto encoded = std::chrono::steady_clock::now();
     const auto header = frameSize(static_cast<std::uint32_t>(body.size()));
     std::cout.write(reinterpret_cast<const char*>(header.data()), header.size());
@@ -430,7 +432,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
           || cti.stem() == "SharedPoolBudgetBoard" || cti.stem() == "SharedFenceBoard"
           || cti.stem() == "FormatStorageBoard" || cti.stem() == "MalformedSequenceBoard"
           || cti.stem() == "MalformedPoolBoard" || cti.stem() == "MalformedFormatBoard"
-          || cti.stem() == "CrashPoolBoard";
+          || cti.stem() == "LayoutClassBoard" || cti.stem() == "CrashPoolBoard";
       if (shared_stem) {
         const auto found = shared_pools.find(request.session);
         if (found == shared_pools.end()) {
@@ -461,92 +463,111 @@ inline int fakeWorker(const std::filesystem::path& cti)
         if (!produced.payload.empty())
           std::memcpy(pool.region->writable() + offset, produced.payload.data(),
                       produced.payload.size());
-        FrameDescriptor descriptor;
-        descriptor.session = request.session;
-        descriptor.epoch = pool.epoch;
-        descriptor.token = pool.token;
-        descriptor.slot = slot;
-        descriptor.generation = generation;
-        descriptor.frame_id = produced.frame_id;
-        descriptor.sequence = ++pool.sequence;
-        descriptor.used_bytes = produced.payload.size();
-        descriptor.width = produced.width;
-        descriptor.height = produced.height;
-        descriptor.stride = produced.stride;
-        descriptor.pixel_format = produced.pixel_format;
-        descriptor.format_namespace = produced.format_namespace;
-        descriptor.pixel_endianness = produced.pixel_endianness;
-        descriptor.payload_type = produced.payload_type;
-        descriptor.stream_index = produced.stream_index;
-        descriptor.stream_id = produced.stream_id;
-        if (cti.stem() == "MalformedPoolBoard" && descriptor.sequence == 1)
-          descriptor.used_bytes = pool.slot_bytes + 1;
-        if (cti.stem() == "MalformedFormatBoard") descriptor.payload_type = 1; // GenTL IMAGE
-        if (cti.stem() == "MalformedFormatBoard" && descriptor.sequence == 1) {
-          descriptor.width = 1000;
-          descriptor.height = 2;
-          descriptor.stride = 200;
-          descriptor.used_bytes = 400;
+        auto metadata = produced;
+        SlotIdentity identity;
+        identity.session = request.session;
+        identity.epoch = pool.epoch;
+        identity.token = pool.token;
+        identity.slot = slot;
+        identity.generation = generation;
+        identity.sequence = ++pool.sequence;
+        identity.used_bytes = metadata.payload.size();
+        if (cti.stem() == "MalformedPoolBoard" && identity.sequence == 1)
+          identity.used_bytes = pool.slot_bytes + 1;
+        if (cti.stem() == "MalformedFormatBoard") metadata.payload_type = 1; // GenTL IMAGE
+        if (cti.stem() == "MalformedFormatBoard" && identity.sequence == 1) {
+          metadata.width = 1000;
+          metadata.height = 2;
+          metadata.stride = 200;
+          identity.used_bytes = 400;
         }
-        if (cti.stem() == "MalformedFormatBoard" && descriptor.sequence == 2)
-          descriptor.pixel_format = 0x010800ff;
-        if (cti.stem() == "MalformedSequenceBoard" && descriptor.sequence == 1) {
-          descriptor.sequence = 1000000;
-          descriptor.used_bytes = pool.slot_bytes + 1;
+        if (cti.stem() == "MalformedFormatBoard" && identity.sequence == 2)
+          metadata.pixel_format = 0x010800ff;
+        if (cti.stem() == "MalformedSequenceBoard" && identity.sequence == 1) {
+          identity.sequence = 1000000;
+          identity.used_bytes = pool.slot_bytes + 1;
+        }
+        if (cti.stem() == "LayoutClassBoard") {
+          metadata.payload_type = 1;
+          std::uint64_t format = 0x01080001;
+          std::uint32_t width = 4;
+          std::uint32_t height = 2;
+          std::uint32_t padding = 0;
+          std::int32_t endianness = 0;
+          switch (identity.sequence) {
+            case 1: format = 0x02180014; width = 5; height = 2; padding = 1; break;
+            case 2: format = 0x02100032; width = 4; height = 2; break;
+            case 3: format = 0x010a0046; width = 64; height = 2; break;
+            case 4: format = 0x01100007; width = 4; height = 2; endianness = 2; break;
+            case 5: format = 0x0110002a; width = 3; height = 2; break;
+            case 6: format = 0x010a0046; width = 3; height = 2; break;
+            case 7: format = 0x021000a5; width = 3; height = 2; break;
+            case 8: format = 0x02180021; width = 4; height = 2; break;
+            default: format = 0x01080001; width = 1; height = 1; break;
+          }
+          const auto bits = (format >> 16U) & 0xffU;
+          const auto row = (static_cast<std::uint64_t>(width) * bits + 7U) / 8U + padding;
+          const auto used = row * height;
+          metadata.pixel_format = format;
+          metadata.width = width;
+          metadata.height = height;
+          metadata.stride = row;
+          metadata.pixel_endianness = endianness;
+          metadata.buffer_info.capacity = used;
+          metadata.buffer_info.size_filled = used;
+          metadata.buffer_info.data_size = used;
+          metadata.payload.assign(static_cast<std::size_t>(used), 0x5a);
+          identity.used_bytes = used;
         }
         if (cti.stem() == "FormatStorageBoard") {
-          descriptor.payload_type = 1; // GenTL IMAGE
-          descriptor.width = 1000;
-          descriptor.height = 2;
-          switch (descriptor.sequence) {
+          metadata.payload_type = 1; // GenTL IMAGE
+          metadata.width = 1000;
+          metadata.height = 2;
+          switch (identity.sequence) {
             case 1: // BiColorRGBG8 (16-bit storage), full rows.
-              descriptor.pixel_format = 0x021000a5;
-              descriptor.stride = 2000;
-              descriptor.used_bytes = 4000;
+              metadata.pixel_format = 0x021000a5;
+              metadata.stride = 2000;
               break;
             case 2: // BiColorRGBG8 short row.
-              descriptor.pixel_format = 0x021000a5;
-              descriptor.stride = 1000;
-              descriptor.used_bytes = 2000;
+              metadata.pixel_format = 0x021000a5;
+              metadata.stride = 1000;
               break;
             case 3: // RGB10 unpacked (48-bit storage), full rows.
-              descriptor.pixel_format = 0x02300018;
-              descriptor.stride = 6000;
-              descriptor.used_bytes = 12000;
+              metadata.pixel_format = 0x02300018;
+              metadata.stride = 6000;
               break;
             case 4: // RGB10 unpacked short row.
-              descriptor.pixel_format = 0x02300018;
-              descriptor.stride = 4000;
-              descriptor.used_bytes = 8000;
+              metadata.pixel_format = 0x02300018;
+              metadata.stride = 4000;
               break;
             case 5: // BiColorRGBG10p (20-bit storage), full rows.
-              descriptor.pixel_format = 0x021400a8;
-              descriptor.stride = 2500;
-              descriptor.used_bytes = 5000;
+              metadata.pixel_format = 0x021400a8;
+              metadata.stride = 2500;
               break;
             case 6: // BiColorRGBG10p short row.
-              descriptor.pixel_format = 0x021400a8;
-              descriptor.stride = 1500;
-              descriptor.used_bytes = 3000;
+              metadata.pixel_format = 0x021400a8;
+              metadata.stride = 1500;
               break;
             case 7: // BiColorRGBG8 short payload (one row missing).
-              descriptor.pixel_format = 0x021000a5;
-              descriptor.stride = 2000;
-              descriptor.used_bytes = 2000;
+              metadata.pixel_format = 0x021000a5;
+              metadata.stride = 2000;
+              identity.used_bytes = 2000;
               break;
             case 8: // Marker frame after all format cases.
-              descriptor.pixel_format = 0x01080001;
-              descriptor.width = 1;
-              descriptor.height = 1;
-              descriptor.stride = 1;
-              descriptor.used_bytes = 1;
+              metadata.pixel_format = 0x01080001;
+              metadata.width = 1;
+              metadata.height = 1;
+              metadata.stride = 1;
+              identity.used_bytes = 1;
               break;
             default:
               break;
           }
+          if (identity.sequence >= 1 && identity.sequence <= 6)
+            identity.used_bytes = static_cast<std::uint64_t>(metadata.stride) * metadata.height;
         }
         Writer descriptor_payload;
-        write(descriptor_payload, descriptor);
+        write(descriptor_payload, FrameReadyRecord{identity, &metadata});
         transmit({Operation::FrameReady, 0, true, {}, descriptor_payload.take(), request.session});
       } else {
         const bool trace = cti.stem() == "LargeFrameBoard" && onegen::frame_trace_enabled();

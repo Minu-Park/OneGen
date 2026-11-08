@@ -74,7 +74,7 @@ Discovery runs are serialized per coordinator; process isolation does not confer
 exclusive ownership of hardware shared by different producer installations.
 Shutdown suppresses pending GUI updates and joins discovery before teardown.
 
-Probe responses in protocol v15 carry both Devices and producer-scoped Interface
+Probe responses in protocol v16 carry both Devices and producer-scoped Interface
 failure details. An individual Interface failure preserves other Interfaces and
 their Devices, appears in the cumulative result, and is not retried as an empty
 inventory. Successful empty inventories retain the initial-discovery budget.
@@ -147,7 +147,7 @@ for reconnect; shutdown releases them.
 ## Multiple Sessions
 
 The plugin owns one coordinator. An explicitly connected Interface pins one
-producer worker and its Device channels share that worker through protocol v15.
+producer worker and its Device channels share that worker through protocol v16.
 Standalone Device connections retain the existing worker-isolation policy.
 
 - Duplicate local opens of the same complete Device identity are rejected.
@@ -242,10 +242,10 @@ remains experimental until the physical acceptance gate in #348 passes.
   `13376x9528` BayerRG8 this is `3 * 127,446,528 = 382,339,584` bytes. Retired
   but referenced pools remain in the accounting; allocation fails explicitly
   instead of growing without bound.
-- **Slot states:** `free -> reserved -> filling -> ready -> released` with an
-  exact `(poolEpoch, session, slot, slotGeneration)` identity. A slot is
-  reusable only after a matching release. Duplicate, stale and unknown
-  releases are ignored and diagnosable in Debug.
+- **Slot states:** `free -> reserved -> ready -> released` with an exact
+  `(poolEpoch, session, slot, slotGeneration)` identity. A slot is reusable
+  only after a matching release. Duplicate, stale and unknown releases are
+  ignored and diagnosable in Debug.
 - **Publication:** the worker copies the GenTL image into the reserved slot
   while the borrowed buffer is pinned, then publishes only a small
   `FrameReady` descriptor. No GenTL pointer, writable mapping or 127 MB body
@@ -262,44 +262,98 @@ remains experimental until the physical acceptance gate in #348 passes.
 - **Lifetime:** callback completion is not proof that the last consumer
   released the frame. The host storage owner enqueues `SlotRelease` from its
   destructor without touching a QProcess or an application mutex in an
-  arbitrary thread.
+  arbitrary thread. A worker reservation also retains the owning pool and its
+  mapping until publish/cancel completes, so detaching the sink and dropping
+  every channel/sink pool reference during a pinned acquisition cannot unmap
+  the reservation destination. Malformed diagnostics are static strings, not
+  pointers into an expiring exception object.
 - **Failure policy:** descriptors and releases are validated before use
   (bounds, stride, layout, epoch, generation, duplicate slot). Malformed input
   fails closed for that frame and does not advance the accepted generation or
   sequence; worker/session epochs are invalidated before stale work can be
   delivered; all waits wake on stop, close, exit and reconnect. No silent loss:
   source, admitted, delivered, rejected and policy-dropped counts stay separate.
-- **Protocol:** worker protocol v15 carries the pool attach/detach,
-  `FrameReady` and `SlotRelease` messages. Mismatched peers are rejected; no
-  compatibility shim is added before v1.0.0.
+- **Capacity:** when the selected payload does not fit a slot, the reservation
+  is cancelled and the pinned buffer is requeued once before any owned delivery.
+  The worker reports one Error per failed frame with
+  `direct-shm capacity failure: session=... frame=... required=... slot_bytes=...
+  consecutive=... total=...`; the counter advances per consecutive failure and
+  resets after a successful publication. Acquisition does not resize, regrab or
+  silently fall back for this case.
+- **Metadata limits:** a shared `FrameReady` body is bounded to 64 KiB, with at
+  most 1024 components, 4096 bytes per component name and 16 KiB of diagnostic
+  text. A frame that exceeds a limit falls back to the owned path with
+  `MetadataTooLarge` rather than truncating or synthesizing values.
+- **Protocol:** worker protocol v16 carries the pool attach/detach,
+  metadata-complete `FrameReady` and `SlotRelease` messages. A v15 peer is
+  rejected with `Unsupported OneGen worker protocol version`; the request is
+  not left pending. No compatibility shim is added before v1.0.0.
 
-R1 currently implements the host client and the fake test peer: ordered pool
-attach/detach transitions, a per-session three-slot byte budget that keeps
-retired lease-backed mappings charged, PFNC storage-size row/stride validation,
-exact releases, detach callback fencing (every external detach drains the
-retiring epoch, queued frames are rejected, and a callback may detach its own
-pool), malformed-frame rejection and retained-mapping safety are covered by
-`test_worker`. The production worker
-rejects pool attach until the direct GenTL-to-SHM acquisition path lands, so
-the optimized transport is not enabled and the existing owned-payload path
-remains the live default.
+The production worker now implements the direct path while keeping the owned
+path as the default. Pool attach is accepted only when
+`ONEGEN_DIRECT_SHM_TEST=1`; otherwise it is rejected with
+`direct shared-memory test mode is disabled`. With a pool attached,
+`Camera::live()` runs reserve -> direct-or-owned conversion ->
+publish/cancel. Direct eligibility comes from one shared layout table and is
+not a format-name whitelist. Unpacked, byte-aligned packed-LSB, even-width
+YUV422, even-width BiColor and other declared interleaved layouts are eligible;
+planar and unknown layouts use the same-pin owned fallback. Legacy host-only
+values `0x0110002A`-`0x0110002D` remain accepted by the host for compatibility
+but direct conversion reports `UnknownLayout` until producer semantics are
+proven. Unaligned packed rows report `PackedRowAlignment`; odd BiColor and
+YUV422 widths report `LayoutConstraint`. Eligible images copy once from the
+pinned GenTL buffer into the reserved slot and publish complete owned metadata
+(width, height, stride, payload type, PFNC format, namespace, endianness,
+FrameID, timestamps, stream identity, components, BufferInfo and diagnostic).
+JPEG, planar, multipart, chunk-bearing, non-image and unsupported layouts take
+the same-pin owned fallback; incomplete buffers keep the owned path's truncated
+height and diagnostic. `GrabOne` always uses the owned path.
 
-R3a adds an internal bounded-write boundary (`Internal/FramePayload.h`,
-`Internal/PinnedAcquisition.h`). For an eligible Mono8 or BayerRG8 single-image
-payload, `grab_one_into` copies from the pinned GenTL buffer directly into
-caller-owned storage with one `memcpy` before `DSQueueBuffer`. The borrowed
-frame view, transport span and part spans are valid only during the synchronous
-visit on the visiting thread; no GenTL pointer or handle escapes, and the
-types are non-copyable and non-movable. Every obtained buffer is requeued
-exactly once, explicitly on normal completion and from the guard on exceptions.
-Unsupported layouts (JPEG, planar, multipart, chunk-bearing, non-image, other
-PFNC formats) return `UnsupportedLayout` after that single requeue; malformed
-descriptors throw without writing the destination. Incomplete buffers keep the
-owned path's truncated height and diagnostic. The production worker does not
-use this boundary yet: `Camera::Impl::grab_one` delegates to the shared owned
-path (`grab_owned` -> `visit_pinned_buffer`), `grab_one_into` has no production
-caller, the worker still rejects pool attach, and the owned-payload path stays
-the live default.
+Host validation remains the legacy acceptance set: it still accepts the four
+legacy values, uses ceiling byte rows for packed formats, rejects odd YUV422
+widths, and does not add blanket BiColor or packed-alignment rejection. Direct
+capability is checked separately, so a host-accepted frame can still take the
+owned fallback when direct transport semantics are unproven. Real bounds,
+overflow, null-storage and image-extent violations fail closed; an eligible
+frame whose image does not fit the slot reports capacity per occurrence and
+never falls back, drops, regrabs or resizes.
+
+`WorkerFramePool` uses `free/reserved/ready/retired` slots, generation-checked
+releases, and an epoch/token pair per attach. `WorkerDirectSink` encodes the
+retained frame metadata itself, maps encode failure to `free`, send failure to
+`retired`, and distinguishes stale, duplicate and unknown releases. Detach,
+stop and shutdown wake blocked reservations. Host leases retain the mapping and
+slot generation until the last consumer reference dies.
+
+`test_worker_frame_pool` covers the pool/sink state machine. `test_pixel_layout`
+verifies the legacy host list and the separate direct verdicts, including legacy
+values, unaligned packed rows, odd BiColor, odd YUV422, planar and unknown
+formats. `test_worker` covers host-side attach/detach, budget, malformed
+descriptors, fencing and retained mappings with a fake peer, plus a separate
+`LayoutClassBoard` regression that accepts RGB8, YUV422, Mono10p, Mono16
+endianness, legacy `0x0110002A`, unaligned packed and odd BiColor descriptors
+while rejecting planar metadata and recovering on the next valid frame.
+`test_worker_direct_shm` adds a minimal synthetic GenTL CTI
+(`Tests/SyntheticGenTL.cpp`) and exercises the production worker through the
+real host `Connection`: owned parity for M0-M7 with byte/metadata comparison,
+opt-in-off rejection, M8 incomplete, M9 direct Mono10 plus
+chunk/multipart/JPEG fallback, M10 oversized metadata fallback, six direct
+layout-class parity cases, five layout fallbacks, RGB8 capacity, five
+consecutive capacity errors and recovery, capacity counter reset after publish,
+and Close/reopen with a retained lease. The synthetic CTI is a test fixture,
+not evidence for physical camera behavior. `T4 M7` scan3d metadata remains
+limited by the synthetic XML; the in-process T2 suite covers scan3d
+source-value preservation.
+
+Physical acceptance used the actual Basler pylon CXP producer and
+`boA13440-19ccCST`/`iF-CXP12-P` pair. Owned and direct acquisitions reported
+the same `13376x9528` BayerRG8 geometry, stride, namespace, endianness, stream,
+BufferInfo values and nonzero timestamp/timestamp_ns; the direct descriptor
+carried `used_bytes=127446528`, while `metadata.payload` is empty by the v16
+contract. A temporary static `TestPattern=Testimage1` acquisition produced
+identical owned/direct bytes (same checksum) and was restored to the original
+`Off` value with readback verification. This is acquisition correctness
+evidence only, not a performance or default-enablement claim.
 
 ## Non-Goals
 

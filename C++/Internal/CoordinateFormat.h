@@ -50,6 +50,7 @@ inline CoordinateFormat coordinate_format(std::uint64_t format) noexcept
     case 0x01400128: return {1, 64, false, true, false};
     case 0x010a00d7: return {1, 10, false, false, true};
     case 0x010c00da: return {1, 12, false, false, true};
+    case 0x02180021: return {3, 8, true, false, false};
     case 0x021800b2: return {3, 8, false, false, false};
     case 0x021800b3: return {3, 8, true, false, false};
     case 0x023000b9: return {3, 16, false, false, false};

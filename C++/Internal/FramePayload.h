@@ -3,10 +3,13 @@
 #include "OneGenTypes.h"
 #include "OneGenError.h"
 #include "Internal/CoordinateFormat.h"
+#include "Internal/DirectFrameSink.h"
+#include "Internal/PixelLayout.h"
 #include <GenTL/GenTL.h>
 #include <cstring>
 #include <limits>
 #include <span>
+#include <string_view>
 
 namespace onegen {
 
@@ -111,26 +114,143 @@ struct FrameWriteResult {
   std::size_t required_bytes = 0;
 };
 
+/** Checked image region inside the original transport; only check_direct_image creates it. */
+class CheckedImageSpan {
+public:
+  std::size_t offset() const noexcept { return offset_; }
+  std::size_t bytes() const noexcept { return bytes_; }
+
+private:
+  friend struct LayoutCheck;
+  friend LayoutCheck check_direct_image(const Frame&, std::span<const std::uint8_t>) noexcept;
+  std::size_t offset_ = 0;
+  std::size_t bytes_ = 0;
+};
+
+enum class LayoutVerdict : std::uint8_t { Eligible, Fallback, Malformed };
+
+struct LayoutCheck {
+  LayoutVerdict verdict = LayoutVerdict::Fallback;
+  detail::FallbackReason reason = detail::FallbackReason::UnknownLayout;
+  CheckedImageSpan span;
+  /** Always points to static storage; safe after the caught exception is destroyed. */
+  const char* malformed_message = "";
+};
+
+inline const char* stableMalformedMessage(std::string_view message) noexcept
+{
+  if (message == "grab: null payload storage") return "grab: null payload storage";
+  if (message == "grab: image offset exceeds delivered data")
+    return "grab: image offset exceeds delivered data";
+  if (message == "grab: invalid single-image dimensions or stride")
+    return "grab: invalid single-image dimensions or stride";
+  if (message == "grab: planar image size exceeds the supported range")
+    return "grab: planar image size exceeds the supported range";
+  if (message == "grab: image exceeds delivered data") return "grab: image exceeds delivered data";
+  if (message == "grab: chunk exceeds delivered data") return "grab: chunk exceeds delivered data";
+  if (message == "grab: chunk overlaps image start") return "grab: chunk overlaps image start";
+  if (message == "grab: image overlaps chunk metadata")
+    return "grab: image overlaps chunk metadata";
+  if (message == "grab: image chunk is shorter than its declared layout")
+    return "grab: image chunk is shorter than its declared layout";
+  if (message == "grab: compressed image chunk boundary is unavailable")
+    return "grab: compressed image chunk boundary is unavailable";
+  return "grab: image span validation failed";
+}
+
+/** Classifies one pin-bounded image without allocating or touching caller storage. */
+inline LayoutCheck check_direct_image(const Frame& metadata,
+                                      std::span<const std::uint8_t> transport) noexcept
+{
+  const auto layout = pixel_layout(metadata.pixel_format);
+  const auto fallback = [](detail::FallbackReason reason) {
+    LayoutCheck result;
+    result.verdict = LayoutVerdict::Fallback;
+    result.reason = reason;
+    return result;
+  };
+  if (layout.packing == PixelPacking::Unknown) return fallback(detail::FallbackReason::UnknownLayout);
+  if (layout.packing == PixelPacking::Planar) return fallback(detail::FallbackReason::Planar);
+  if (layout.legacy_host_only) return fallback(detail::FallbackReason::UnknownLayout);
+  if (!layout.host_shared) return fallback(detail::FallbackReason::HostUnsupported);
+  if (layout.width_multiple > 1 && (metadata.width % layout.width_multiple))
+    return fallback(detail::FallbackReason::LayoutConstraint);
+  if (layout.packing == PixelPacking::PackedLsb) {
+    if (metadata.width > (std::numeric_limits<std::uint64_t>::max)() / layout.bits_per_pixel)
+      return fallback(detail::FallbackReason::GeometryUnrepresentable);
+    if ((static_cast<std::uint64_t>(metadata.width) * layout.bits_per_pixel) % 8U)
+      return fallback(detail::FallbackReason::PackedRowAlignment);
+  }
+
+  ImageSpan image;
+  try {
+    image = single_image_span(metadata, transport.data(), transport.size());
+  } catch (const Error& error) {
+    LayoutCheck result;
+    result.verdict = LayoutVerdict::Malformed;
+    result.malformed_message = stableMalformedMessage(error.what());
+    return result;
+  } catch (...) {
+    LayoutCheck result;
+    result.verdict = LayoutVerdict::Malformed;
+    result.malformed_message = "grab: image span validation failed";
+    return result;
+  }
+
+  const auto verdict = direct_representable(metadata.pixel_format, metadata.width, metadata.height,
+                                            metadata.stride, metadata.stride * metadata.height);
+  switch (verdict) {
+    case RepresentVerdict::Ok: break;
+    case RepresentVerdict::UnknownLayout:
+      return fallback(detail::FallbackReason::UnknownLayout);
+    case RepresentVerdict::Planar: return fallback(detail::FallbackReason::Planar);
+    case RepresentVerdict::HostUnsupported:
+      return fallback(detail::FallbackReason::HostUnsupported);
+    case RepresentVerdict::GeometryUnrepresentable:
+      return fallback(detail::FallbackReason::GeometryUnrepresentable);
+    case RepresentVerdict::LayoutConstraint:
+      return fallback(detail::FallbackReason::LayoutConstraint);
+    case RepresentVerdict::PackedRowAlignment:
+      return fallback(detail::FallbackReason::PackedRowAlignment);
+  }
+  if (image.end < image.offset || image.end - image.offset != metadata.stride * metadata.height) {
+    LayoutCheck result;
+    result.verdict = LayoutVerdict::Malformed;
+    result.malformed_message = "grab: image extent does not match stride*height";
+    return result;
+  }
+  LayoutCheck result;
+  result.verdict = LayoutVerdict::Eligible;
+  result.reason = detail::FallbackReason::None;
+  result.span.offset_ = image.offset;
+  result.span.bytes_ = image.end - image.offset;
+  return result;
+}
+
+/** Copies the checked span after capacity validation; no layout work is repeated. */
+inline FrameWriteResult write_checked(const CheckedImageSpan& span,
+                                      std::span<const std::uint8_t> transport,
+                                      FrameDestination destination) noexcept
+{
+  if (destination.bytes.size() < span.bytes())
+    return {FrameWriteStatus::InsufficientCapacity, 0, span.bytes()};
+  if (span.bytes())
+    std::memcpy(destination.bytes.data(), transport.data() + span.offset(), span.bytes());
+  return {FrameWriteStatus::Written, span.bytes(), span.bytes()};
+}
+
 /** Bounded write of the single image into caller storage; one memcpy after all checks. */
 inline FrameWriteResult write_frame(const BorrowedFrameView& source, FrameDestination destination)
 {
   const auto& metadata = source.metadata();
-  const auto layout = coordinate_format(metadata.pixel_format);
-  const bool borrowable = metadata.payload_type == GenTL::PAYLOAD_TYPE_IMAGE
-      && metadata.parts.empty() && metadata.chunks.empty()
-      && !metadata.buffer_info.contains_chunk_data
-      && (metadata.pixel_format == 0x01080001 || metadata.pixel_format == 0x01080009)
-      && !layout.planar;
-  if (!borrowable) return {};
+  if (metadata.payload_type != GenTL::PAYLOAD_TYPE_IMAGE || !metadata.parts.empty()
+      || !metadata.chunks.empty() || metadata.buffer_info.contains_chunk_data)
+    return {};
   const auto transport = source.transport();
-  const auto span = single_image_span(metadata, transport.data(), transport.size());
-  if (metadata.stride < metadata.width)
-    throw Error("grab: stride is shorter than the image row");
-  const auto required = metadata.stride * metadata.height;
-  if (destination.bytes.size() < required)
-    return {FrameWriteStatus::InsufficientCapacity, 0, required};
-  std::memcpy(destination.bytes.data(), transport.data() + span.offset, required);
-  return {FrameWriteStatus::Written, required, required};
+  const auto check = check_direct_image(metadata, transport);
+  if (check.verdict == LayoutVerdict::Malformed) throw Error(check.malformed_message);
+  if (check.verdict != LayoutVerdict::Eligible) return {};
+  return write_checked(check.span, transport, destination);
 }
 
 } // namespace onegen

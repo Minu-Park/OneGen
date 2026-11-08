@@ -1,10 +1,12 @@
 #include "OneGenWorkerMessages.h"
 #include "OneGenParameterMessages.h"
 #include "WorkerException.h"
+#include "WorkerFramePool.h"
 
 #include "OneGen.h"
 #include "Internal/ConnectTiming.h"
 #include "Internal/FrameTrace.h"
+#include "Internal/PinnedAcquisition.h"
 #include "Internal/StageLog.h"
 
 #include <algorithm>
@@ -13,12 +15,14 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <exception>
 #include <iostream>
 #include <mutex>
 #include <queue>
 #include <map>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -95,7 +99,13 @@ struct CameraSession {
   bool frame_acked = false;
   bool stopping = false;
   std::uint64_t stream_generation = 1;
+  std::shared_ptr<onegen::worker::WorkerFramePool> direct_pool;
+  std::shared_ptr<onegen::worker::WorkerDirectSink> direct_sink;
   void stop() {
+    if (direct_sink) {
+      direct_sink->request_stop();
+      direct_sink->wake();
+    }
     { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
     std::exception_ptr error;
     try { if (camera) camera->stop(); } catch (...) { error = std::current_exception(); }
@@ -103,7 +113,12 @@ struct CameraSession {
     if (error) std::rethrow_exception(error);
   }
   ~CameraSession() {
-    try { stop(); if (camera) camera->close(); }
+    try {
+      stop();
+      if (camera) camera->close();
+      if (camera) onegen::detail::set_direct_frame_sink(*camera, {});
+      if (direct_sink) direct_sink->detach();
+    }
     catch (...) { onegen::stage_log_warning("worker session cleanup failed: %s", onegen::worker::currentExceptionMessage().c_str()); }
   }
 };
@@ -111,6 +126,23 @@ struct CameraSession {
 void sendFor(std::uint32_t session, Message message, SendTiming* timing = nullptr) {
   message.session = session;
   send(std::move(message), timing);
+}
+
+void sendDirectFrame(void*, const onegen::worker::SlotIdentity& identity,
+                     std::span<const std::byte> body) {
+  std::vector<std::byte> payload(body.begin(), body.end());
+  sendFor(identity.session,
+          {onegen::worker::Operation::FrameReady, 0, true, {}, std::move(payload), identity.session});
+}
+
+void sendDirectError(void*, std::uint32_t session, std::string_view message) {
+  sendFor(session,
+          {onegen::worker::Operation::Error, 0, false, std::string(message), {}, session});
+}
+
+bool directShmTestEnabled() {
+  const auto* value = std::getenv("ONEGEN_DIRECT_SHM_TEST");
+  return value && std::string_view(value) == "1";
 }
 
 int moduleIndex(onegen::Camera::Module module)
@@ -262,6 +294,17 @@ int main(int argc, char** argv)
         ack_ready.notify_all();
         continue;
       }
+      if (request.operation == Operation::SlotRelease) {
+        try {
+          Reader input(request.payload);
+          const auto release = onegen::worker::readSlotRelease(input);
+          if (channel.direct_sink) (void)channel.direct_sink->release(release);
+        } catch (...) {
+          onegen::stage_log_warning("worker slot release failed: session=%u detail=%s",
+              request.session, onegen::worker::currentExceptionMessage().c_str());
+        }
+        continue;
+      }
       Message response{request.operation, request.id};
       response.session = request.session;
       bool shutdown = false;
@@ -324,6 +367,7 @@ int main(int argc, char** argv)
             auto& opened = ensureCamera();
             if (opened.is_open()) opened.close();
             opened.set_error_callback([session = request.session](std::string_view error) {
+              if (error.rfind("direct-shm capacity failure", 0) == 0) return;
               sendFor(session, {Operation::Error, 0, false, std::string(error)});
             });
             onegen::DeviceInfo selected;
@@ -374,6 +418,8 @@ int main(int argc, char** argv)
                 onegen::trace_worker_frame(record);
               }
             });
+            if (channel.direct_sink)
+              onegen::detail::set_direct_frame_sink(opened, channel.direct_sink);
             timing.mark("callbacks-and-event-setup");
             break;
           }
@@ -381,6 +427,32 @@ int main(int argc, char** argv)
             abortGrab();
             if (camera) camera->close();
             system.release_idle_interfaces();
+            break;
+          case Operation::FramePoolAttach: {
+            if (!directShmTestEnabled())
+              throw std::runtime_error("direct shared-memory test mode is disabled");
+            const auto attach = onegen::worker::readFramePoolAttach(input);
+            if (channel.direct_pool || channel.direct_sink)
+              throw std::runtime_error("direct frame pool is already attached");
+            std::string error;
+            auto pool = onegen::worker::WorkerFramePool::attach(request.session, attach, error);
+            if (!pool) throw std::runtime_error(error);
+            auto sink = std::make_shared<onegen::worker::WorkerDirectSink>(
+                &sendDirectFrame, nullptr, &sendDirectError, nullptr);
+            if (!sink->attach(std::move(pool), error)) throw std::runtime_error(error);
+            channel.direct_pool = sink->pool();
+            channel.direct_sink = std::move(sink);
+            if (camera)
+              onegen::detail::set_direct_frame_sink(*camera, channel.direct_sink);
+            break;
+          }
+          case Operation::FramePoolDetach:
+            if (channel.direct_sink) {
+              channel.direct_sink->detach();
+              channel.direct_sink.reset();
+            }
+            channel.direct_pool.reset();
+            if (camera) onegen::detail::set_direct_frame_sink(*camera, {});
             break;
           case Operation::ListStreams:
             writeVector(output, ensureCamera().data_streams());
@@ -557,11 +629,17 @@ int main(int argc, char** argv)
             });
             continue;
           }
-          case Operation::StartLive:
+          case Operation::StartLive: {
             abortGrab();
             { std::lock_guard lock(ack_mutex); stopping = false; }
-            ensureCamera().live();
+            auto& target = ensureCamera();
+            if (channel.direct_sink) {
+              onegen::detail::set_direct_frame_sink(target, channel.direct_sink);
+              channel.direct_sink->resume();
+            }
+            target.live();
             break;
+          }
           case Operation::StopLive:
             { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
             abortGrab();

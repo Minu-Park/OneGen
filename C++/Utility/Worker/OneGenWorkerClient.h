@@ -33,6 +33,8 @@ public:
   SharedFrameLease(const SharedFrameLease&) = delete;
   SharedFrameLease& operator=(const SharedFrameLease&) = delete;
   [[nodiscard]] const FrameDescriptor& descriptor() const noexcept { return descriptor_; }
+  /** @brief Complete owned metadata; pixel bytes remain in the shared slot. */
+  [[nodiscard]] const Frame& metadata() const noexcept { return metadata_; }
   [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept { return bytes_; }
   /** @brief Registers an in-flight callback; false once the pool was detached. */
   [[nodiscard]] bool beginDelivery() const noexcept;
@@ -42,11 +44,12 @@ public:
 private:
   friend class Connection;
   SharedFrameLease(std::shared_ptr<const void> region, std::span<const std::uint8_t> bytes,
-                   FrameDescriptor descriptor, std::shared_ptr<ReleaseMailbox> mailbox,
+                   SlotIdentity identity, Frame metadata, std::shared_ptr<ReleaseMailbox> mailbox,
                    std::shared_ptr<PoolValidity> validity,
                    std::shared_ptr<PoolBudgetReservation> reservation);
   std::shared_ptr<const void> region_;
   std::span<const std::uint8_t> bytes_;
+  Frame metadata_;
   FrameDescriptor descriptor_;
   std::shared_ptr<ReleaseMailbox> mailbox_;
   std::shared_ptr<PoolValidity> validity_;

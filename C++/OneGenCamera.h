@@ -12,6 +12,12 @@
 namespace onegen {
 
 class OneGen;
+class Camera;
+
+namespace detail {
+class DirectFrameSink;
+void set_direct_frame_sink(Camera& camera, std::shared_ptr<DirectFrameSink> sink);
+}  // namespace detail
 
 class Camera {
 public:
@@ -58,6 +64,7 @@ public:
 private:
   void open_impl(std::string_view query, std::string_view producer, std::string_view interface_id);
   friend class OneGen;
+  friend void detail::set_direct_frame_sink(Camera&, std::shared_ptr<detail::DirectFrameSink>);
   explicit Camera(OneGen* owner);
   struct Impl;
   std::unique_ptr<Impl> impl_;

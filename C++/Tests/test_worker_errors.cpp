@@ -75,6 +75,28 @@ int main(int argc, char** argv) {
     rejectedProcess(peer, {"--inactive-producer", peer, argv[3]}, "attempt=1 alive=1 inactive=0 observed=request unexpectedly succeeded");
     rejectedProcess(QString::fromLocal8Bit(argv[2]), {}, "worker fatal error:");
 
+    {
+      QProcess worker;
+      worker.start(QString::fromLocal8Bit(argv[2]), {"--cti", QString::fromLocal8Bit(argv[3])});
+      require(worker.waitForStarted(5000), "worker did not start for the v15 envelope check");
+      auto body = onegen::worker::encode(
+          {onegen::worker::Operation::Probe, 1, true, {}, {}, 0});
+      body.front() = std::byte(15);
+      const auto header = onegen::worker::frameSize(static_cast<std::uint32_t>(body.size()));
+      worker.write(reinterpret_cast<const char*>(header.data()), header.size());
+      worker.write(reinterpret_cast<const char*>(body.data()), body.size());
+      worker.closeWriteChannel();
+      require(worker.waitForFinished(5000), "worker did not reject the v15 envelope");
+      const auto diagnostic = worker.readAllStandardError();
+      require(worker.exitStatus() == QProcess::NormalExit && worker.exitCode() == 1,
+              "v15 envelope did not produce a normal fatal exit: " + diagnostic.toStdString());
+      require(diagnostic.contains("worker fatal error:")
+                  && diagnostic.contains("Unsupported OneGen worker protocol version"),
+              "v15 envelope diagnostic missing: " + diagnostic.toStdString());
+      require(worker.readAllStandardOutput().isEmpty(),
+              "v15 envelope rejection polluted protocol stdout");
+    }
+
     const auto previous = qInstallMessageHandler(capture);
     try {
       for (const auto name : {"FatalDiagnostics.cti", "MalformedDiagnostics.cti"}) {

@@ -4,6 +4,7 @@
 #include "WorkerLogForwarder.h"
 #include "WorkerException.h"
 #include "Internal/FrameTrace.h"
+#include "Internal/PixelLayout.h"
 #include "Internal/SharedMemoryRegion.h"
 
 #include <QDir>
@@ -178,107 +179,36 @@ struct FramePoolState {
 namespace {
 
 /** @brief Enqueues a release for a validated slot identity without creating a consumer lease. */
-void releaseSharedSlot(const std::shared_ptr<FramePoolState>& pool, const FrameDescriptor& descriptor)
+void releaseSharedSlot(const std::shared_ptr<FramePoolState>& pool, const SlotIdentity& identity)
 {
   if (!pool->mailbox || (pool->validity && pool->validity->detached.load())) return;
   std::lock_guard lock(pool->mailbox->mutex);
   if (pool->mailbox->closed) return;
   try {
     Writer out;
-    write(out, SlotRelease{descriptor.epoch, descriptor.token, descriptor.slot,
-                          descriptor.generation});
-    Message release{Operation::SlotRelease, 0, true, {}, out.take(), descriptor.session};
+    write(out, SlotRelease{identity.epoch, identity.token, identity.slot, identity.generation});
+    Message release{Operation::SlotRelease, 0, true, {}, out.take(), identity.session};
     pool->mailbox->messages.push(std::move(release));
   } catch (...) {
   }
 }
 
-/** @brief Returns the PFNC storage bits per pixel for formats the shared image path supports. */
-bool sharedImageBitsPerPixel(const std::uint64_t format, std::uint32_t& bits, bool& ycbcr) noexcept
-{
-  ycbcr = format == 0x0210001f || format == 0x02100032;
-  switch (static_cast<std::uint32_t>(format)) {
-    case 0x01080001:
-    case 0x01080008:
-    case 0x01080009:
-    case 0x0108000a:
-    case 0x0108000b:
-    case 0x01100003:
-    case 0x01100005:
-    case 0x01100007:
-    case 0x01100025:
-    case 0x0110000c:
-    case 0x0110000d:
-    case 0x0110000e:
-    case 0x0110000f:
-    case 0x01100010:
-    case 0x01100011:
-    case 0x01100012:
-    case 0x01100013:
-    case 0x0110002a:
-    case 0x0110002b:
-    case 0x0110002c:
-    case 0x0110002d:
-    case 0x0110002e:
-    case 0x0110002f:
-    case 0x01100030:
-    case 0x01100031:
-    case 0x0210001f:
-    case 0x02100032:
-    case 0x010a0046:
-    case 0x010c0047:
-    case 0x010a0052:
-    case 0x010a0054:
-    case 0x010a0056:
-    case 0x010a0058:
-    case 0x010c0053:
-    case 0x010c0055:
-    case 0x010c0057:
-    case 0x010c0059:
-    case 0x021000a5:
-    case 0x021000a6:
-    case 0x021400a8:
-    case 0x021400aa:
-    case 0x022000a7:
-    case 0x022000a9:
-    case 0x021800ac:
-    case 0x021800ae:
-    case 0x022000ab:
-    case 0x022000ad:
-    case 0x02180014:
-    case 0x02180015:
-    case 0x02200016:
-    case 0x02200017:
-    case 0x02300018:
-    case 0x02300019:
-    case 0x0230001a:
-    case 0x0230001b:
-    case 0x02300033:
-      // PFNC bits 16-23 carry the stored size per pixel, including component packing.
-      bits = static_cast<std::uint32_t>((format >> 16U) & 0xffU);
-      return bits != 0;
-    default:
-      return false;
-  }
-}
-
 /** @brief Checks single-image metadata that must be valid before any consumer sees the slot. */
-bool sharedMetadataValid(const FrameDescriptor& descriptor)
+bool sharedMetadataValid(const SlotIdentity& identity, const Frame& metadata,
+                         std::uint64_t slot_bytes)
 {
-  // Shared descriptors cover uncompressed single images only. GenTL IMAGE is 1;
+  // Shared frames cover uncompressed single images only. GenTL IMAGE is 1;
   // the fake peer uses 0 for its test image. Other payload types keep the owned path.
-  if (descriptor.payload_type != 0 && descriptor.payload_type != 1) return false;
-  if (!descriptor.width || !descriptor.height || !descriptor.stride) return false;
-  if (descriptor.stride > descriptor.used_bytes) return false;
-  if (descriptor.height > descriptor.used_bytes / descriptor.stride) return false;
-  if (descriptor.stream_id.size() > 4096) return false;
-  std::uint32_t bits = 0;
-  bool ycbcr = false;
-  if (!sharedImageBitsPerPixel(descriptor.pixel_format, bits, ycbcr)) return false;
-  if (ycbcr && (descriptor.width % 2U)) return false;
-  if (descriptor.width > (std::numeric_limits<std::uint64_t>::max)() / bits) return false;
-  const auto row_bytes = (static_cast<std::uint64_t>(descriptor.width) * bits + 7U) / 8U;
-  return row_bytes != 0 && descriptor.stride >= row_bytes;
+  if (metadata.payload_type != 0 && metadata.payload_type != 1) return false;
+  if (!metadata.width || !metadata.height || !metadata.stride) return false;
+  if (metadata.buffer_info.incomplete || metadata.buffer_info.contains_chunk_data) return false;
+  if (!identity.used_bytes || identity.used_bytes > slot_bytes) return false;
+  if (metadata.stride > identity.used_bytes / metadata.height) return false;
+  if (metadata.stride * metadata.height != identity.used_bytes) return false;
+  if (metadata.stream_id.size() > 4096) return false;
+  return host_shared_representable(metadata.pixel_format, metadata.width, metadata.height,
+                                   metadata.stride, identity.used_bytes)
+      == RepresentVerdict::Ok;
 }
 
 /** @brief Reserves pool bytes against the per-session three-slot budget. */
@@ -306,12 +236,12 @@ std::shared_ptr<PoolBudgetReservation> reservePoolBytes(
 } // namespace
 
 SharedFrameLease::SharedFrameLease(std::shared_ptr<const void> region,
-    std::span<const std::uint8_t> bytes, FrameDescriptor descriptor,
+    std::span<const std::uint8_t> bytes, SlotIdentity identity, Frame metadata,
     std::shared_ptr<ReleaseMailbox> mailbox, std::shared_ptr<PoolValidity> validity,
     std::shared_ptr<PoolBudgetReservation> reservation)
-    : region_(std::move(region)), bytes_(bytes), descriptor_(std::move(descriptor)),
-      mailbox_(std::move(mailbox)), validity_(std::move(validity)),
-      reservation_(std::move(reservation))
+    : region_(std::move(region)), bytes_(bytes), metadata_(std::move(metadata)),
+      descriptor_(describeFrame(identity, metadata_)), mailbox_(std::move(mailbox)),
+      validity_(std::move(validity)), reservation_(std::move(reservation))
 {
 }
 
@@ -651,7 +581,9 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
             impl_->cv.notify_all();
           } else if (message.operation == Operation::FrameReady) {
             Reader reader(message.payload);
-            auto descriptor = readFrameDescriptor(reader);
+            auto ready = readFrameReady(reader);
+            auto& identity = ready.identity;
+            auto& metadata = ready.metadata;
             std::shared_ptr<FramePoolState> pool;
             {
               std::lock_guard lock(impl_->mutex);
@@ -666,65 +598,64 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
               continue;
             }
             if (pool->validity->detached.load()) continue;
-            if (descriptor.session != message.session) {
+            if (identity.session != message.session) {
               qWarning().noquote() << QStringLiteral(
-                  "[GenICam] shared frame rejected: session=%1 descriptor-session=%2")
-                  .arg(message.session).arg(descriptor.session);
+                  "[GenICam] shared frame rejected: session=%1 identity-session=%2")
+                  .arg(message.session).arg(identity.session);
               continue;
             }
-            if (descriptor.epoch != pool->epoch || descriptor.token != pool->token
-                || descriptor.slot >= pool->slot_count) {
+            if (identity.epoch != pool->epoch || identity.token != pool->token
+                || identity.slot >= pool->slot_count) {
               qWarning().noquote() << QStringLiteral(
                   "[GenICam] shared frame rejected: session=%1 frame=%2 slot=%3 reason=stale pool identity")
-                  .arg(message.session).arg(static_cast<qulonglong>(descriptor.frame_id))
-                  .arg(descriptor.slot);
+                  .arg(message.session).arg(static_cast<qulonglong>(metadata.frame_id))
+                  .arg(identity.slot);
               continue;
             }
             bool stale = false;
             {
               std::lock_guard pool_lock(pool->mutex);
-              stale = descriptor.generation <= pool->last_generation[descriptor.slot];
+              stale = identity.generation <= pool->last_generation[identity.slot];
             }
             if (stale) {
               qDebug().noquote() << QStringLiteral(
                   "[GenICam] shared frame ignored: session=%1 frame=%2 slot=%3 stale generation=%4")
-                  .arg(message.session).arg(static_cast<qulonglong>(descriptor.frame_id))
-                  .arg(descriptor.slot).arg(static_cast<qulonglong>(descriptor.generation));
+                  .arg(message.session).arg(static_cast<qulonglong>(metadata.frame_id))
+                  .arg(identity.slot).arg(static_cast<qulonglong>(identity.generation));
               continue;
             }
-            if (!descriptor.used_bytes || descriptor.used_bytes > pool->slot_bytes
-                || !descriptor.generation || !sharedMetadataValid(descriptor)) {
+            if (!identity.generation || !sharedMetadataValid(identity, metadata, pool->slot_bytes)) {
               qWarning().noquote() << QStringLiteral(
-                  "[GenICam] shared frame rejected: session=%1 frame=%2 slot=%3 bytes=%4 reason=invalid descriptor")
-                  .arg(message.session).arg(static_cast<qulonglong>(descriptor.frame_id))
-                  .arg(descriptor.slot).arg(static_cast<qulonglong>(descriptor.used_bytes));
-              releaseSharedSlot(pool, descriptor);
+                  "[GenICam] shared frame rejected: session=%1 frame=%2 slot=%3 bytes=%4 reason=invalid metadata")
+                  .arg(message.session).arg(static_cast<qulonglong>(metadata.frame_id))
+                  .arg(identity.slot).arg(static_cast<qulonglong>(identity.used_bytes));
+              releaseSharedSlot(pool, identity);
               continue;
             }
             bool invalid = false;
             {
               std::lock_guard pool_lock(pool->mutex);
-              pool->last_generation[descriptor.slot] = descriptor.generation;
-              if (descriptor.sequence <= pool->last_sequence) invalid = true;
-              else pool->last_sequence = descriptor.sequence;
+              pool->last_generation[identity.slot] = identity.generation;
+              if (identity.sequence <= pool->last_sequence) invalid = true;
+              else pool->last_sequence = identity.sequence;
             }
             if (invalid) {
               qWarning().noquote() << QStringLiteral(
                   "[GenICam] shared frame rejected: session=%1 frame=%2 sequence=%3 reason=stale sequence")
-                  .arg(message.session).arg(static_cast<qulonglong>(descriptor.frame_id))
-                  .arg(static_cast<qulonglong>(descriptor.sequence));
-              releaseSharedSlot(pool, descriptor);
+                  .arg(message.session).arg(static_cast<qulonglong>(metadata.frame_id))
+                  .arg(static_cast<qulonglong>(identity.sequence));
+              releaseSharedSlot(pool, identity);
               continue;
             }
-            const auto offset = static_cast<std::size_t>(descriptor.slot)
+            const auto offset = static_cast<std::size_t>(identity.slot)
                 * static_cast<std::size_t>(pool->slot_bytes);
             const auto bytes = std::span<const std::uint8_t>(
-                pool->region->data() + offset, static_cast<std::size_t>(descriptor.used_bytes));
+                pool->region->data() + offset, static_cast<std::size_t>(identity.used_bytes));
             auto lease = std::shared_ptr<SharedFrameLease>(
-                new SharedFrameLease(pool->region, bytes, descriptor, pool->mailbox,
-                                     pool->validity, pool->reservation));
+                new SharedFrameLease(pool->region, bytes, identity, std::move(metadata),
+                                     pool->mailbox, pool->validity, pool->reservation));
             SharedFrame shared;
-            shared.descriptor = std::move(descriptor);
+            shared.descriptor = lease->descriptor();
             shared.lease = std::move(lease);
             {
               std::lock_guard lock(impl_->mutex);

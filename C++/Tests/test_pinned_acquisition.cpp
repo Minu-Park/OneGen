@@ -16,6 +16,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -24,7 +25,7 @@ namespace {
 
 constexpr std::uint64_t mono8 = 0x01080001;
 constexpr std::uint64_t bayer_rg8 = 0x01080009;
-constexpr std::uint64_t mono16 = 0x01100004;
+constexpr std::uint64_t undefined_pfnc = 0x01100004;
 constexpr std::uint64_t planar_abc32f = 0x026000c1;
 constexpr std::uint8_t guard_byte = 0xA5;
 constexpr std::uint8_t queued_byte = 0xDD;
@@ -712,7 +713,7 @@ void unsupported_layouts() {
     assert(owned.chunks.size() == owned_chunks);
   };
 
-  expect_unsupported(make_buffer(4, 2, 0, mono16), 16, 0, 0);
+  expect_unsupported(make_buffer(4, 2, 0, undefined_pfnc), 16, 0, 0);
   expect_unsupported(make_buffer(2, 2, 0, planar_abc32f), 48, 0, 0);
 
   {
@@ -937,7 +938,7 @@ void write_frame_pure() {
     assert(std::all_of(backing.begin(), backing.end(),
                        [](std::uint8_t b) { return b == guard_byte; }));
   };
-  unsupported(pure_frame(mono16, 3, 2, 6, 0));
+  unsupported(pure_frame(undefined_pfnc, 3, 2, 6, 0));
   unsupported(pure_frame(planar_abc32f, 2, 2, 8, 0));
   {
     auto metadata = pure_frame(mono8, 3, 2, 4, 0);
@@ -964,6 +965,7 @@ void write_frame_pure() {
     metadata.parts.emplace_back();
     unsupported(metadata);
   }
+  unsupported(pure_frame(mono8, 8, 1, 4, 0));
 
   const auto insufficient = [&](std::span<std::uint8_t> destination, std::size_t required,
                                 std::vector<std::uint8_t>& backing) {
@@ -1005,12 +1007,461 @@ void write_frame_pure() {
   malformed(pure_frame(mono8, 4, 0, 4, 0));
   malformed(pure_frame(mono8, 4, 2, 0, 0));
   malformed(pure_frame(mono8, 4, 3, (std::numeric_limits<std::size_t>::max)() / 2, 0));
-  malformed(pure_frame(mono8, 8, 1, 4, 0));
   malformed(pure_frame(mono8, 4, 2, 4, transport.size() + 1));
   malformed(pure_frame(mono8, 8, 3, 32, 0));
 }
 
+void direct_malformed_message_stability() {
+  std::vector<std::uint8_t> transport(64);
+  fill_transport(transport);
+  auto metadata = pure_frame(mono8, 4, 2, 4, transport.size() + 1);
+  auto check = onegen::check_direct_image(metadata, transport);
+  assert(check.verdict == onegen::LayoutVerdict::Malformed);
+  const std::string expected = "grab: image offset exceeds delivered data";
+  std::vector<std::string> churn;
+  churn.reserve(512);
+  for (int index = 0; index < 512; ++index)
+    churn.emplace_back(expected.size(), static_cast<char>('A' + index % 26));
+  assert(std::string_view(check.malformed_message) == expected);
+}
+
+bool same_frame(const onegen::Frame& left, const onegen::Frame& right) {
+  if (!same_metadata(left, right) || left.payload != right.payload
+      || left.parts.size() != right.parts.size() || left.chunks.size() != right.chunks.size())
+    return false;
+  for (std::size_t index = 0; index < left.parts.size(); ++index) {
+    const auto& a = left.parts[index];
+    const auto& b = right.parts[index];
+    if (a.payload != b.payload || a.width != b.width || a.height != b.height
+        || a.stride != b.stride || a.data_type != b.data_type || a.data_format != b.data_format
+        || a.format_namespace != b.format_namespace || a.source_id != b.source_id
+        || a.region_id != b.region_id || a.purpose_id != b.purpose_id)
+      return false;
+  }
+  for (std::size_t index = 0; index < left.chunks.size(); ++index)
+    if (left.chunks[index].id != right.chunks[index].id
+        || left.chunks[index].offset != right.chunks[index].offset
+        || left.chunks[index].payload != right.chunks[index].payload)
+      return false;
+  return true;
+}
+
+struct TestSink final : onegen::detail::DirectFrameSink {
+  onegen::detail::ReserveStatus reserve_status = onegen::detail::ReserveStatus::Reserved;
+  onegen::detail::FallbackReason gate = onegen::detail::FallbackReason::None;
+  bool throw_publish = false;
+  onegen::detail::DirectReservation reservation;
+  std::vector<std::string> log;
+  std::vector<std::string>* trace = nullptr;
+  onegen::Frame published;
+  std::size_t published_used = 0;
+  onegen::Frame fallback;
+  onegen::detail::FallbackReason fallback_reason = onegen::detail::FallbackReason::None;
+  onegen::detail::CancelCause cancel_cause = onegen::detail::CancelCause::Exception;
+  std::size_t cancel_count = 0;
+  std::size_t report_count = 0;
+  std::size_t reported_required = 0;
+  std::size_t reported_available = 0;
+
+  void mark(const char* value) {
+    log.push_back(value);
+    if (trace) trace->push_back(value);
+  }
+
+  onegen::detail::ReserveStatus reserve(onegen::detail::DirectReservation& out) override {
+    mark("reserve");
+    if (reserve_status != onegen::detail::ReserveStatus::Reserved) return reserve_status;
+    out = reservation;
+    return onegen::detail::ReserveStatus::Reserved;
+  }
+  void publish(const onegen::detail::DirectReservation&, const onegen::Frame& metadata,
+               std::size_t used_bytes) override {
+    mark("publish");
+    published = metadata;
+    published_used = used_bytes;
+    if (throw_publish) throw std::runtime_error("publish");
+  }
+  void cancel(const onegen::detail::DirectReservation&,
+              onegen::detail::CancelCause cause) noexcept override {
+    mark("cancel");
+    ++cancel_count;
+    cancel_cause = cause;
+  }
+  void note_fallback(onegen::detail::FallbackReason reason,
+                     const onegen::Frame& frame) noexcept override {
+    mark("note");
+    fallback_reason = reason;
+    fallback = frame;
+  }
+  onegen::detail::FallbackReason metadata_gate(const onegen::Frame&) const noexcept override {
+    return gate;
+  }
+  void report_capacity_failure(const onegen::Frame&, std::size_t required,
+                               std::size_t available) noexcept override {
+    mark("capacity");
+    ++report_count;
+    reported_required = required;
+    reported_available = available;
+  }
+  void wake() noexcept override { mark("wake"); }
+};
+
+// T16
+void direct_matches_owned() {
+  for (const auto format : {mono8, bayer_rg8}) {
+    Fixture fixture;
+    auto input = make_buffer(4, 3, 3, format, 16);
+    const auto transport = input.transport;
+    reset_fake(fixture, input);
+    const auto owned = onegen::detail::grab_owned(fixture.context, 100);
+    assert(fixture.state.queue_count == 1);
+    const auto required = owned.payload.size();
+    assert(required == 21);
+
+    reset_fake(fixture, input);
+    std::vector<std::uint8_t> backing(required + 32, guard_byte);
+    auto destination = std::span<std::uint8_t>(backing).subspan(16, required);
+    const auto direct =
+        onegen::detail::acquire_into_or_owned(fixture.context, 100, {destination});
+    assert(fixture.state.queue_count == 1);
+    assert(direct.status == onegen::detail::DirectStatus::SharedReady);
+    assert(direct.reason == onegen::detail::FallbackReason::None);
+    assert(direct.used_bytes == required && direct.required_bytes == required);
+    assert(direct.frame.payload.empty());
+    assert(same_metadata(owned, direct.frame));
+    assert(std::equal(owned.payload.begin(), owned.payload.end(), destination.begin()));
+    assert(all_guard(backing, 0, 16));
+    assert(all_guard(backing, 16 + required, backing.size()));
+    const std::vector<std::string> expected{"event", "queue"};
+    assert(fixture.state.log == expected);
+    (void)transport;
+  }
+}
+
+// T17
+void direct_fallbacks_match_owned() {
+  struct Case {
+    FakeBuffer input;
+    onegen::detail::FallbackReason reason;
+  };
+  std::vector<Case> cases;
+  cases.push_back({make_buffer(4, 2, 0, undefined_pfnc), onegen::detail::FallbackReason::UnknownLayout});
+  cases.push_back(
+      {make_buffer(2, 2, 0, planar_abc32f), onegen::detail::FallbackReason::Planar});
+  {
+    auto input = make_buffer(4, 2, 0, mono8);
+    input.parts.push_back({0, 8, 4, 2, 2, GenTL::PART_DATATYPE_2D_IMAGE, mono8, 0, 3, 4, 5, 0});
+    cases.push_back({std::move(input), onegen::detail::FallbackReason::MultiPart});
+  }
+  {
+    auto input = make_buffer(4, 2, 0, mono8);
+    input.contains_chunk_data = true;
+    input.chunks.push_back({17, 8, 2});
+    input.size_filled = 10;
+    input.capacity = 10;
+    input.data_size = 10;
+    input.transport.resize(10);
+    fill_transport(input.transport);
+    cases.push_back({std::move(input), onegen::detail::FallbackReason::ChunkData});
+  }
+  {
+    auto input = make_buffer(4, 2, 0, mono8);
+    input.payload_type = GenTL::PAYLOAD_TYPE_CHUNK_ONLY;
+    input.image_present = false;
+    cases.push_back({std::move(input), onegen::detail::FallbackReason::NonImagePayload});
+  }
+  {
+    auto input = make_buffer(4, 2, 0, mono8);
+    input.payload_type = GenTL::PAYLOAD_TYPE_JPEG;
+    cases.push_back({std::move(input), onegen::detail::FallbackReason::Jpeg});
+  }
+  {
+    auto input = make_buffer(4, 4, 0, mono8);
+    input.capacity = 16;
+    input.size_filled = 12;
+    input.data_size = 12;
+    input.transport.resize(12);
+    fill_transport(input.transport);
+    input.delivered_height = 3;
+    input.incomplete = true;
+    cases.push_back({std::move(input), onegen::detail::FallbackReason::Incomplete});
+  }
+
+  Fixture fixture;
+  for (const auto& test : cases) {
+    reset_fake(fixture, test.input);
+    const auto owned = onegen::detail::grab_owned(fixture.context, 100);
+    assert(fixture.state.queue_count == 1);
+
+    reset_fake(fixture, test.input);
+    std::vector<std::uint8_t> backing(128, guard_byte);
+    auto destination = std::span<std::uint8_t>(backing).subspan(16, 64);
+    const auto direct =
+        onegen::detail::acquire_into_or_owned(fixture.context, 100, {destination});
+    assert(fixture.state.queue_count == 1);
+    assert(direct.status == onegen::detail::DirectStatus::OwnedFallback);
+    assert(direct.reason == test.reason);
+    assert(direct.used_bytes == 0 && direct.required_bytes == 0);
+    assert(same_frame(owned, direct.frame));
+    assert(std::all_of(backing.begin(), backing.end(),
+                       [](std::uint8_t b) { return b == guard_byte; }));
+  }
+}
+
+// T18
+void direct_capacity_keeps_guard() {
+  Fixture fixture;
+  auto input = make_buffer(4, 3, 0, mono8);
+  reset_fake(fixture, input);
+  const auto owned = onegen::detail::grab_owned(fixture.context, 100);
+  const auto required = owned.payload.size();
+  assert(required == 12);
+
+  reset_fake(fixture, input);
+  std::vector<std::uint8_t> backing(64, guard_byte);
+  auto destination = std::span<std::uint8_t>(backing).subspan(16, required - 1);
+  const auto direct = onegen::detail::acquire_into_or_owned(fixture.context, 100, {destination});
+  assert(fixture.state.queue_count == 1);
+  assert(direct.status == onegen::detail::DirectStatus::CapacityFailure);
+  assert(direct.reason == onegen::detail::FallbackReason::None);
+  assert(direct.used_bytes == 0 && direct.required_bytes == required);
+  assert(direct.frame.payload.empty());
+  assert(std::all_of(backing.begin(), backing.end(),
+                     [](std::uint8_t b) { return b == guard_byte; }));
+  const std::vector<std::string> expected{"event", "queue"};
+  assert(fixture.state.log == expected);
+}
+
+// T19
+void direct_malformed_rejects() {
+  Fixture fixture;
+  const auto rejected = [&](const FakeBuffer& input) {
+    reset_fake(fixture, input);
+    std::vector<std::uint8_t> backing(64, guard_byte);
+    auto destination = std::span<std::uint8_t>(backing).subspan(16, 32);
+    bool threw = false;
+    try {
+      onegen::detail::acquire_into_or_owned(fixture.context, 100, {destination});
+    } catch (const onegen::Error&) {
+      threw = true;
+    }
+    assert(threw);
+    assert(fixture.state.queue_count == 1);
+    assert(std::all_of(backing.begin(), backing.end(),
+                       [](std::uint8_t b) { return b == guard_byte; }));
+  };
+
+  rejected(make_buffer(0, 3, 0, mono8));
+  rejected(make_buffer(4, 0, 0, mono8));
+  {
+    auto input = make_buffer(4, 3, 0, mono8);
+    input.image_offset = input.size_filled + 1;
+    rejected(input);
+  }
+  {
+    auto input = make_buffer(4, 3, 0, mono8);
+    input.size_filled -= 1;
+    input.data_size = input.size_filled;
+    input.capacity = input.size_filled;
+    input.transport.resize(input.size_filled);
+    rejected(input);
+  }
+  {
+    auto input = make_buffer(4, 3, 0, mono8);
+    input.capacity -= 1;
+    rejected(input);
+  }
+  {
+    auto input = make_buffer(4, 3, 0, mono8);
+    input.null_base = true;
+    rejected(input);
+  }
+}
+
+// T20
+void direct_run_step_order_and_cancel() {
+  Fixture fixture;
+  const auto input = make_buffer(4, 3, 0, mono8);
+  reset_fake(fixture, input);
+  const auto owned = onegen::detail::grab_owned(fixture.context, 100);
+  const auto required = owned.payload.size();
+
+  {
+    reset_fake(fixture, input);
+    TestSink sink;
+    sink.trace = &fixture.state.log;
+    std::vector<std::uint8_t> backing(required + 32, guard_byte);
+    auto destination = std::span<std::uint8_t>(backing).subspan(16, required);
+    sink.reservation.destination = destination;
+    onegen::Frame fallback;
+    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    assert(step == onegen::detail::DirectStep::Published);
+    assert(fixture.state.queue_count == 1);
+    assert((fixture.state.log == std::vector<std::string>{"reserve", "event", "queue", "publish"}));
+    assert(sink.cancel_count == 0);
+    assert(sink.published_used == required);
+    assert(same_metadata(owned, sink.published));
+    assert(std::equal(owned.payload.begin(), owned.payload.end(), destination.begin()));
+    assert(all_guard(backing, 0, 16));
+    assert(all_guard(backing, 16 + required, backing.size()));
+  }
+
+  {
+    reset_fake(fixture, input);
+    TestSink sink;
+    sink.trace = &fixture.state.log;
+    sink.gate = onegen::detail::FallbackReason::MetadataTooLarge;
+    std::vector<std::uint8_t> backing(required + 32, guard_byte);
+    auto destination = std::span<std::uint8_t>(backing).subspan(16, required);
+    sink.reservation.destination = destination;
+    onegen::Frame fallback;
+    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    assert(step == onegen::detail::DirectStep::Fallback);
+    assert(fixture.state.queue_count == 1);
+    assert((fixture.state.log
+            == std::vector<std::string>{"reserve", "event", "queue", "cancel", "note"}));
+    assert(sink.cancel_count == 1
+           && sink.cancel_cause == onegen::detail::CancelCause::Fallback);
+    assert(sink.fallback_reason == onegen::detail::FallbackReason::MetadataTooLarge);
+    assert(same_frame(owned, fallback));
+    assert(std::all_of(backing.begin(), backing.end(),
+                       [](std::uint8_t b) { return b == guard_byte; }));
+  }
+
+  {
+    reset_fake(fixture, input);
+    TestSink sink;
+    sink.trace = &fixture.state.log;
+    std::vector<std::uint8_t> backing(64, guard_byte);
+    auto destination = std::span<std::uint8_t>(backing).subspan(16, required - 1);
+    sink.reservation.destination = destination;
+    onegen::Frame fallback;
+    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    assert(step == onegen::detail::DirectStep::CapacityFailed);
+    assert(fixture.state.queue_count == 1);
+    assert((fixture.state.log
+            == std::vector<std::string>{"reserve", "event", "queue", "cancel", "capacity"}));
+    assert(sink.cancel_count == 1
+           && sink.cancel_cause == onegen::detail::CancelCause::Capacity);
+    assert(sink.report_count == 1 && sink.reported_required == required
+           && sink.reported_available == required - 1);
+    assert(std::all_of(backing.begin(), backing.end(),
+                       [](std::uint8_t b) { return b == guard_byte; }));
+  }
+
+  {
+    reset_fake(fixture, input);
+    TestSink sink;
+    sink.trace = &fixture.state.log;
+    sink.reserve_status = onegen::detail::ReserveStatus::NoPool;
+    onegen::Frame fallback;
+    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    assert(step == onegen::detail::DirectStep::NoPool);
+    assert((fixture.state.log == std::vector<std::string>{"reserve"}));
+    assert(fixture.state.queue_count == 0);
+  }
+  {
+    reset_fake(fixture, input);
+    TestSink sink;
+    sink.trace = &fixture.state.log;
+    sink.reserve_status = onegen::detail::ReserveStatus::Stopped;
+    onegen::Frame fallback;
+    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    assert(step == onegen::detail::DirectStep::Stopped);
+    assert((fixture.state.log == std::vector<std::string>{"reserve"}));
+    assert(fixture.state.queue_count == 0);
+  }
+
+  {
+    reset_fake(fixture, input);
+    TestSink sink;
+    sink.trace = &fixture.state.log;
+    std::vector<std::uint8_t> backing(required + 32, guard_byte);
+    auto destination = std::span<std::uint8_t>(backing).subspan(16, required);
+    sink.reservation.destination = destination;
+    sink.throw_publish = true;
+    onegen::Frame fallback;
+    bool threw = false;
+    try {
+      onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    assert(threw);
+    assert(fixture.state.queue_count == 1);
+    assert((fixture.state.log == std::vector<std::string>{"reserve", "event", "queue", "publish"}));
+    assert(sink.cancel_count == 0);
+  }
+
+  {
+    reset_fake(fixture, make_buffer(4, 0, 0, mono8));
+    TestSink sink;
+    sink.trace = &fixture.state.log;
+    std::vector<std::uint8_t> backing(64, guard_byte);
+    sink.reservation.destination = std::span<std::uint8_t>(backing).subspan(16, 32);
+    onegen::Frame fallback;
+    bool threw = false;
+    try {
+      onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    } catch (const onegen::Error&) {
+      threw = true;
+    }
+    assert(threw);
+    assert(fixture.state.queue_count == 1);
+    assert((fixture.state.log == std::vector<std::string>{"reserve", "event", "queue", "cancel"}));
+    assert(sink.cancel_count == 1
+           && sink.cancel_cause == onegen::detail::CancelCause::Exception);
+  }
+}
+
+// T21
+void direct_no_intermediate_allocation() {
+  Fixture fixture;
+  auto input = make_buffer(1024, 1024, 0, mono8);
+  const auto image_bytes = input.transport.size();
+  reset_fake(fixture, std::move(input));
+  std::vector<std::uint8_t> backing(image_bytes + 32, guard_byte);
+  auto destination = std::span<std::uint8_t>(backing).subspan(16, image_bytes);
+
+  g_largest_allocation.store(0, std::memory_order_relaxed);
+  g_track_allocations.store(true, std::memory_order_relaxed);
+  onegen::detail::DirectAcquisition result;
+  try {
+    result = onegen::detail::acquire_into_or_owned(fixture.context, 100, {destination});
+  } catch (...) {
+    g_track_allocations.store(false, std::memory_order_relaxed);
+    throw;
+  }
+  g_track_allocations.store(false, std::memory_order_relaxed);
+  assert(result.status == onegen::detail::DirectStatus::SharedReady);
+  assert(result.used_bytes == image_bytes && result.required_bytes == image_bytes);
+  assert(g_largest_allocation.load(std::memory_order_relaxed) < image_bytes);
+  assert(fixture.state.queue_count == 1);
+}
+
+// T22
+void direct_timeout_cancels_once() {
+  Fixture fixture;
+  reset_fake(fixture, make_buffer(4, 3, 0, mono8));
+  fixture.state.timeout = true;
+  TestSink sink;
+  std::vector<std::uint8_t> backing(64, guard_byte);
+  sink.reservation.destination = std::span<std::uint8_t>(backing).subspan(16, 32);
+  onegen::Frame fallback;
+  bool threw = false;
+  try {
+    onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+  } catch (const onegen::Error& error) {
+    threw = std::string(error.what()) == "grab timeout";
+  }
+  assert(threw);
+  assert(fixture.state.queue_count == 0);
+  assert(sink.cancel_count == 1
+         && sink.cancel_cause == onegen::detail::CancelCause::Timeout);
+}
+
 }  // namespace
+
 
 void* operator new(std::size_t size) {
   record_allocation(size);
@@ -1051,11 +1502,19 @@ int main() {
   no_intermediate_image_allocation();
   capacity_rejections();
   malformed_rejections();
+  direct_malformed_message_stability();
   unsupported_layouts();
   requeue_failure_not_retried();
   no_buffer_no_requeue();
   stop_while_pinned();
   incomplete_buffer_parity();
   write_frame_pure();
+  direct_matches_owned();
+  direct_fallbacks_match_owned();
+  direct_capacity_keeps_guard();
+  direct_malformed_rejects();
+  direct_run_step_order_and_cancel();
+  direct_no_intermediate_allocation();
+  direct_timeout_cancels_once();
   return 0;
 }
