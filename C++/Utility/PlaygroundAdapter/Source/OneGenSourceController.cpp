@@ -10,11 +10,51 @@
 #include <QString>
 #include <QStringList>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <exception>
+#include <limits>
+#include <optional>
 #include <QtConcurrent>
 #include <QThread>
 #include <QUuid>
+
+namespace {
+
+bool directShmEnabled()
+{
+  const auto* value = std::getenv("ONEGEN_DIRECT_SHM_TEST");
+  return value && std::string_view(value) == "1";
+}
+
+std::optional<std::uint64_t> directSlotBytes(onegen::worker::Lease& lease, std::string& error)
+{
+  try {
+    const auto format = lease.read_node(0, "PixelFormat");
+    if (format.enum_value != "BayerRG8" && format.enum_value != "Mono8") {
+      error = "PixelFormat " + format.enum_value + " is not a direct-SHM image format.";
+      return std::nullopt;
+    }
+    const auto payload = lease.read_node(0, "PayloadSize");
+    if (payload.int_value > 0) return static_cast<std::uint64_t>(payload.int_value);
+    const auto width = lease.read_node(0, "Width").int_value;
+    const auto height = lease.read_node(0, "Height").int_value;
+    if (width <= 0 || height <= 0
+        || static_cast<std::uint64_t>(width)
+            > (std::numeric_limits<std::uint64_t>::max)() / static_cast<std::uint64_t>(height)) {
+      error = "Width/Height are unavailable for direct-SHM.";
+      return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
+  } catch (const std::exception& exception) {
+    error = exception.what();
+  } catch (...) {
+    error = "unknown feature read failure";
+  }
+  return std::nullopt;
+}
+
+} // namespace
 
 OneGenSourceController::OneGenSourceController(QObject* parent)
     : AbstractSourceController(parent) {}
@@ -151,7 +191,9 @@ void OneGenSourceController::setLease(onegen::worker::Lease* lease)
   if (old_gate) old_gate->beginShutdown();
   if (lease_) {
     lease_->set_frame_callback({});
+    lease_->set_shared_frame_callback({});
     lease_->set_error_callback({});
+    lease_->destroy_frame_pool();
   }
   lock.unlock();
   if (old_gate) old_gate->waitForDrain();
@@ -218,6 +260,34 @@ void OneGenSourceController::bindLease()
                .arg(QString::fromStdString(model), QString::fromStdString(serial),
                     QString::fromLocal8Bit(error.data(), static_cast<qsizetype>(error.size())));
   });
+
+  if (!directShmEnabled()) return;
+  std::string directError;
+  const auto slotBytes = directSlotBytes(*lease_, directError);
+  if (!slotBytes) {
+    qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM disabled: %1")
+        .arg(QString::fromStdString(directError));
+    return;
+  }
+  if (!lease_->create_frame_pool(3, *slotBytes, directError)) {
+    qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM pool unavailable: %1")
+        .arg(QString::fromStdString(directError));
+    return;
+  }
+  try {
+    lease_->set_shared_frame_callback(
+        [this, sourceName, token](const onegen::worker::SharedFrame& source) {
+          GraphicsFrameCallbackGate::Lease callback(token);
+          if (callback) deliverShared(source, sourceName);
+        });
+    qInfo().noquote() << QStringLiteral(
+        "[GenICam] direct-SHM enabled: camera=%1 slots=3 slotBytes=%2")
+        .arg(QString::fromStdString(sourceName)).arg(*slotBytes);
+  } catch (const std::exception& error) {
+    lease_->destroy_frame_pool();
+    qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM callback unavailable: %1")
+        .arg(QString::fromLocal8Bit(error.what()));
+  }
 }
 
 void OneGenSourceController::start()
@@ -419,6 +489,58 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     qWarning() << "[GenICam] frame delivery failed:" << error.what();
   } catch (...) {
     qWarning() << "[GenICam] frame delivery failed with an unknown exception.";
+  }
+}
+
+void OneGenSourceController::deliverShared(
+    const onegen::worker::SharedFrame& shared, const std::string& sourceName)
+{
+  try {
+    if (!shared.lease) return;
+    const auto& source = shared.lease->metadata();
+    const auto bytes = shared.lease->bytes();
+    const auto sequence = sequence_.fetch_add(1, std::memory_order_relaxed);
+    const bool firstFrame = received_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
+    if (firstFrame) {
+      qInfo().noquote() << QStringLiteral(
+          "[GenICam] first direct frame received: camera=%1 frame=%2 bytes=%3")
+          .arg(QString::fromStdString(sourceName))
+          .arg(static_cast<qulonglong>(source.frame_id))
+          .arg(static_cast<qulonglong>(bytes.size()));
+    }
+    std::string rejectionReason;
+    auto payload = oneGenGraphicsFrame(
+        source, sequence, &rejectionReason, bytes, shared.lease);
+    if (!payload) {
+      rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      qWarning().noquote() << QStringLiteral(
+          "[GenICam] direct frame rejected: camera=%1 sequence=%2 frame=%3 reason=%4")
+          .arg(QString::fromStdString(sourceName))
+          .arg(static_cast<qulonglong>(sequence))
+          .arg(static_cast<qulonglong>(source.frame_id))
+          .arg(QString::fromStdString(rejectionReason));
+      return;
+    }
+    converted_frames_.fetch_add(1, std::memory_order_relaxed);
+    payload->metadata.sourceName = sourceName;
+    SessionFrame frame;
+    frame.payload = std::move(*payload);
+    frame.frameSeq = sequence;
+    FrameConsumer consumer;
+    {
+      std::lock_guard lock(mutex_);
+      consumer = consumer_;
+    }
+    if (!consumer) {
+      qWarning() << "[GenICam] direct frame converted but no presentation consumer is installed."
+                 << "sequence=" << sequence << "frameId=" << source.frame_id;
+      return;
+    }
+    consumer(std::move(frame), source.stream_index);
+  } catch (const std::exception& error) {
+    qWarning() << "[GenICam] direct frame delivery failed:" << error.what();
+  } catch (...) {
+    qWarning() << "[GenICam] direct frame delivery failed with an unknown exception.";
   }
 }
 

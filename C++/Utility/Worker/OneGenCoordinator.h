@@ -36,6 +36,7 @@ class Coordinator;
 class Lease {
 public:
   using FrameFn = std::function<void(const Frame&)>;
+  using SharedFrameFn = Connection::SharedFrameFn;
   using ErrorFn = std::function<void(std::string_view)>;
   using InvalidateFn = std::function<void(int, std::string_view)>;
 
@@ -64,6 +65,9 @@ public:
   void trigger();
   void stop();
   void set_frame_callback(FrameFn cb);
+  void set_shared_frame_callback(SharedFrameFn cb);
+  bool create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes, std::string& error);
+  void destroy_frame_pool();
   void set_error_callback(ErrorFn cb);
   void set_invalidate_callback(InvalidateFn cb);
   /** True while the isolated worker process is still accepting requests. */
@@ -87,6 +91,7 @@ private:
   Coordinator* owner_ = nullptr;
   std::uint32_t session_ = 0;
   std::atomic<bool> closed_{false};
+  bool frame_pool_attached_ = false;
 };
 
 class Coordinator {

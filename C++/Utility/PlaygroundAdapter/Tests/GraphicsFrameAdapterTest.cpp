@@ -2,6 +2,8 @@
 #include <array>
 #include <algorithm>
 #include <bit>
+#include <memory>
+#include <span>
 
 #include <cassert>
 #include <cmath>
@@ -22,6 +24,24 @@ int main()
   assert(frame->images.front().payload.pixelFormat == GraphicsImagePixelFormat::Mono8);
   assert(frame->images.front().payload.stride == 4);
   assert(frame->images.front().payload.frameSequence == 7);
+
+  onegen::Frame aliasedSource;
+  aliasedSource.width = 2;
+  aliasedSource.height = 2;
+  aliasedSource.stride = 2;
+  aliasedSource.pixel_format = 0x01080009;
+  std::array<std::uint8_t, 4> aliasedBytes{1, 2, 3, 4};
+  auto aliasedOwner = std::make_shared<int>(1);
+  std::weak_ptr<int> aliasedWeak = aliasedOwner;
+  auto aliased = oneGenGraphicsFrame(aliasedSource, 8, nullptr,
+      std::span<const std::uint8_t>(aliasedBytes), aliasedOwner);
+  aliasedOwner.reset();
+  assert(aliased && aliased->hasImage());
+  assert(aliased->images.front().payload.storage.get() == aliasedBytes.data());
+  assert(aliased->images.front().payload.size == aliasedBytes.size());
+  assert(!aliasedWeak.expired());
+  aliased.reset();
+  assert(aliasedWeak.expired());
 
   onegen::Frame multipleImages;
   onegen::Frame::Part imagePart;

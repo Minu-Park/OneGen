@@ -78,6 +78,7 @@ Lease::Lease(std::shared_ptr<Connection> connection, DeviceInfo device, std::str
 Lease::~Lease()
 {
   if (closed_) return;
+  destroy_frame_pool();
   bool reusable = false;
   try {
     if (connection_ && connection_->alive()) {
@@ -91,6 +92,7 @@ Lease::~Lease()
   const auto dying = connection_;
   if (connection_) {
     connection_->set_frame_callback({}, session_);
+    connection_->setSharedFrameCallback({}, session_);
     connection_->set_error_callback({}, session_);
     connection_->set_invalidate_callback({}, session_);
   }
@@ -101,11 +103,13 @@ Lease::~Lease()
 void Lease::close()
 {
   if (closed_) return;
+  destroy_frame_pool();
   // Refuse to claim disconnection when the owning worker rejects Close.
   if (connection_ && connection_->alive())
     connection_->request(Operation::Close, {}, std::chrono::seconds{2}, session_);
   closed_ = true;
   connection_->set_frame_callback({}, session_);
+  connection_->setSharedFrameCallback({}, session_);
   connection_->set_error_callback({}, session_);
   connection_->set_invalidate_callback({}, session_);
   auto* owner = std::exchange(owner_, nullptr);
@@ -225,10 +229,36 @@ void Lease::load_features(int module, std::string_view contents) {
 }
 void Lease::trigger() { openConnection().request(Operation::Trigger, {}, std::chrono::seconds{30}, session_); }
 void Lease::stop() { openConnection().request(Operation::StopLive, {}, std::chrono::seconds{30}, session_); }
-void Lease::set_frame_callback(FrameFn callback) { if (!closed_) connection_->set_frame_callback(std::move(callback), session_); }
-void Lease::set_error_callback(ErrorFn callback) { if (!closed_) connection_->set_error_callback(std::move(callback), session_); }
+void Lease::set_frame_callback(FrameFn callback) { if (!closed_ && connection_) connection_->set_frame_callback(std::move(callback), session_); }
+void Lease::set_shared_frame_callback(SharedFrameFn callback)
+{ if (!closed_ && connection_) connection_->setSharedFrameCallback(std::move(callback), session_); }
+bool Lease::create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes,
+                              std::string& error)
+{
+  if (closed_ || !connection_) {
+    error = "Device lease is closed.";
+    return false;
+  }
+  if (frame_pool_attached_) {
+    error = "Direct frame pool is already attached.";
+    return false;
+  }
+  if (!connection_->createFramePool(session_, slot_count, slot_bytes, error)) return false;
+  frame_pool_attached_ = true;
+  return true;
+}
+void Lease::destroy_frame_pool()
+{
+  if (!frame_pool_attached_) return;
+  frame_pool_attached_ = false;
+  try {
+    if (connection_ && connection_->alive()) connection_->destroyFramePool(session_);
+  } catch (...) {
+  }
+}
+void Lease::set_error_callback(ErrorFn callback) { if (!closed_ && connection_) connection_->set_error_callback(std::move(callback), session_); }
 void Lease::set_invalidate_callback(InvalidateFn callback)
-{ if (!closed_) connection_->set_invalidate_callback(std::move(callback), session_); }
+{ if (!closed_ && connection_) connection_->set_invalidate_callback(std::move(callback), session_); }
 bool Lease::alive() const { return !closed_ && connection_ && connection_->alive(); }
 
 Coordinator::Coordinator(std::filesystem::path worker_executable,

@@ -623,9 +623,12 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source)
 
 std::optional<GraphicsFrame> oneGenGraphicsFrame(
     const onegen::Frame& source, const std::uint64_t sequence,
-    std::string* rejection_reason)
+    std::string* rejection_reason, std::span<const std::uint8_t> image_payload,
+    std::shared_ptr<const void> payload_owner)
 {
   if (rejection_reason) rejection_reason->clear();
+  const auto imageBytes = image_payload.empty()
+      ? std::span<const std::uint8_t>(source.payload) : image_payload;
   const auto reject = [rejection_reason](const char* reason) {
     if (rejection_reason) *rejection_reason = reason;
     return std::optional<GraphicsFrame>{};
@@ -796,7 +799,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   const auto format = source.payload_type == kPayloadJpeg
       ? GraphicsImagePixelFormat::Jpeg : pixelFormat(source.pixel_format);
   if (format == GraphicsImagePixelFormat::Unknown) return reject("unknown PFNC pixel format");
-  if (source.payload.empty()) return reject("empty payload");
+  if (imageBytes.empty()) return reject("empty payload");
   if (source.width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
       || source.height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()))
     return reject("image dimensions exceed the supported integer range");
@@ -813,22 +816,32 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   if (stride > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
     return reject("stride exceeds the supported integer range");
 
-  auto storage = std::make_shared<std::vector<std::uint8_t>>(source.payload);
-  if (source.pixel_endianness == 2 && !isByteOrdered(format)) {
-    const auto size_bits = static_cast<unsigned>((source.pixel_format >> 16U) & 0xffU);
-    const auto word = size_bits == 32 ? 4U : 2U;
-    if (size_bits == 32 || size_bits % 16U == 0) {
-      for (std::uint32_t y = 0; y < source.height; ++y) {
-        auto* row = storage->data() + static_cast<std::size_t>(y) * stride;
-        const auto row_bytes = std::min(stride, storage->size() - static_cast<std::size_t>(y) * stride);
-        for (std::size_t offset = 0; offset + word <= row_bytes; offset += word)
-          std::reverse(row + offset, row + offset + word);
+  std::shared_ptr<const std::uint8_t> storage;
+  if (payload_owner) {
+    if (source.pixel_endianness == 2 && !isByteOrdered(format))
+      return reject("shared payload requires byte swap");
+    storage = std::shared_ptr<const std::uint8_t>(
+        imageBytes.data(), [owner = std::move(payload_owner)](const std::uint8_t*) {});
+  } else {
+    auto owned = std::make_shared<std::vector<std::uint8_t>>(
+        imageBytes.begin(), imageBytes.end());
+    if (source.pixel_endianness == 2 && !isByteOrdered(format)) {
+      const auto size_bits = static_cast<unsigned>((source.pixel_format >> 16U) & 0xffU);
+      const auto word = size_bits == 32 ? 4U : 2U;
+      if (size_bits == 32 || size_bits % 16U == 0) {
+        for (std::uint32_t y = 0; y < source.height; ++y) {
+          auto* row = owned->data() + static_cast<std::size_t>(y) * stride;
+          const auto row_bytes = std::min(stride, owned->size() - static_cast<std::size_t>(y) * stride);
+          for (std::size_t offset = 0; offset + word <= row_bytes; offset += word)
+            std::reverse(row + offset, row + offset + word);
+        }
       }
     }
+    storage = std::shared_ptr<const std::uint8_t>(owned, owned->data());
   }
   GraphicsImage image;
-  image.storage = std::shared_ptr<const std::uint8_t>(storage, storage->data());
-  image.size = storage->size();
+  image.storage = storage;
+  image.size = imageBytes.size();
   image.width = static_cast<int>(source.width);
   image.height = static_cast<int>(source.height);
   image.stride = static_cast<int>(stride);

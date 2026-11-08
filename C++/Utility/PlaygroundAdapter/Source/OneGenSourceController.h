@@ -20,6 +20,7 @@ struct Frame;
 namespace worker {
 class Lease;
 class Coordinator;
+struct SharedFrame;
 }
 }
 
@@ -113,6 +114,7 @@ signals:
 
 private:
   void deliver(const onegen::Frame& source, const std::string& sourceName);
+  void deliverShared(const onegen::worker::SharedFrame& source, const std::string& sourceName);
   void bindLease();
   mutable std::mutex mutex_;
   struct Child { unsigned int index; std::string label; std::unique_ptr<OneGenSourceController> controller; };
