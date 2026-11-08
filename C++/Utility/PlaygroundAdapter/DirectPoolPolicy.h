@@ -19,14 +19,13 @@ struct Decision {
 
 /**
  * Pure pool decision shared by the production live-start path and its regression test.
- * A payload change after bind must create a new pool rather than reuse the bound size.
+ * Opt-in and callback availability are checked by the caller. A replaced lease has no
+ * attached pool, and a payload change must create a new pool rather than reuse the old size.
  */
-inline Decision decide(bool opt_in, bool callback_ready, bool pool_attached,
+inline Decision decide(bool pool_attached,
                        std::optional<std::uint64_t> attached_slot_bytes,
                        std::optional<std::uint64_t> current_payload_bytes) noexcept
 {
-  if (!opt_in) return {Action::Disabled, 0, "opt-in-off"};
-  if (!callback_ready) return {Action::Disabled, 0, "callback-unavailable"};
   if (!current_payload_bytes || *current_payload_bytes == 0)
     return {Action::Disabled, 0, "payload-unavailable"};
   if (!pool_attached) return {Action::Create, *current_payload_bytes, "not-attached"};

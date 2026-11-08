@@ -117,8 +117,11 @@ private:
   void deliver(const onegen::Frame& source, const std::string& sourceName);
   void deliverShared(const onegen::worker::SharedFrame& source, const std::string& sourceName);
   void bindLease();
+  /** @brief Configures direct SHM while the caller holds direct_pool_mutex_. */
   bool configureDirectPool(onegen::worker::Lease& lease, const std::string& sourceName);
   mutable std::mutex mutex_;
+  /** @brief Serializes direct pool ownership with lease replacement without holding callbacks under mutex_. */
+  std::mutex direct_pool_mutex_;
   struct Child { unsigned int index; std::string label; std::unique_ptr<OneGenSourceController> controller; };
   std::map<std::string, Child> children_;
   unsigned int next_source_index_ = 0;

@@ -173,6 +173,7 @@ std::vector<GraphicsSourceDescriptor> OneGenSourceController::sourceDescriptors(
 
 void OneGenSourceController::setLease(onegen::worker::Lease* lease)
 {
+  std::unique_lock poolLock(direct_pool_mutex_);
   std::unique_lock lock(mutex_);
   if (lease_ == lease) return;
   auto old_gate = std::move(callback_gate_);
@@ -186,6 +187,8 @@ void OneGenSourceController::setLease(onegen::worker::Lease* lease)
   direct_pool_attached_ = false;
   direct_pool_slot_bytes_.reset();
   lock.unlock();
+  // Frame callbacks never acquire direct_pool_mutex_; holding it across the gate
+  // drain prevents start from attaching a pool to the lease being replaced.
   if (old_gate) old_gate->waitForDrain();
   lock.lock();
   lease_ = lease;
@@ -258,26 +261,36 @@ bool OneGenSourceController::configureDirectPool(
   const auto disable = [&]() {
     try { lease.set_shared_frame_callback({}); } catch (...) {}
     lease.destroy_frame_pool();
+    std::lock_guard lock(mutex_);
     direct_pool_attached_ = false;
     direct_pool_slot_bytes_.reset();
   };
 
+  bool attached = false;
+  std::optional<std::uint64_t> attachedSlotBytes;
+  GraphicsFrameCallbackGate::Token token;
+  {
+    std::lock_guard lock(mutex_);
+    attached = direct_pool_attached_;
+    attachedSlotBytes = direct_pool_slot_bytes_;
+    if (callback_gate_) token = callback_gate_->token();
+  }
+
   if (!directShmEnabled()) {
-    if (direct_pool_attached_) disable();
+    if (attached) disable();
     return false;
   }
-  if (!callback_gate_) {
-    if (direct_pool_attached_) disable();
+  if (!token) {
+    if (attached) disable();
     qWarning() << "[GenICam] direct-SHM unavailable: callback gate is missing.";
     return false;
   }
 
   std::string directError;
   const auto slotBytes = directSlotBytes(lease, directError);
-  const auto decision = onegen::direct_pool::decide(
-      true, true, direct_pool_attached_, direct_pool_slot_bytes_, slotBytes);
+  const auto decision = onegen::direct_pool::decide(attached, attachedSlotBytes, slotBytes);
   if (decision.action == onegen::direct_pool::Action::Disabled) {
-    if (direct_pool_attached_) disable();
+    if (attached) disable();
     qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM disabled: %1")
         .arg(QString::fromStdString(directError.empty() ? decision.reason : directError));
     return false;
@@ -292,7 +305,6 @@ bool OneGenSourceController::configureDirectPool(
         .arg(QString::fromStdString(directError));
     return false;
   }
-  const auto token = callback_gate_->token();
   try {
     lease.set_shared_frame_callback(
         [this, sourceName, token](const onegen::worker::SharedFrame& source) {
@@ -301,13 +313,19 @@ bool OneGenSourceController::configureDirectPool(
         });
   } catch (const std::exception& error) {
     lease.destroy_frame_pool();
-    direct_pool_slot_bytes_.reset();
+    {
+      std::lock_guard lock(mutex_);
+      direct_pool_slot_bytes_.reset();
+    }
     qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM callback unavailable: %1")
         .arg(QString::fromLocal8Bit(error.what()));
     return false;
   }
-  direct_pool_attached_ = true;
-  direct_pool_slot_bytes_ = decision.slot_bytes;
+  {
+    std::lock_guard lock(mutex_);
+    direct_pool_attached_ = true;
+    direct_pool_slot_bytes_ = decision.slot_bytes;
+  }
   qInfo().noquote() << QStringLiteral(
       "[GenICam] direct-SHM enabled: camera=%1 slots=3 slotBytes=%2")
       .arg(QString::fromStdString(sourceName)).arg(decision.slot_bytes);
@@ -322,13 +340,16 @@ void OneGenSourceController::start()
   for (auto* child : children) child->start();
   onegen::worker::Lease* lease = nullptr;
   {
-    std::lock_guard lock(mutex_);
-    lease = lease_;
+    std::unique_lock poolLock(direct_pool_mutex_);
+    {
+      std::lock_guard lock(mutex_);
+      lease = lease_;
+    }
+    if (!lease) return;
+    const auto& info = lease->info();
+    const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
+    configureDirectPool(*lease, sourceName);
   }
-  if (!lease) return;
-  const auto& info = lease->info();
-  const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
-  configureDirectPool(*lease, sourceName);
   emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
   try { lease->live(); }
   catch (...) { emit diagnosticAcquisitionChanged(false, QStringLiteral("camera")); throw; }
