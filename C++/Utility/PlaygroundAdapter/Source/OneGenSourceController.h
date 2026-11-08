@@ -13,6 +13,7 @@
 #include <mutex>
 #include <memory>
 #include <map>
+#include <optional>
 #include <string>
 
 namespace onegen {
@@ -116,12 +117,15 @@ private:
   void deliver(const onegen::Frame& source, const std::string& sourceName);
   void deliverShared(const onegen::worker::SharedFrame& source, const std::string& sourceName);
   void bindLease();
+  bool configureDirectPool(onegen::worker::Lease& lease, const std::string& sourceName);
   mutable std::mutex mutex_;
   struct Child { unsigned int index; std::string label; std::unique_ptr<OneGenSourceController> controller; };
   std::map<std::string, Child> children_;
   unsigned int next_source_index_ = 0;
   onegen::worker::Lease* lease_ = nullptr;
   std::unique_ptr<GraphicsFrameCallbackGate> callback_gate_;
+  bool direct_pool_attached_ = false;
+  std::optional<std::uint64_t> direct_pool_slot_bytes_;
   FrameConsumer consumer_;
   std::atomic<bool> grabbing_{false};
   std::atomic<std::uint64_t> sequence_{0};

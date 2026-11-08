@@ -632,6 +632,30 @@ void checkCapacityReset(const std::filesystem::path& worker, const std::filesyst
   connection.close();
 }
 
+void checkAllSlotsHeldStop(const std::filesystem::path& worker, const std::filesystem::path& cti) {
+  ScenarioGuard guard("M0", true);
+  Connection connection(worker, cti);
+  Collected events;
+  collect(connection, events);
+  std::string error;
+  require(connection.createFramePool(session, 3, slot_bytes, error),
+          "all-slots pool attach failed: " + error);
+  openCamera(connection);
+  connection.request(Operation::StartLive, {}, 10s, session);
+  require(events.waitShared(3), "all-slots: three retained shared frames were not delivered");
+  {
+    std::unique_lock lock(events.mutex);
+    require(!events.ready.wait_for(lock, 500ms, [&] { return events.shared.size() > 3; }),
+            "all-slots: a fourth frame was delivered while all leases were retained");
+  }
+  connection.request(Operation::StopLive, {}, 10s, session);
+  events.clear();
+  connection.request(Operation::Close, {}, 10s, session);
+  connection.destroyFramePool(session);
+  connection.close();
+  std::cout << "T4 all three slots held: reserve backpressure bounded and stop returned\n";
+}
+
 void checkOwnedMalformedSuppression(const std::filesystem::path& worker,
                                     const std::filesystem::path& cti) {
   ScenarioGuard guard("M13", false);
@@ -2055,6 +2079,7 @@ int main(int argc, char** argv) try {
   std::cout << "T4 RGB8 capacity: five distinct errors passed\n";
 
   checkCapacity(worker, cti);
+  checkAllSlotsHeldStop(worker, cti);
   checkCapacityThenNonCapacityError(worker, cti);
   checkCapacityReset(worker, cti);
   checkOwnedMalformedSuppression(worker, cti);

@@ -816,16 +816,15 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   if (stride > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
     return reject("stride exceeds the supported integer range");
 
+  const bool byteSwap = source.pixel_endianness == 2 && !isByteOrdered(format);
   std::shared_ptr<const std::uint8_t> storage;
-  if (payload_owner) {
-    if (source.pixel_endianness == 2 && !isByteOrdered(format))
-      return reject("shared payload requires byte swap");
+  if (payload_owner && !byteSwap) {
     storage = std::shared_ptr<const std::uint8_t>(
         imageBytes.data(), [owner = std::move(payload_owner)](const std::uint8_t*) {});
   } else {
     auto owned = std::make_shared<std::vector<std::uint8_t>>(
         imageBytes.begin(), imageBytes.end());
-    if (source.pixel_endianness == 2 && !isByteOrdered(format)) {
+    if (byteSwap) {
       const auto size_bits = static_cast<unsigned>((source.pixel_format >> 16U) & 0xffU);
       const auto word = size_bits == 32 ? 4U : 2U;
       if (size_bits == 32 || size_bits % 16U == 0) {

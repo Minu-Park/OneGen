@@ -3,6 +3,7 @@
 
 #include "OneGenCoordinator.h"
 #include "OneGenGraphicsFrameAdapter.h"
+#include "../DirectPoolPolicy.h"
 #include "SessionFrame.h"
 #include "Internal/FrameTrace.h"
 
@@ -30,22 +31,9 @@ bool directShmEnabled()
 std::optional<std::uint64_t> directSlotBytes(onegen::worker::Lease& lease, std::string& error)
 {
   try {
-    const auto format = lease.read_node(0, "PixelFormat");
-    if (format.enum_value != "BayerRG8" && format.enum_value != "Mono8") {
-      error = "PixelFormat " + format.enum_value + " is not a direct-SHM image format.";
-      return std::nullopt;
-    }
     const auto payload = lease.read_node(0, "PayloadSize");
     if (payload.int_value > 0) return static_cast<std::uint64_t>(payload.int_value);
-    const auto width = lease.read_node(0, "Width").int_value;
-    const auto height = lease.read_node(0, "Height").int_value;
-    if (width <= 0 || height <= 0
-        || static_cast<std::uint64_t>(width)
-            > (std::numeric_limits<std::uint64_t>::max)() / static_cast<std::uint64_t>(height)) {
-      error = "Width/Height are unavailable for direct-SHM.";
-      return std::nullopt;
-    }
-    return static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
+    error = "PayloadSize is unavailable; retaining the owned path.";
   } catch (const std::exception& exception) {
     error = exception.what();
   } catch (...) {
@@ -195,6 +183,8 @@ void OneGenSourceController::setLease(onegen::worker::Lease* lease)
     lease_->set_error_callback({});
     lease_->destroy_frame_pool();
   }
+  direct_pool_attached_ = false;
+  direct_pool_slot_bytes_.reset();
   lock.unlock();
   if (old_gate) old_gate->waitForDrain();
   lock.lock();
@@ -260,34 +250,68 @@ void OneGenSourceController::bindLease()
                .arg(QString::fromStdString(model), QString::fromStdString(serial),
                     QString::fromLocal8Bit(error.data(), static_cast<qsizetype>(error.size())));
   });
+}
 
-  if (!directShmEnabled()) return;
-  std::string directError;
-  const auto slotBytes = directSlotBytes(*lease_, directError);
-  if (!slotBytes) {
-    qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM disabled: %1")
-        .arg(QString::fromStdString(directError));
-    return;
+bool OneGenSourceController::configureDirectPool(
+    onegen::worker::Lease& lease, const std::string& sourceName)
+{
+  const auto disable = [&]() {
+    try { lease.set_shared_frame_callback({}); } catch (...) {}
+    lease.destroy_frame_pool();
+    direct_pool_attached_ = false;
+    direct_pool_slot_bytes_.reset();
+  };
+
+  if (!directShmEnabled()) {
+    if (direct_pool_attached_) disable();
+    return false;
   }
-  if (!lease_->create_frame_pool(3, *slotBytes, directError)) {
+  if (!callback_gate_) {
+    if (direct_pool_attached_) disable();
+    qWarning() << "[GenICam] direct-SHM unavailable: callback gate is missing.";
+    return false;
+  }
+
+  std::string directError;
+  const auto slotBytes = directSlotBytes(lease, directError);
+  const auto decision = onegen::direct_pool::decide(
+      true, true, direct_pool_attached_, direct_pool_slot_bytes_, slotBytes);
+  if (decision.action == onegen::direct_pool::Action::Disabled) {
+    if (direct_pool_attached_) disable();
+    qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM disabled: %1")
+        .arg(QString::fromStdString(directError.empty() ? decision.reason : directError));
+    return false;
+  }
+  if (decision.action == onegen::direct_pool::Action::Reuse) {
+    return true;
+  }
+
+  disable();
+  if (!lease.create_frame_pool(3, decision.slot_bytes, directError)) {
     qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM pool unavailable: %1")
         .arg(QString::fromStdString(directError));
-    return;
+    return false;
   }
+  const auto token = callback_gate_->token();
   try {
-    lease_->set_shared_frame_callback(
+    lease.set_shared_frame_callback(
         [this, sourceName, token](const onegen::worker::SharedFrame& source) {
           GraphicsFrameCallbackGate::Lease callback(token);
           if (callback) deliverShared(source, sourceName);
         });
-    qInfo().noquote() << QStringLiteral(
-        "[GenICam] direct-SHM enabled: camera=%1 slots=3 slotBytes=%2")
-        .arg(QString::fromStdString(sourceName)).arg(*slotBytes);
   } catch (const std::exception& error) {
-    lease_->destroy_frame_pool();
+    lease.destroy_frame_pool();
+    direct_pool_slot_bytes_.reset();
     qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM callback unavailable: %1")
         .arg(QString::fromLocal8Bit(error.what()));
+    return false;
   }
+  direct_pool_attached_ = true;
+  direct_pool_slot_bytes_ = decision.slot_bytes;
+  qInfo().noquote() << QStringLiteral(
+      "[GenICam] direct-SHM enabled: camera=%1 slots=3 slotBytes=%2")
+      .arg(QString::fromStdString(sourceName)).arg(decision.slot_bytes);
+  return true;
 }
 
 void OneGenSourceController::start()
@@ -302,6 +326,9 @@ void OneGenSourceController::start()
     lease = lease_;
   }
   if (!lease) return;
+  const auto& info = lease->info();
+  const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
+  configureDirectPool(*lease, sourceName);
   emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
   try { lease->live(); }
   catch (...) { emit diagnosticAcquisitionChanged(false, QStringLiteral("camera")); throw; }

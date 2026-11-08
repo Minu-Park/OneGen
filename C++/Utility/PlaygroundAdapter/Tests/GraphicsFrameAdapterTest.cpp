@@ -1,4 +1,5 @@
 #include "OneGenGraphicsFrameAdapter.h"
+#include "DirectPoolPolicy.h"
 #include <array>
 #include <algorithm>
 #include <bit>
@@ -12,6 +13,16 @@
 
 int main()
 {
+  using onegen::direct_pool::Action;
+  assert(onegen::direct_pool::decide(true, true, true, 128, 256).action == Action::Create);
+  assert(onegen::direct_pool::decide(true, true, true, 256, 256).action == Action::Reuse);
+  assert(onegen::direct_pool::decide(false, true, true, 128, 256).action == Action::Disabled);
+  assert(onegen::direct_pool::decide(true, true, true, std::nullopt, 256).action == Action::Create);
+  assert(onegen::direct_pool::decide(true, true, true, 128, std::nullopt).action == Action::Disabled);
+  // A replaced lease has no attached pool even if the old slot optional was not cleared.
+  assert(onegen::direct_pool::decide(true, true, false, 128, 256).action == Action::Create);
+  assert(onegen::direct_pool::decide(true, true, false, 256, 256).action == Action::Create);
+
   onegen::Frame source;
   source.width = 2;
   source.height = 2;
@@ -42,6 +53,23 @@ int main()
   assert(!aliasedWeak.expired());
   aliased.reset();
   assert(aliasedWeak.expired());
+
+  onegen::Frame swappedSource;
+  swappedSource.width = 2;
+  swappedSource.height = 1;
+  swappedSource.stride = 4;
+  swappedSource.pixel_format = 0x01100003;
+  swappedSource.pixel_endianness = 2;
+  std::array<std::uint8_t, 4> swappedBytes{0, 1, 0, 2};
+  auto swappedOwner = std::make_shared<int>(2);
+  auto bigEndianAliased = oneGenGraphicsFrame(swappedSource, 9, nullptr,
+      std::span<const std::uint8_t>(swappedBytes), swappedOwner);
+  assert(bigEndianAliased && bigEndianAliased->hasImage());
+  const auto* swappedStorage = bigEndianAliased->images.front().payload.storage.get();
+  assert(swappedStorage != swappedBytes.data());
+  assert(bigEndianAliased->images.front().payload.size == swappedBytes.size());
+  assert(swappedStorage[0] == 1 && swappedStorage[1] == 0
+      && swappedStorage[2] == 2 && swappedStorage[3] == 0);
 
   onegen::Frame multipleImages;
   onegen::Frame::Part imagePart;
