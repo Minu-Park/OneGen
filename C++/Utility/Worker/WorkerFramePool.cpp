@@ -256,7 +256,7 @@ void WorkerFramePool::resume() noexcept
 
 void WorkerFramePool::wake() noexcept
 {
-  cv_.notify_all();
+  request_stop();
 }
 
 bool WorkerFramePool::active() const noexcept

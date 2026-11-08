@@ -77,6 +77,7 @@ public:
   void detach() noexcept;
   void request_stop() noexcept;
   void resume() noexcept;
+  /** Wakes blocked reservations as a stop request; resume() restores reservations. */
   void wake() noexcept;
 
   [[nodiscard]] std::uint32_t session() const noexcept { return session_; }

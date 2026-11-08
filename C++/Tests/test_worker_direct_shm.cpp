@@ -572,6 +572,36 @@ void checkCapacity(const std::filesystem::path& worker, const std::filesystem::p
   connection.close();
 }
 
+void checkCapacityThenNonCapacityError(const std::filesystem::path& worker,
+                                       const std::filesystem::path& cti) {
+  ScenarioGuard guard("M14", true);
+  Connection connection(worker, cti);
+  Collected events;
+  collect(connection, events);
+  std::string error;
+  require(connection.createFramePool(session, 3, 128, error),
+          "capacity/non-capacity pool attach failed: " + error);
+  openCamera(connection);
+  connection.request(Operation::StartLive, {}, 10s, session);
+  require(events.waitErrors(2), "capacity/non-capacity: two errors were not reported");
+  auto errors = events.takeErrors();
+  require(errors.size() >= 2, "capacity/non-capacity: too few errors");
+  require(errors[0].find("direct-shm capacity failure: session=") == 0,
+          "capacity/non-capacity: first error is not capacity: " + errors[0]);
+  require(errors[1].find("direct-shm capacity failure") != 0,
+          "capacity/non-capacity: later non-capacity error was suppressed: " + errors[1]);
+  require(errors[1].find("grab: image offset exceeds delivered data") != std::string::npos,
+          "capacity/non-capacity: later error identity changed: " + errors[1]);
+  require(events.sharedCount() == 0 && events.ownedCount() == 0,
+          "capacity/non-capacity: a frame was delivered");
+  connection.request(Operation::StopLive, {}, 10s, session);
+  events.clear();
+  connection.request(Operation::Close, {}, 10s, session);
+  connection.destroyFramePool(session);
+  connection.close();
+  std::cout << "T4 capacity/non-capacity error contrast passed\n";
+}
+
 void checkCapacityReset(const std::filesystem::path& worker, const std::filesystem::path& cti) {
   ScenarioGuard guard("M12", true);
   Connection connection(worker, cti);
@@ -2025,6 +2055,7 @@ int main(int argc, char** argv) try {
   std::cout << "T4 RGB8 capacity: five distinct errors passed\n";
 
   checkCapacity(worker, cti);
+  checkCapacityThenNonCapacityError(worker, cti);
   checkCapacityReset(worker, cti);
   checkOwnedMalformedSuppression(worker, cti);
   std::cout << "T4 capacity/error contrast: five distinct capacity errors, reset, and one owned "

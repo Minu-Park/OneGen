@@ -1290,8 +1290,6 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
   } catch (const Error& error) {
     if (std::string_view(error.what()) == "grab timeout") guard.set_cause(CancelCause::Timeout);
     throw;
-  } catch (...) {
-    throw;
   }
 
   switch (state.result.status) {
@@ -1399,7 +1397,6 @@ void Camera::live() {
             if (step == detail::DirectStep::NoPool) {
               f = impl_->grab_one(500);
             } else if (step == detail::DirectStep::CapacityFailed) {
-              report_error("direct-shm capacity failure");
               continue;
             } else if (step == detail::DirectStep::Stopped) {
               continue;

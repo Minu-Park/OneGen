@@ -39,6 +39,7 @@ enum class Scenario {
   M10,
   M12,
   M13,
+  M14,
 };
 
 Scenario loadScenario() {
@@ -58,6 +59,7 @@ Scenario loadScenario() {
   if (name == "M10") return Scenario::M10;
   if (name == "M12") return Scenario::M12;
   if (name == "M13") return Scenario::M13;
+  if (name == "M14") return Scenario::M14;
   return Scenario::Default;
 }
 
@@ -522,6 +524,14 @@ void fillFrame(BufferData& buffer, std::uint64_t frame) {
     case Scenario::M13:
       base(64, 4, mono8, PAYLOAD_TYPE_IMAGE, 256, 256);
       if (frame <= 2) buffer.image_offset = buffer.size_filled + 1;
+      break;
+    case Scenario::M14:
+      if (frame == 1) {
+        base(64, 4, mono8, PAYLOAD_TYPE_IMAGE, 256, 256);
+      } else {
+        base(1, 1, mono8, PAYLOAD_TYPE_IMAGE, 1, 1);
+        buffer.image_offset = buffer.size_filled + 1;
+      }
       break;
     case Scenario::M9: {
       const auto variant = frame % 4;

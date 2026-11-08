@@ -487,6 +487,30 @@ void detach_wakes_reserve()
   assert(fixture.pool->slot(0).state == SlotState::Reserved);
 }
 
+void wake_wakes_reserve()
+{
+  auto fixture = make_pool(1);
+  auto sink = make_sink(fixture.pool);
+  DirectReservation held;
+  assert(sink.sink->reserve(held) == ReserveStatus::Reserved);
+
+  std::atomic<bool> started{false};
+  ReserveStatus status = ReserveStatus::Reserved;
+  DirectReservation waiting;
+  std::thread thread([&] {
+    started.store(true, std::memory_order_release);
+    status = sink.sink->reserve(waiting);
+  });
+  while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  sink.sink->wake();
+  thread.join();
+  assert(status == ReserveStatus::Stopped);
+  assert(fixture.pool->slot(0).state == SlotState::Reserved);
+  sink.sink->resume();
+  sink.sink->cancel(held, CancelCause::Fallback);
+}
+
 void reserve_wakes_on_release()
 {
   auto fixture = make_pool(1);
@@ -559,6 +583,7 @@ int main()
   capacity_failure_counts();
   detach_and_reattach();
   detach_wakes_reserve();
+  wake_wakes_reserve();
   reserve_wakes_on_release();
   return 0;
 }
