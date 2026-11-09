@@ -22,10 +22,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
-#include <cstdlib>
 static void setEnvironment(const char* name, const char* value) {
   _putenv_s(name, value ? value : "");
 }

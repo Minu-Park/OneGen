@@ -114,6 +114,8 @@ struct FrameWriteResult {
   std::size_t required_bytes = 0;
 };
 
+struct LayoutCheck;
+
 /** Checked image region inside the original transport; only check_direct_image creates it. */
 class CheckedImageSpan {
 public:
