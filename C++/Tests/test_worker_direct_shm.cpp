@@ -464,33 +464,55 @@ void checkFallbackScenario(const std::filesystem::path& worker, const std::files
 void checkM9(const std::filesystem::path& worker, const std::filesystem::path& cti) {
   ScenarioGuard guard("M9", true);
   Connection connection(worker, cti);
-  Collected events;
-  collect(connection, events);
+  std::mutex mutex;
+  std::condition_variable ready;
+  std::vector<Frame> frames;
+  onegen::Frame mono10;
+  std::size_t mono10_bytes = 0;
+  bool has_mono10 = false;
+  connection.setSharedFrameCallback([&](const SharedFrame& frame) {
+    {
+      std::lock_guard lock(mutex);
+      if (!has_mono10 && frame.lease) {
+        mono10 = frame.lease->metadata();
+        mono10_bytes = frame.lease->bytes().size();
+        has_mono10 = true;
+      }
+    }
+    // Do not retain the lease: the M9 fallback sequence exceeds the three-slot
+    // ring, and the direct path drops while every slot is still referenced.
+    ready.notify_all();
+  }, session);
+  connection.set_frame_callback([&](const Frame& frame) {
+    {
+      std::lock_guard lock(mutex);
+      frames.push_back(frame);
+    }
+    ready.notify_all();
+  }, session);
   std::string error;
   require(connection.createFramePool(session, 3, slot_bytes, error), "pool attach failed: " + error);
   openCamera(connection);
   connection.request(Operation::StartLive, {}, 10s, session);
-  require(events.waitOwned(3), "M9: three fallback frames were not delivered");
-  require(events.waitShared(1), "M9: Mono10 direct frame was not delivered");
-  std::vector<Frame> frames;
-  SharedFrame mono10;
   {
-    std::lock_guard lock(events.mutex);
-    frames = events.owned;
-    mono10 = events.shared.front();
+    std::unique_lock lock(mutex);
+    require(ready.wait_for(lock, 10s, [&] { return has_mono10 && frames.size() >= 3; }),
+            "M9: three fallback frames or the Mono10 direct frame were not delivered");
   }
   bool chunk = false, multipart = false, jpeg = false;
-  for (const auto& frame : frames) {
-    if (frame.buffer_info.contains_chunk_data) chunk = true;
-    if (frame.payload_type == 10) multipart = true;
-    if (frame.payload_type == 5) jpeg = true;
+  {
+    std::lock_guard lock(mutex);
+    for (const auto& frame : frames) {
+      if (frame.buffer_info.contains_chunk_data) chunk = true;
+      if (frame.payload_type == 10) multipart = true;
+      if (frame.payload_type == 5) jpeg = true;
+    }
   }
   require(chunk && multipart && jpeg, "M9: not all fallback variants were observed");
-  require(mono10.lease->metadata().pixel_format == 0x01100003,
+  require(mono10.pixel_format == 0x01100003,
           "M9: Mono10 was not handled by the direct path");
-  require(mono10.lease->bytes().size() == 512, "M9: Mono10 byte count differs");
+  require(mono10_bytes == 512, "M9: Mono10 byte count differs");
   connection.request(Operation::StopLive, {}, 10s, session);
-  events.clear();
   connection.request(Operation::Close, {}, 10s, session);
   connection.destroyFramePool(session);
   connection.close();

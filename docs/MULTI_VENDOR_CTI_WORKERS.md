@@ -113,7 +113,7 @@ exceptions return failed replies and log at INFO; unknown request exceptions ret
 WARN severity. Fatal worker startup/IO failures
 return a failed process or close the connection and wake pending requests. Unknown
 C++ exceptions follow the same failure boundary as standard exceptions. A frame
-consumer exception keeps the existing acknowledgement/continued-delivery behavior
+consumer exception keeps the existing delivery/continued-delivery behavior
 and logs its detail, session and CTI; error/invalidation callback failures close
 the connection rather than escaping the IO thread. Startup errors include worker
 and CTI paths. Exit diagnostics include decimal and hexadecimal process codes and
@@ -160,8 +160,11 @@ Standalone Device connections retain the existing worker-isolation policy.
 
 ## Acquisition
 
-Live frames use the worker `Camera::live()` callback and a one-frame
-acknowledgement: grab, deliver, acknowledge, then grab again. `LatestOnly` and
+Live frames use the worker `Camera::live()` callback. Acquisition never waits
+for the consumer: a non-direct frame needs the single worker/client transport
+credit, and a frame that arrives while the credit is held is dropped before
+serialization and counted. The client returns the credit when its delivery
+thread reads the queued frame, before the consumer callback. `LatestOnly` and
 split display-versus-record policies remain an approval boundary.
 
 The selected data stream and announced buffers remain prepared across
@@ -178,15 +181,15 @@ enable Debug capture. The worker inherits the variable. Records use the
 producer FrameID as `frame`, so worker, host and adapter stages correlate; a
 producer that reports FrameID 0 remains uncorrelated. The flag is read once per
 process; leave it unset for normal operation. With the variable unset, no
-per-frame record, allocation or counter update is added, and
-delivery/acknowledgement behavior is unchanged. Host and adapter records are
+per-frame record, allocation or counter update is added, and delivery behavior
+is unchanged. Host and adapter records are
 Debug records and are discarded when Debug capture is off; the worker record is
 controlled by the variable because the worker cannot observe the consumer's
 toggle.
 
 - Worker: `serialize_ms` (Frame copy into the protocol Writer), `encode_ms`
-  (protocol envelope), `write_ms` (stdout write and flush), `ack_wait_ms`
-  (delivery acknowledgement wait).
+  (protocol envelope), `write_ms` (stdout write and flush), `transport_dropped`
+  (non-direct drops when the transport credit was held).
 - Host: `read_ms` (QProcess read plus `QByteArray` append, attributed to the
   first Frame parsed from that read), `extract_ms` / `decode_ms`
   (`takeMessage` body handling and decode), `payload_ms` (`readFrame` payload
@@ -250,11 +253,13 @@ remains experimental until the physical acceptance gate in #348 passes.
   while the borrowed buffer is pinned, then publishes only a small
   `FrameReady` descriptor. No GenTL pointer, writable mapping or 127 MB body
   crosses the stdout protocol on the optimized path.
-- **Backpressure:** frame and byte credits are bounded per session. When no
-  slot is free, acquisition paces at the single documented source admission
-  boundary. Ordered and Strict policy remain unchanged; LatestOnly stays
-  opt-in with explicit loss accounting. No new wait is stacked on the existing
-  acknowledgement, Framegrabber permit or SessionFrame admission.
+- **Backpressure:** the slot ring is the bound. When no slot is free, the
+  worker dequeues and requeues one frame without copying and increments
+  `slot_exhausted` for that dropped frame; it never waits for the consumer.
+  The non-direct stdout path keeps one transport credit and counts
+  `transport_dropped` before serialization when the credit is held. Ordered and
+  Strict policy remain unchanged; LatestOnly stays opt-in with explicit loss
+  accounting. No source admission wait remains in the worker.
 - **Copy target:** direct GenTL -> SHM for eligible single-image payloads; one
   intentional image copy. Unsupported layouts use the existing owned payload
   path explicitly and are counted; the intermediate `Frame.payload -> SHM`

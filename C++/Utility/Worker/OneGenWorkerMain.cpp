@@ -94,10 +94,9 @@ void send(Message message, SendTiming* timing = nullptr)
 struct CameraSession {
   onegen::Camera* camera = nullptr;
   std::thread grab;
-  std::mutex ack_mutex;
-  std::condition_variable ack_ready;
-  bool frame_acked = false;
-  bool stopping = false;
+  /** One non-direct frame may be in the stdout transport at a time. */
+  std::atomic<bool> transport_credit{true};
+  std::atomic<std::uint64_t> transport_dropped{0};
   std::uint64_t stream_generation = 1;
   std::shared_ptr<onegen::worker::WorkerFramePool> direct_pool;
   std::shared_ptr<onegen::worker::WorkerDirectSink> direct_sink;
@@ -106,7 +105,6 @@ struct CameraSession {
       direct_sink->request_stop();
       direct_sink->wake();
     }
-    { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
     std::exception_ptr error;
     try { if (camera) camera->stop(); } catch (...) { error = std::current_exception(); }
     if (grab.joinable()) grab.join();
@@ -257,10 +255,6 @@ int main(int argc, char** argv)
       auto& channel = *session_ptr;
       auto& camera = channel.camera;
       auto& grab_thread = channel.grab;
-      auto& ack_mutex = channel.ack_mutex;
-      auto& ack_ready = channel.ack_ready;
-      auto& frame_acked = channel.frame_acked;
-      auto& stopping = channel.stopping;
       const auto abortGrab = [&channel] { channel.stop(); };
       const auto ensureCamera = [&]() -> onegen::Camera& {
         if (!camera) camera = &system.addCamera();
@@ -289,9 +283,7 @@ int main(int argc, char** argv)
       };
 
       if (request.operation == Operation::FrameAck) {
-        std::lock_guard lock(ack_mutex);
-        frame_acked = true;
-        ack_ready.notify_all();
+        channel.transport_credit.store(true, std::memory_order_release);
         continue;
       }
       if (request.operation == Operation::SlotRelease) {
@@ -385,6 +377,16 @@ int main(int argc, char** argv)
               sendFor(request.session, {Operation::Error, 0, false, std::string("Feature event setup failed: ") + error.what()});
             }
             opened.set_frame_callback([&channel, session = request.session](const onegen::Frame& frame) {
+              if (!channel.transport_credit.exchange(false, std::memory_order_acq_rel)) {
+                const auto dropped =
+                    channel.transport_dropped.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (dropped == 1 || dropped % 100 == 0) {
+                  onegen::stage_log_warning(
+                      "worker frame dropped: session=%u reason=transport-credit-exhausted dropped=%llu",
+                      session, static_cast<unsigned long long>(dropped));
+                }
+                return;
+              }
               const bool trace = onegen::frame_trace_enabled();
               const auto started = trace ? std::chrono::steady_clock::now()
                                          : std::chrono::steady_clock::time_point{};
@@ -392,20 +394,9 @@ int main(int argc, char** argv)
               onegen::worker::write(out, frame);
               const auto serialized = trace ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
-              {
-                std::lock_guard lock(channel.ack_mutex);
-                channel.frame_acked = false;
-              }
               SendTiming sent;
               sendFor(session, {Operation::Frame, 0, true, {}, out.take()}, trace ? &sent : nullptr);
-              const auto written = trace ? std::chrono::steady_clock::now()
-                                         : std::chrono::steady_clock::time_point{};
-              std::unique_lock lock(channel.ack_mutex);
-              channel.ack_ready.wait(lock, [&channel] { return channel.frame_acked || channel.stopping; });
               if (trace) {
-                const auto acknowledged_at = std::chrono::steady_clock::now();
-                const bool acknowledged = channel.frame_acked;
-                lock.unlock();
                 onegen::WorkerFrameTrace record;
                 record.session = session;
                 record.frame_id = frame.frame_id;
@@ -413,8 +404,8 @@ int main(int argc, char** argv)
                 record.serialize_ms = onegen::frame_trace_ms(started, serialized);
                 record.encode_ms = sent.encode_ms;
                 record.write_ms = sent.write_ms;
-                record.ack_wait_ms = onegen::frame_trace_ms(written, acknowledged_at);
-                record.acknowledged = acknowledged;
+                record.transport_dropped =
+                    channel.transport_dropped.load(std::memory_order_relaxed);
                 onegen::trace_worker_frame(record);
               }
             });
@@ -631,7 +622,7 @@ int main(int argc, char** argv)
           }
           case Operation::StartLive: {
             abortGrab();
-            { std::lock_guard lock(ack_mutex); stopping = false; }
+            channel.transport_credit.store(true, std::memory_order_release);
             auto& target = ensureCamera();
             if (channel.direct_sink) {
               onegen::detail::set_direct_frame_sink(target, channel.direct_sink);
@@ -641,7 +632,6 @@ int main(int argc, char** argv)
             break;
           }
           case Operation::StopLive:
-            { std::lock_guard lock(ack_mutex); stopping = true; ack_ready.notify_all(); }
             abortGrab();
             break;
           case Operation::Trigger:

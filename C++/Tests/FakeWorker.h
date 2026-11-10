@@ -48,6 +48,8 @@ inline int fakeWorker(const std::filesystem::path& cti)
   std::array<std::byte, 4> header;
   std::map<std::uint32_t, std::string> opened;
   std::set<std::uint32_t> live;
+  std::map<std::uint32_t, bool> transport_credit;
+  std::map<std::uint32_t, std::uint64_t> transport_drops;
   std::map<std::uint32_t, Message> pending_single;
   std::map<std::uint32_t, std::uint32_t> streams;
   std::map<std::uint32_t, std::uint64_t> stream_generations;
@@ -405,7 +407,23 @@ inline int fakeWorker(const std::filesystem::path& cti)
       root.children.push_back(category);
       write(payload, root);
     }
-    if (request.operation == Operation::StartLive) live.insert(request.session);
+    if (request.operation == Operation::FrameAck) {
+      if (live.count(request.session)) {
+        transport_credit[request.session] = true;
+        if (cti.stem() == "CreditBoard") {
+          Writer notification;
+          notification.scalar(std::int32_t{0});
+          notification.string("AckProbe");
+          transmit({Operation::Invalidate, 0, true, {}, notification.take(), request.session});
+        }
+      }
+      continue;
+    }
+    if (request.operation == Operation::StartLive) {
+      live.insert(request.session);
+      transport_credit[request.session] = true;
+      transport_drops[request.session] = 0;
+    }
     if (request.operation == Operation::GrabOne) {
       if (cti.stem() == "ApiBoard") write(payload, frame(request.session));
       else {
@@ -419,7 +437,11 @@ inline int fakeWorker(const std::filesystem::path& cti)
         pending_single.erase(found);
       }
     }
-    if (request.operation == Operation::StopLive || request.operation == Operation::Close) live.erase(request.session);
+    if (request.operation == Operation::StopLive || request.operation == Operation::Close) {
+      live.erase(request.session);
+      transport_credit.erase(request.session);
+      transport_drops.erase(request.session);
+    }
     if (request.operation == Operation::Trigger) {
       if (const auto found = pending_single.find(request.session); found != pending_single.end()) {
         Writer reply; write(reply, frame(request.session));
@@ -433,7 +455,21 @@ inline int fakeWorker(const std::filesystem::path& cti)
           || cti.stem() == "FormatStorageBoard" || cti.stem() == "MalformedSequenceBoard"
           || cti.stem() == "MalformedPoolBoard" || cti.stem() == "MalformedFormatBoard"
           || cti.stem() == "LayoutClassBoard" || cti.stem() == "CrashPoolBoard";
-      if (shared_stem) {
+      if (cti.stem() == "CreditBoard") {
+        if (!transport_credit[request.session]) {
+          ++transport_drops[request.session];
+          Writer notification;
+          notification.scalar(std::int32_t{0});
+          notification.string("DropProbe");
+          transmit({Operation::Invalidate, 0, true, {}, notification.take(), request.session});
+        } else {
+          transport_credit[request.session] = false;
+          auto produced = frame(request.session);
+          Writer frame_payload;
+          write(frame_payload, produced);
+          transmit({Operation::Frame, 0, true, {}, frame_payload.take(), request.session});
+        }
+      } else if (shared_stem) {
         const auto found = shared_pools.find(request.session);
         if (found == shared_pools.end()) {
           transmit({request.operation, request.id, false, "Shared frame pool is not attached.",

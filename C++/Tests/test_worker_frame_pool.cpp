@@ -465,72 +465,63 @@ void detach_and_reattach()
   assert(second.pool->slot(in_flight.ticket).state == SlotState::Free);
 }
 
-void detach_wakes_reserve()
+void workerDropsWhenNoSlot()
 {
   auto fixture = make_pool(1);
   auto sink = make_sink(fixture.pool);
   DirectReservation held;
   assert(sink.sink->reserve(held) == ReserveStatus::Reserved);
 
-  std::atomic<bool> started{false};
-  ReserveStatus status = ReserveStatus::Reserved;
-  DirectReservation waiting;
-  std::thread thread([&] {
-    started.store(true, std::memory_order_release);
-    status = sink.sink->reserve(waiting);
-  });
-  while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const auto started = std::chrono::steady_clock::now();
+  DirectReservation dropped;
+  assert(sink.sink->reserve(dropped) == ReserveStatus::Busy);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  assert(elapsed < std::chrono::milliseconds(50));
+  // A Busy reserve is not a drop; the caller counts only a dequeued frame.
+  assert(fixture.pool->slot_exhausted() == 0);
+  sink.sink->note_slot_exhausted();
+  assert(fixture.pool->slot_exhausted() == 1);
+  assert(fixture.pool->slot(0).state == SlotState::Reserved);
+
+  sink.sink->cancel(held, CancelCause::Fallback);
+  DirectReservation reused;
+  assert(sink.sink->reserve(reused) == ReserveStatus::Reserved);
+  assert(fixture.pool->slot_exhausted() == 1);
+  sink.sink->cancel(reused, CancelCause::Fallback);
+}
+
+void detach_stops_reserve_without_waiting()
+{
+  auto fixture = make_pool(1);
+  auto sink = make_sink(fixture.pool);
+  DirectReservation held;
+  assert(sink.sink->reserve(held) == ReserveStatus::Reserved);
   sink.sink->detach();
-  thread.join();
-  assert(status == ReserveStatus::NoPool);
+
+  const auto started = std::chrono::steady_clock::now();
+  DirectReservation waiting;
+  assert(sink.sink->reserve(waiting) == ReserveStatus::NoPool);
+  assert(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(50));
   assert(fixture.pool->slot(0).state == SlotState::Reserved);
 }
 
-void wake_wakes_reserve()
+void wake_stops_reserve_without_waiting()
 {
   auto fixture = make_pool(1);
   auto sink = make_sink(fixture.pool);
   DirectReservation held;
   assert(sink.sink->reserve(held) == ReserveStatus::Reserved);
-
-  std::atomic<bool> started{false};
-  ReserveStatus status = ReserveStatus::Reserved;
-  DirectReservation waiting;
-  std::thread thread([&] {
-    started.store(true, std::memory_order_release);
-    status = sink.sink->reserve(waiting);
-  });
-  while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
   sink.sink->wake();
-  thread.join();
-  assert(status == ReserveStatus::Stopped);
+
+  const auto started = std::chrono::steady_clock::now();
+  DirectReservation stopped;
+  assert(sink.sink->reserve(stopped) == ReserveStatus::Stopped);
+  assert(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(50));
   assert(fixture.pool->slot(0).state == SlotState::Reserved);
   sink.sink->resume();
+  DirectReservation busy;
+  assert(sink.sink->reserve(busy) == ReserveStatus::Busy);
   sink.sink->cancel(held, CancelCause::Fallback);
-}
-
-void reserve_wakes_on_release()
-{
-  auto fixture = make_pool(1);
-  auto sink = make_sink(fixture.pool);
-  DirectReservation held;
-  assert(sink.sink->reserve(held) == ReserveStatus::Reserved);
-
-  std::atomic<bool> started{false};
-  ReserveStatus status = ReserveStatus::NoPool;
-  DirectReservation waiting;
-  std::thread thread([&] {
-    started.store(true, std::memory_order_release);
-    status = sink.sink->reserve(waiting);
-  });
-  while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  sink.sink->cancel(held, CancelCause::Fallback);
-  thread.join();
-  assert(status == ReserveStatus::Reserved);
-  sink.sink->cancel(waiting, CancelCause::Fallback);
 }
 
 }  // namespace
@@ -582,8 +573,8 @@ int main()
   release_inside_publish();
   capacity_failure_counts();
   detach_and_reattach();
-  detach_wakes_reserve();
-  wake_wakes_reserve();
-  reserve_wakes_on_release();
+  workerDropsWhenNoSlot();
+  detach_stops_reserve_without_waiting();
+  wake_stops_reserve_without_waiting();
   return 0;
 }

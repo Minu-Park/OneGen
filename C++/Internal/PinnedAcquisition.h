@@ -114,7 +114,7 @@ struct DirectAcquisition {
 DirectAcquisition acquire_into_or_owned(const AcquisitionContext& context, std::uint64_t timeout_ms,
                                         FrameDestination destination);
 
-enum class DirectStep : std::uint8_t { Published, Fallback, CapacityFailed, NoPool, Stopped };
+enum class DirectStep : std::uint8_t { Published, Fallback, CapacityFailed, NoPool, Stopped, Busy };
 
 /** Reserve -> pinned direct/owned conversion -> publish/cancel; fallback_out is valid for Fallback. */
 DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t timeout_ms,

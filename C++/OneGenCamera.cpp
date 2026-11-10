@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <chrono>
 #include <iostream>
 #include <cstring>
 #include <exception>
@@ -1279,6 +1280,20 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
   const auto reserved = sink.reserve(reservation);
   if (reserved == ReserveStatus::NoPool) return DirectStep::NoPool;
   if (reserved == ReserveStatus::Stopped) return DirectStep::Stopped;
+  if (reserved == ReserveStatus::Busy) {
+    // Consume and requeue one acquired frame without copying. The caller counts
+    // that frame as the slot-exhaustion drop; reserve retries themselves are
+    // not drops.
+    try {
+      bool dequeued = false;
+      with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned,
+                         [&](PinnedBuffer&) { dequeued = true; });
+      if (dequeued) sink.note_slot_exhausted();
+    } catch (const Error& error) {
+      if (std::string_view(error.what()) != "grab timeout") throw;
+    }
+    return DirectStep::Busy;
+  }
 
   ReservationGuard guard(sink, reservation);
   DirectState state;
@@ -1397,6 +1412,10 @@ void Camera::live() {
             if (step == detail::DirectStep::NoPool) {
               f = impl_->grab_one(500);
             } else if (step == detail::DirectStep::CapacityFailed) {
+              continue;
+            } else if (step == detail::DirectStep::Busy) {
+              // run_direct_step already dequeued and requeued one frame for the
+              // drop count, so retry the acquisition loop without a sleep.
               continue;
             } else if (step == detail::DirectStep::Stopped) {
               continue;

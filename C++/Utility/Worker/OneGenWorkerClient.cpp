@@ -429,6 +429,17 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
         }
         continue;
       }
+      // The worker's non-direct transport holds one frame credit. Return it
+      // after this thread has read the message but before the consumer callback,
+      // so a slow consumer never blocks acquisition or the pipe.
+      {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->running) {
+          Message ack{Operation::FrameAck};
+          ack.session = pending.session;
+          impl_->outgoing.push(std::move(ack));
+        }
+      }
       try { if (callback) callback(pending.frame); }
       catch (...) {
         qWarning().noquote() << QStringLiteral("[GenICam] frame consumer failed: session=%1 cti=%2 detail=%3")
@@ -437,10 +448,6 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
       }
       const auto delivered = impl_->frame_trace ? std::chrono::steady_clock::now()
                                                 : std::chrono::steady_clock::time_point{};
-      {
-        std::lock_guard lock(impl_->mutex);
-        if (impl_->running) { Message ack{Operation::FrameAck}; ack.session = pending.session; impl_->outgoing.push(std::move(ack)); }
-      }
       if (impl_->frame_trace) {
         qDebug().noquote() << QStringLiteral(
             "[GenICam] frame transport: side=host session=%1 frame=%2 bytes=%3 read_ms=%4 "

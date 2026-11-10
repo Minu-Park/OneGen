@@ -84,7 +84,7 @@ public:
   bool inactive() const;
   /** Stops this worker and releases its native resources before producer fallback. */
   void close();
-  /** @brief Reports callback exceptions to diagnostics while retaining frame acknowledgement. */
+  /** @brief Reports callback exceptions to diagnostics while retaining frame delivery. */
   void set_frame_callback(FrameFn callback, std::uint32_t session = 0);
   /** @brief Delivers validated shared-slot frames; the lease owns the exact release token. */
   void setSharedFrameCallback(SharedFrameFn callback, std::uint32_t session = 0);

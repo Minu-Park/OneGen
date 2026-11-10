@@ -7,7 +7,6 @@
 #include "Internal/SharedMemoryRegion.h"
 
 #include <atomic>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -49,8 +48,10 @@ struct SlotSnapshot {
 /**
  * @brief One attached worker frame region with generation/sequence slot state.
  *
- * The pool is shared by the live loop and the request thread. reserve waits for
- * a free slot, but publish never performs IPC while holding the pool mutex.
+ * The pool is shared by the live loop and the request thread. reserve never
+ * waits: when no slot is free it returns Busy. The caller drops one dequeued
+ * frame and calls note_slot_exhausted(), so the counter tracks dropped frames
+ * rather than reserve retries.
  */
 class WorkerFramePool {
 public:
@@ -74,10 +75,12 @@ public:
               onegen::detail::CancelCause cause) noexcept;
   [[nodiscard]] ReleaseResult release(const SlotRelease& value) noexcept;
 
+  void note_slot_exhausted() noexcept;
+
   void detach() noexcept;
   void request_stop() noexcept;
   void resume() noexcept;
-  /** Wakes blocked reservations as a stop request; resume() restores reservations. */
+  /** Marks reservations stopped; the next reserve returns Stopped until resume(). */
   void wake() noexcept;
 
   [[nodiscard]] std::uint32_t session() const noexcept { return session_; }
@@ -85,6 +88,7 @@ public:
   [[nodiscard]] std::uint64_t token() const noexcept { return token_; }
   [[nodiscard]] std::size_t slot_bytes() const noexcept { return slot_bytes_; }
   [[nodiscard]] bool active() const noexcept;
+  [[nodiscard]] std::uint64_t slot_exhausted() const noexcept;
 
   [[nodiscard]] SlotSnapshot slot(std::uint32_t index) const;
   [[nodiscard]] std::uint64_t sequence() const;
@@ -106,7 +110,6 @@ private:
   void free_reserved_locked(Slot& slot) noexcept;
 
   mutable std::mutex mutex_;
-  std::condition_variable cv_;
   std::shared_ptr<SharedMemoryRegion> region_;
   std::vector<Slot> slots_;
   std::uint32_t session_ = 0;
@@ -115,6 +118,7 @@ private:
   std::uint64_t epoch_ = 0;
   std::uint64_t token_ = 0;
   std::uint64_t sequence_ = 0;
+  std::uint64_t slot_exhausted_ = 0;
   bool active_ = true;
   bool stopping_ = false;
 };
@@ -146,6 +150,7 @@ public:
                std::size_t used_bytes) override;
   void cancel(const onegen::detail::DirectReservation& reservation,
               onegen::detail::CancelCause cause) noexcept override;
+  void note_slot_exhausted() noexcept override;
   void note_fallback(onegen::detail::FallbackReason reason, const Frame& frame) noexcept override;
   [[nodiscard]] onegen::detail::FallbackReason metadata_gate(
       const Frame& metadata) const noexcept override;

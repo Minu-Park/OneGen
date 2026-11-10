@@ -2,7 +2,6 @@
 
 #include "Internal/StageLog.h"
 
-#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <string_view>
@@ -105,12 +104,7 @@ void WorkerFramePool::free_reserved_locked(Slot& slot) noexcept
 
 ReserveStatus WorkerFramePool::reserve(onegen::detail::DirectReservation& reservation)
 {
-  std::unique_lock lock(mutex_);
-  cv_.wait(lock, [this] {
-    if (!active_ || stopping_) return true;
-    return std::any_of(slots_.begin(), slots_.end(),
-                       [](const Slot& slot) { return slot.state == SlotState::Free; });
-  });
+  std::lock_guard lock(mutex_);
   if (!active_) return ReserveStatus::NoPool;
   if (stopping_) return ReserveStatus::Stopped;
 
@@ -129,7 +123,25 @@ ReserveStatus WorkerFramePool::reserve(onegen::detail::DirectReservation& reserv
     reservation.ticket = index;
     return ReserveStatus::Reserved;
   }
-  return ReserveStatus::Stopped;
+
+  return ReserveStatus::Busy;
+}
+
+void WorkerFramePool::note_slot_exhausted() noexcept
+{
+  try {
+    std::uint64_t dropped = 0;
+    {
+      std::lock_guard lock(mutex_);
+      dropped = ++slot_exhausted_;
+    }
+    if (dropped == 1 || dropped % 100 == 0) {
+      onegen::stage_log_warning(
+          "direct-shm slot exhausted: session=%u dropped=%llu slots=%u",
+          session_, static_cast<unsigned long long>(dropped), slot_count_);
+    }
+  } catch (...) {
+  }
 }
 
 bool WorkerFramePool::prepare_publish(const onegen::detail::DirectReservation& reservation,
@@ -143,7 +155,6 @@ bool WorkerFramePool::prepare_publish(const onegen::detail::DirectReservation& r
   if (!active_ || stopping_) {
     stopped = true;
     free_reserved_locked(slot);
-    cv_.notify_all();
     return false;
   }
   if (slot.state != SlotState::Reserved) return false;
@@ -173,7 +184,6 @@ void WorkerFramePool::fail_publish_encode(
     auto& slot = slots_[reservation.ticket];
     if (slot.state == SlotState::Reserved || slot.state == SlotState::Ready) {
       slot.state = SlotState::Free;
-      cv_.notify_all();
     }
   } catch (...) {
   }
@@ -200,7 +210,6 @@ void WorkerFramePool::cancel(const onegen::detail::DirectReservation& reservatio
     auto& slot = slots_[reservation.ticket];
     if (slot.state == SlotState::Reserved) {
       slot.state = SlotState::Free;
-      cv_.notify_all();
     }
   } catch (...) {
   }
@@ -217,7 +226,6 @@ ReleaseResult WorkerFramePool::release(const SlotRelease& value) noexcept
     if (slot.state == SlotState::Free) return ReleaseResult::Duplicate;
     if (slot.state == SlotState::Reserved) return ReleaseResult::Unknown;
     slot.state = SlotState::Free;
-    cv_.notify_all();
     return ReleaseResult::Released;
   } catch (...) {
     return ReleaseResult::NoPool;
@@ -229,7 +237,6 @@ void WorkerFramePool::detach() noexcept
   try {
     std::lock_guard lock(mutex_);
     active_ = false;
-    cv_.notify_all();
   } catch (...) {
   }
 }
@@ -239,7 +246,6 @@ void WorkerFramePool::request_stop() noexcept
   try {
     std::lock_guard lock(mutex_);
     stopping_ = true;
-    cv_.notify_all();
   } catch (...) {
   }
 }
@@ -249,7 +255,6 @@ void WorkerFramePool::resume() noexcept
   try {
     std::lock_guard lock(mutex_);
     stopping_ = false;
-    cv_.notify_all();
   } catch (...) {
   }
 }
@@ -281,6 +286,16 @@ std::uint64_t WorkerFramePool::sequence() const
 {
   std::lock_guard lock(mutex_);
   return sequence_;
+}
+
+std::uint64_t WorkerFramePool::slot_exhausted() const noexcept
+{
+  try {
+    std::lock_guard lock(mutex_);
+    return slot_exhausted_;
+  } catch (...) {
+    return 0;
+  }
 }
 
 WorkerDirectSink::WorkerDirectSink(PublishFn publish, void* publish_user, ErrorFn error,
@@ -399,6 +414,14 @@ void WorkerDirectSink::cancel(const onegen::detail::DirectReservation& reservati
         ? std::static_pointer_cast<WorkerFramePool>(reservation.owner)
         : pool_snapshot();
     if (pool) pool->cancel(reservation, cause);
+  } catch (...) {
+  }
+}
+
+void WorkerDirectSink::note_slot_exhausted() noexcept
+{
+  try {
+    if (auto pool = pool_snapshot()) pool->note_slot_exhausted();
   } catch (...) {
   }
 }

@@ -1030,7 +1030,84 @@ int runTests(int argc, char** argv)
     assert(coordinator.reset_idle_search());
     coordinator.shutdown();
   }
-  // Host-owned shared slots: bounded reuse, exact release tokens and retained mapping safety.
+  // clientCreditReturnsBeforeConsumer: the worker can send the next frame while
+  // the previous consumer callback is still running.
+  {
+    const auto boards = root / "credit-board";
+    std::filesystem::create_directories(boards);
+    const auto cti = boards / "CreditBoard.cti";
+    std::ofstream(cti).put('\0');
+    onegen::worker::Connection connection(argv[0], cti);
+    std::atomic<int> ack_probe{0};
+    std::atomic<int> drop_probe{0};
+    connection.set_invalidate_callback([&](int, std::string_view name) {
+      if (name == "AckProbe") ++ack_probe;
+      if (name == "DropProbe") ++drop_probe;
+    }, 1);
+    std::atomic<int> frames{0};
+    std::atomic<bool> ack_before_return{false};
+    std::atomic<bool> drop_while_busy{false};
+    std::atomic<bool> request_failed{false};
+    std::mutex mutex;
+    std::condition_variable ready;
+    connection.set_frame_callback([&](const auto&) {
+      if (++frames == 1) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+          if (ack_probe.load(std::memory_order_acquire) > 0) {
+            ack_before_return.store(true, std::memory_order_release);
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        // The credit is back, so one trigger sends the next frame and the
+        // following trigger is dropped while that frame waits for delivery.
+        try {
+          connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+          connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+        } catch (...) {
+          request_failed.store(true, std::memory_order_release);
+        }
+        const auto drop_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!request_failed.load(std::memory_order_acquire)
+               && std::chrono::steady_clock::now() < drop_deadline) {
+          if (drop_probe.load(std::memory_order_acquire) > 0) {
+            drop_while_busy.store(true, std::memory_order_release);
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      }
+      ready.notify_all();
+    }, 1);
+    onegen::worker::Writer open;
+    open.string("fast");
+    open.string("board");
+    connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
+    connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    {
+      std::unique_lock lock(mutex);
+      assert(ready.wait_for(lock, 30s, [&] { return frames.load() >= 1; }));
+    }
+    assert(!request_failed.load());
+    assert(ack_before_return.load());
+    assert(drop_while_busy.load());
+    {
+      std::unique_lock lock(mutex);
+      assert(ready.wait_for(lock, 30s, [&] { return frames.load() >= 2; }));
+    }
+    connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
+    {
+      std::unique_lock lock(mutex);
+      assert(ready.wait_for(lock, 30s, [&] { return frames.load() >= 3; }));
+    }
+    connection.request(onegen::worker::Operation::StopLive, {}, 30s, 1);
+    connection.close();
+  }
+  // slotReleaseStillOnLastReader: host-owned shared slots keep bounded reuse and
+  // exact release tokens; a retained lease keeps its mapping after detach.
   {
     const auto boards = root / "shared-pool-board";
     std::filesystem::create_directories(boards);

@@ -19,6 +19,8 @@ inline constexpr std::uint32_t maximum_metadata_components = 1024;
 inline constexpr std::uint32_t maximum_metadata_string_bytes = 4096;
 inline constexpr std::uint32_t maximum_metadata_diagnostic_bytes = 16384;
 
+// FrameAck returns the single non-direct transport credit after the client has
+// read the frame. It is not a consumer-completion signal.
 enum class Operation : std::uint8_t {
   Probe, Open, Close, ListStreams, SelectStream, DescribeFeatures, NodeRead, NodeWrite,
   GrabOne, StartLive, StopLive, Trigger, Shutdown, Frame, Error, Invalidate, FrameAck,

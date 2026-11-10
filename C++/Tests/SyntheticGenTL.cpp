@@ -12,6 +12,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -623,6 +624,12 @@ GC_ERROR takeBuffer(std::unique_lock<std::mutex>& lock, EventData* event,
   EVENT_NEW_BUFFER_DATA event_data{};
   event_data.BufferHandle = buffer;
   event_data.pUserPointer = buffer->user;
+  if (g_scenario == Scenario::M9) {
+    // Pace the M9 format matrix for the one-frame non-direct transport credit:
+    // the worker drops a fallback frame when the host has not read the prior one.
+    lock.unlock();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
   return give(nullptr, data, size, INFO_DATATYPE_UNKNOWN, event_data);
 }
 

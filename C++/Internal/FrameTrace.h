@@ -34,8 +34,7 @@ struct WorkerFrameTrace {
   double serialize_ms = 0;
   double encode_ms = 0;
   double write_ms = 0;
-  double ack_wait_ms = 0;
-  bool acknowledged = false;
+  std::uint64_t transport_dropped = 0;
 };
 
 /** @brief Emits one bounded worker record without letting diagnostics fail acquisition. */
@@ -45,10 +44,10 @@ inline void trace_worker_frame(const WorkerFrameTrace& trace)
   try {
     stage_log_debug(
         "frame transport: side=worker session=%u frame=%llu bytes=%zu serialize_ms=%.3f "
-        "encode_ms=%.3f write_ms=%.3f ack_wait_ms=%.3f acknowledged=%d",
+        "encode_ms=%.3f write_ms=%.3f transport_dropped=%llu",
         trace.session, static_cast<unsigned long long>(trace.frame_id), trace.bytes,
-        trace.serialize_ms, trace.encode_ms, trace.write_ms, trace.ack_wait_ms,
-        trace.acknowledged ? 1 : 0);
+        trace.serialize_ms, trace.encode_ms, trace.write_ms,
+        static_cast<unsigned long long>(trace.transport_dropped));
   } catch (...) {
   }
 }
