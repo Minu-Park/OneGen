@@ -193,7 +193,21 @@ void Lease::grab_one(const FrameFn& deliver)
   if (deliver) deliver(readFrame(input));
 }
 
-void Lease::live() { openConnection().request(Operation::StartLive, {}, std::chrono::seconds{30}, session_); }
+Lease::LiveStart Lease::live()
+{
+  const auto payload =
+      openConnection().request(Operation::StartLive, {}, std::chrono::seconds{30}, session_);
+  Reader input(payload);
+  LiveStart result;
+  result.generation = input.scalar<std::uint64_t>();
+  result.software_trigger = input.scalar<std::uint8_t>() != 0;
+  return result;
+}
+std::optional<CaptureMark> Lease::capture_mark() const
+{
+  if (closed_ || !connection_) return std::nullopt;
+  return connection_->captureMark(session_);
+}
 void Lease::poll_features(std::uint32_t elapsed_ms) {
   Writer out;
   out.scalar(elapsed_ms);
@@ -228,6 +242,12 @@ void Lease::load_features(int module, std::string_view contents) {
   openConnection().request(Operation::LoadFeatures, out.take(), std::chrono::seconds{30}, session_);
 }
 void Lease::trigger() { openConnection().request(Operation::Trigger, {}, std::chrono::seconds{30}, session_); }
+void Lease::trigger(const std::uint64_t id, const std::chrono::milliseconds timeout)
+{
+  Writer out;
+  out.scalar(id);
+  openConnection().request(Operation::Trigger, out.take(), timeout, session_);
+}
 void Lease::stop() { openConnection().request(Operation::StopLive, {}, std::chrono::seconds{30}, session_); }
 void Lease::set_frame_callback(FrameFn callback) { if (!closed_ && connection_) connection_->set_frame_callback(std::move(callback), session_); }
 void Lease::set_shared_frame_callback(SharedFrameFn callback)

@@ -1,6 +1,7 @@
 #include "OneGenWorkerMessages.h"
 #include "OneGenParameterMessages.h"
 #include "WorkerException.h"
+#include "WorkerCaptureMark.h"
 #include "WorkerFramePool.h"
 
 #include "OneGen.h"
@@ -97,10 +98,19 @@ struct CameraSession {
   /** One non-direct frame may be in the stdout transport at a time. */
   std::atomic<bool> transport_credit{true};
   std::atomic<std::uint64_t> transport_dropped{0};
+  /** Direct-slot drops; shared with the session's direct sink. */
+  std::shared_ptr<std::atomic<std::uint64_t>> slot_dropped =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
+  /** Live capture marks: generation per live start, latest software trigger id. */
+  std::atomic<bool> marks_enabled{false};
+  std::atomic<std::uint64_t> capture_generation{0};
+  std::atomic<std::uint64_t> trigger_id{0};
+  onegen::worker::CaptureSequence capture_sequence;  // acquisition thread only
   std::uint64_t stream_generation = 1;
   std::shared_ptr<onegen::worker::WorkerFramePool> direct_pool;
   std::shared_ptr<onegen::worker::WorkerDirectSink> direct_sink;
   void stop() {
+    marks_enabled.store(false, std::memory_order_release);
     if (direct_sink) {
       direct_sink->request_stop();
       direct_sink->wake();
@@ -409,6 +419,24 @@ int main(int argc, char** argv)
                 onegen::trace_worker_frame(record);
               }
             });
+            opened.set_capture_callback([&channel, session = request.session](std::uint64_t frame_id) {
+              if (!channel.marks_enabled.load(std::memory_order_acquire)) return;
+              onegen::worker::CaptureMark mark;
+              const auto sequence = channel.capture_sequence.observe(frame_id);
+              mark.valid = sequence.has_value();
+              mark.generation = channel.capture_generation.load(std::memory_order_acquire);
+              mark.frame_id = frame_id;
+              mark.sequence = sequence.value_or(channel.capture_sequence.current());
+              mark.trigger_id = channel.trigger_id.load(std::memory_order_acquire);
+              mark.dropped = channel.transport_dropped.load(std::memory_order_relaxed)
+                  + channel.slot_dropped->load(std::memory_order_relaxed);
+              Writer out;
+              onegen::worker::write(out, mark);
+              try {
+                sendFor(session, {Operation::CaptureMark, 0, true, {}, out.take()});
+              } catch (...) {
+              }
+            });
             if (channel.direct_sink)
               onegen::detail::set_direct_frame_sink(opened, channel.direct_sink);
             timing.mark("callbacks-and-event-setup");
@@ -430,6 +458,7 @@ int main(int argc, char** argv)
             if (!pool) throw std::runtime_error(error);
             auto sink = std::make_shared<onegen::worker::WorkerDirectSink>(
                 &sendDirectFrame, nullptr, &sendDirectError, nullptr);
+            sink->set_drop_counter(channel.slot_dropped);
             if (!sink->attach(std::move(pool), error)) throw std::runtime_error(error);
             channel.direct_pool = sink->pool();
             channel.direct_sink = std::move(sink);
@@ -628,15 +657,40 @@ int main(int argc, char** argv)
               onegen::detail::set_direct_frame_sink(target, channel.direct_sink);
               channel.direct_sink->resume();
             }
+            // The previous acquisition thread is joined, so the sequence state
+            // is not shared. Every live start is a new capture generation.
+            channel.capture_sequence.reset();
+            channel.trigger_id.store(0, std::memory_order_release);
+            const auto generation =
+                channel.capture_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+            channel.marks_enabled.store(true, std::memory_order_release);
             target.live();
+            bool software_trigger = false;
+            try {
+              auto mode = target.features().find("TriggerMode");
+              auto command = target.features().find("TriggerSoftware");
+              software_trigger = mode.valid() && mode.is_readable() && mode.get_enum() == "On"
+                  && command.valid() && command.is_writable();
+            } catch (...) {
+              software_trigger = false;
+            }
+            output.scalar(generation);
+            output.scalar(static_cast<std::uint8_t>(software_trigger ? 1 : 0));
             break;
           }
           case Operation::StopLive:
             abortGrab();
             break;
-          case Operation::Trigger:
+          case Operation::Trigger: {
+            // A live trigger carries the id its frames report in their capture marks.
+            if (!request.payload.empty()) {
+              Reader trigger_input(request.payload);
+              channel.trigger_id.store(trigger_input.scalar<std::uint64_t>(),
+                                       std::memory_order_release);
+            }
             ensureCamera().trigger();
             break;
+          }
           case Operation::Shutdown:
             for (auto& [key, item] : sessions) item->stop();
             shutdown = true;

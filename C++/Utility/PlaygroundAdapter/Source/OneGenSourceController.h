@@ -22,6 +22,7 @@ namespace worker {
 class Lease;
 class Coordinator;
 struct SharedFrame;
+struct CaptureMark;
 }
 }
 
@@ -53,6 +54,19 @@ public:
   bool isGrabbing() const override;
   void setFrameConsumer(FrameConsumer consumer) override;
   bool supports3D() const override { return true; }
+  /**
+   * @brief Reports GenTL frame-id capture identity and the mirrored worker counter.
+   * @note Trigger is reported only while a live run started with TriggerMode=On
+   *       and an executable TriggerSoftware. Pool size is the direct SHM slot
+   *       count, or zero (unknown) on the owned transport path.
+   */
+  SourceProducerCapabilities producerCapabilities(unsigned sourceIndex) const override;
+  /** @brief Returns the newest worker capture mark without a worker round trip. */
+  std::optional<SourceCaptureMark> captureCounter(unsigned sourceIndex) const override;
+  /** @brief Executes TriggerSoftware with an id that the triggered frame reports. */
+  std::optional<SourceCaptureMark> requestTrigger(unsigned sourceIndex) override;
+  /** @brief Returns worker transport and direct-slot drops. */
+  std::uint64_t deviceDropCount(unsigned sourceIndex) const override;
   /** @brief Configures existing module discovery and copied device inventory. */
   void configureControl(std::shared_ptr<onegen::worker::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices);
   /** @brief Replaces copied discovery results on the consumer thread. */
@@ -114,6 +128,8 @@ signals:
   void inventoryChanged();
 
 private:
+  /** @brief Returns the newest worker capture mark of a session source. */
+  std::optional<onegen::worker::CaptureMark> latestCaptureMark(unsigned sourceIndex) const;
   void deliver(const onegen::Frame& source, const std::string& sourceName);
   void deliverShared(const onegen::worker::SharedFrame& source, const std::string& sourceName);
   void bindLease();
@@ -131,6 +147,10 @@ private:
   std::optional<std::uint64_t> direct_pool_slot_bytes_;
   FrameConsumer consumer_;
   std::atomic<bool> grabbing_{false};
+  std::atomic<bool> software_trigger_{false};
+  std::atomic<std::uint64_t> live_generation_{0};
+  std::atomic<std::uint64_t> next_trigger_id_{0};
+  std::atomic<std::uint32_t> direct_pool_slots_{0};
   std::atomic<std::uint64_t> sequence_{0};
   std::atomic<std::uint64_t> rejected_frames_{0};
   std::atomic<std::uint64_t> incomplete_frames_{0};

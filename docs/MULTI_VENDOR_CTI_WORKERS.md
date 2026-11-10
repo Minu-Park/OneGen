@@ -74,7 +74,7 @@ Discovery runs are serialized per coordinator; process isolation does not confer
 exclusive ownership of hardware shared by different producer installations.
 Shutdown suppresses pending GUI updates and joins discovery before teardown.
 
-Probe responses in protocol v16 carry both Devices and producer-scoped Interface
+Probe responses in protocol v17 carry both Devices and producer-scoped Interface
 failure details. An individual Interface failure preserves other Interfaces and
 their Devices, appears in the cumulative result, and is not retried as an empty
 inventory. Successful empty inventories retain the initial-discovery budget.
@@ -147,7 +147,7 @@ for reconnect; shutdown releases them.
 ## Multiple Sessions
 
 The plugin owns one coordinator. An explicitly connected Interface pins one
-producer worker and its Device channels share that worker through protocol v16.
+producer worker and its Device channels share that worker through protocol v17.
 Standalone Device connections retain the existing worker-isolation policy.
 
 - Duplicate local opens of the same complete Device identity are rejected.
@@ -261,6 +261,15 @@ remains experimental until the physical acceptance gate in #348 passes.
   `transport_dropped` before serialization when the credit is held. Ordered and
   Strict policy remain unchanged; LatestOnly stays opt-in with explicit loss
   accounting. No source admission wait remains in the worker.
+- **Capture identity:** the worker sends one `CaptureMark` (valid, generation,
+  frame id, sequence, trigger id, dropped) for every dequeued buffer before it
+  copies, publishes or drops that buffer. The sequence comes only from the
+  GenTL frame id, unwrapped across a backwards 16-bit id; a repeated id makes
+  the mark invalid and keeps the newest valid sequence. `StartLive` bumps the
+  run generation and replies with it and the software-trigger capability;
+  `Trigger` takes an optional id. The client keeps the newest mark per session
+  and stamps a frame only when the mark's frame id matches, so a counter read
+  never waits for the worker or for frame delivery.
 - **Copy target:** direct GenTL -> SHM for eligible single-image payloads; one
   intentional image copy. Unsupported layouts use the existing owned payload
   path explicitly and are counted; the intermediate `Frame.payload -> SHM`
@@ -290,7 +299,7 @@ remains experimental until the physical acceptance gate in #348 passes.
   most 1024 components, 4096 bytes per component name and 16 KiB of diagnostic
   text. A frame that exceeds a limit falls back to the owned path with
   `MetadataTooLarge` rather than truncating or synthesizing values.
-- **Protocol:** worker protocol v16 carries the pool attach/detach,
+- **Protocol:** worker protocol v17 carries the pool attach/detach,
   metadata-complete `FrameReady` and `SlotRelease` messages. A v15 peer is
   rejected with `Unsupported OneGen worker protocol version`; the request is
   not left pending. No compatibility shim is added before v1.0.0.

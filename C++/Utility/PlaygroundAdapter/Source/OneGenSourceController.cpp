@@ -22,6 +22,9 @@
 
 namespace {
 
+/** Direct SHM slots per camera; reported as the producer pool size. */
+constexpr std::uint32_t kDirectPoolSlots = 3;
+
 bool directShmEnabled()
 {
   const auto* value = std::getenv("ONEGEN_DIRECT_SHM_TEST");
@@ -185,6 +188,7 @@ void OneGenSourceController::setLease(onegen::worker::Lease* lease)
     lease_->destroy_frame_pool();
   }
   direct_pool_attached_ = false;
+  direct_pool_slots_.store(0, std::memory_order_release);
   direct_pool_slot_bytes_.reset();
   lock.unlock();
   // Frame callbacks never acquire direct_pool_mutex_; holding it across the gate
@@ -263,6 +267,7 @@ bool OneGenSourceController::configureDirectPool(
     lease.destroy_frame_pool();
     std::lock_guard lock(mutex_);
     direct_pool_attached_ = false;
+    direct_pool_slots_.store(0, std::memory_order_release);
     direct_pool_slot_bytes_.reset();
   };
 
@@ -300,7 +305,7 @@ bool OneGenSourceController::configureDirectPool(
   }
 
   disable();
-  if (!lease.create_frame_pool(3, decision.slot_bytes, directError)) {
+  if (!lease.create_frame_pool(kDirectPoolSlots, decision.slot_bytes, directError)) {
     qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM pool unavailable: %1")
         .arg(QString::fromStdString(directError));
     return false;
@@ -324,6 +329,7 @@ bool OneGenSourceController::configureDirectPool(
   {
     std::lock_guard lock(mutex_);
     direct_pool_attached_ = true;
+    direct_pool_slots_.store(kDirectPoolSlots, std::memory_order_release);
     direct_pool_slot_bytes_ = decision.slot_bytes;
   }
   qInfo().noquote() << QStringLiteral(
@@ -351,7 +357,11 @@ void OneGenSourceController::start()
     configureDirectPool(*lease, sourceName);
   }
   emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
-  try { lease->live(); }
+  try {
+    const auto started = lease->live();
+    live_generation_.store(started.generation, std::memory_order_release);
+    software_trigger_.store(started.software_trigger, std::memory_order_release);
+  }
   catch (...) { emit diagnosticAcquisitionChanged(false, QStringLiteral("camera")); throw; }
   grabbing_.store(true, std::memory_order_relaxed);
 }
@@ -375,6 +385,7 @@ void OneGenSourceController::stopLive()
     lease = lease_;
   }
   if (!lease) return;
+  software_trigger_.store(false, std::memory_order_release);
   try {
     lease->stop();
     grabbing_.store(false, std::memory_order_relaxed);
@@ -418,6 +429,90 @@ void OneGenSourceController::grabOne(const QString& diagnosticDirectory)
         deliver(source, sourceName);
         onegen::diagnostics::delivered(source, diagnosticDirectory);
       });
+}
+
+SourceProducerCapabilities OneGenSourceController::producerCapabilities(const unsigned sourceIndex) const
+{
+  {
+    // Child queries are short and never wait for acquisition; holding the
+    // parent lock keeps the child alive against camera removal.
+    std::lock_guard lock(mutex_);
+    if (!children_.empty()) {
+      for (const auto& [id, child] : children_)
+        if (child.index == sourceIndex) return child.controller->producerCapabilities(0U);
+      return {};
+    }
+  }
+  if (sourceIndex != 0U) return {};
+  SourceProducerCapabilities capabilities;
+  capabilities.captureIdentity = true;
+  capabilities.captureCounter = true;
+  capabilities.deviceDropCount = true;
+  capabilities.trigger = software_trigger_.load(std::memory_order_acquire);
+  capabilities.poolSize = direct_pool_slots_.load(std::memory_order_acquire);
+  return capabilities;
+}
+
+std::optional<onegen::worker::CaptureMark> OneGenSourceController::latestCaptureMark(
+    const unsigned sourceIndex) const
+{
+  std::lock_guard lock(mutex_);
+  if (!children_.empty()) {
+    for (const auto& [id, child] : children_)
+      if (child.index == sourceIndex) return child.controller->latestCaptureMark(0U);
+    return std::nullopt;
+  }
+  if (sourceIndex != 0U || !lease_) return std::nullopt;
+  // A local mirror of the worker's newest capture mark; no worker round trip.
+  return lease_->capture_mark();
+}
+
+std::optional<SourceCaptureMark> OneGenSourceController::captureCounter(const unsigned sourceIndex) const
+{
+  const auto mark = latestCaptureMark(sourceIndex);
+  if (!mark || mark->generation == 0) return std::nullopt;
+  return SourceCaptureMark{mark->generation, mark->sequence};
+}
+
+std::optional<SourceCaptureMark> OneGenSourceController::requestTrigger(const unsigned sourceIndex)
+{
+  OneGenSourceController* controller = nullptr;
+  {
+    std::lock_guard lock(mutex_);
+    if (children_.empty()) {
+      controller = sourceIndex == 0U ? this : nullptr;
+    } else {
+      for (const auto& [id, child] : children_)
+        if (child.index == sourceIndex) controller = child.controller.get();
+    }
+  }
+  if (!controller) return std::nullopt;
+  if (controller != this) {
+    // The trigger is a worker round trip, so it does not hold the parent lock;
+    // the processing loop stops before the session removes camera children.
+    return controller->requestTrigger(0U);
+  }
+  if (!software_trigger_.load(std::memory_order_acquire)) return std::nullopt;
+  onegen::worker::Lease* lease = nullptr;
+  { std::lock_guard lock(mutex_); lease = lease_; }
+  if (!lease) return std::nullopt;
+  const auto id = next_trigger_id_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  try {
+    lease->trigger(id, std::chrono::milliseconds{1000});
+  } catch (const std::exception& error) {
+    qWarning().noquote() << QStringLiteral("[GenICam] selection trigger failed: %1")
+                               .arg(QString::fromLocal8Bit(error.what()));
+    return std::nullopt;
+  } catch (...) {
+    return std::nullopt;
+  }
+  return SourceCaptureMark{live_generation_.load(std::memory_order_acquire), id};
+}
+
+std::uint64_t OneGenSourceController::deviceDropCount(const unsigned sourceIndex) const
+{
+  const auto mark = latestCaptureMark(sourceIndex);
+  return mark ? mark->dropped : 0;
 }
 
 void OneGenSourceController::trigger()
@@ -506,6 +601,11 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     SessionFrame frame;
     frame.payload = std::move(*payload);
     frame.frameSeq = sequence;
+    // The GenTL-derived capture identity, stamped by the worker client.
+    frame.capture.valid = source.capture.valid;
+    frame.capture.generation = source.capture.generation;
+    frame.capture.sequence = source.capture.sequence;
+    frame.capture.triggerId = source.capture.trigger_id;
     FrameConsumer consumer;
     {
       std::lock_guard lock(mutex_);
@@ -574,6 +674,11 @@ void OneGenSourceController::deliverShared(
     SessionFrame frame;
     frame.payload = std::move(*payload);
     frame.frameSeq = sequence;
+    // The GenTL-derived capture identity, stamped by the worker client.
+    frame.capture.valid = source.capture.valid;
+    frame.capture.generation = source.capture.generation;
+    frame.capture.sequence = source.capture.sequence;
+    frame.capture.triggerId = source.capture.trigger_id;
     FrameConsumer consumer;
     {
       std::lock_guard lock(mutex_);

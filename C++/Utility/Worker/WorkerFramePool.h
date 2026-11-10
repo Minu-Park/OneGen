@@ -127,7 +127,7 @@ private:
  * @brief DirectFrameSink backed by a WorkerFramePool and the worker output path.
  *
  * publish marks the slot Ready before encoding, encodes outside the pool mutex,
- * and calls PublishFn with the exact v16 FrameReady body. Encode failures free
+ * and calls PublishFn with the exact v17 FrameReady body. Encode failures free
  * the slot; send failures retire it until the exact host release.
  */
 class WorkerDirectSink final : public onegen::detail::DirectFrameSink {
@@ -140,6 +140,8 @@ public:
                    void* error_user = nullptr) noexcept;
 
   [[nodiscard]] bool attach(std::shared_ptr<WorkerFramePool> pool, std::string& error);
+  /** @brief Shares a session drop total with capture marks; call before the sink is shared. */
+  void set_drop_counter(std::shared_ptr<std::atomic<std::uint64_t>> counter) noexcept;
   void detach() noexcept;
   [[nodiscard]] ReleaseResult release(const SlotRelease& value) noexcept;
   void request_stop() noexcept;
@@ -169,6 +171,7 @@ private:
   void* publish_user_ = nullptr;
   ErrorFn error_ = nullptr;
   void* error_user_ = nullptr;
+  std::shared_ptr<std::atomic<std::uint64_t>> drop_counter_;
   std::atomic<std::uint64_t> consecutive_capacity_failures_{0};
   std::atomic<std::uint64_t> total_capacity_failures_{0};
 };

@@ -461,6 +461,88 @@ void checkFallbackScenario(const std::filesystem::path& worker, const std::files
   connection.close();
 }
 
+std::uint64_t startLive(Connection& connection) {
+  const auto reply = connection.request(Operation::StartLive, {}, 10s, session);
+  onegen::worker::Reader reader(reply);
+  const auto generation = reader.scalar<std::uint64_t>();
+  static_cast<void>(reader.scalar<std::uint8_t>());
+  return generation;
+}
+
+/** Checks one live run's capture identity on the owned or the direct path. */
+void checkCaptureRun(Connection& connection, Collected& events, bool direct,
+                     std::uint64_t generation, std::string_view label) {
+  const auto prefix = std::string("capture ") + std::string(label) + ": ";
+  require(direct ? events.waitShared(3) : events.waitOwned(3), prefix + "no frames");
+  std::vector<Frame> frames;
+  {
+    std::lock_guard lock(events.mutex);
+    if (direct) {
+      for (const auto& shared : events.shared) frames.push_back(shared.lease->metadata());
+    } else {
+      frames = events.owned;
+    }
+  }
+  std::uint64_t previous = 0;
+  for (const auto& frame : frames) {
+    // captureSequenceIsSdkNumber: the sequence is the GenTL frame id, not a delivery count.
+    require(frame.capture.valid, prefix + "frame without capture identity");
+    require(frame.capture.generation == generation, prefix + "frame from another generation");
+    require(frame.capture.sequence == frame.frame_id,
+            prefix + "sequence " + std::to_string(frame.capture.sequence)
+                + " differs from GenTL frame id " + std::to_string(frame.frame_id));
+    require(frame.capture.sequence > previous, prefix + "sequence is not increasing");
+    previous = frame.capture.sequence;
+  }
+  // The mirrored counter is at least the newest delivered capture.
+  const auto mark = connection.captureMark(session);
+  require(mark.has_value() && mark->valid, prefix + "no capture mark");
+  require(mark->generation == generation, prefix + "capture mark from another generation");
+  require(mark->sequence >= previous, prefix + "capture mark behind a delivered frame");
+}
+
+void checkCaptureIdentity(const std::filesystem::path& worker, const std::filesystem::path& cti,
+                          bool direct) {
+  ScenarioGuard guard("M0", direct);
+  Connection connection(worker, cti);
+  Collected events;
+  collect(connection, events);
+  if (direct) {
+    std::string error;
+    require(connection.createFramePool(session, 3, slot_bytes, error),
+            "capture pool attach failed: " + error);
+  }
+  openCamera(connection);
+
+  const auto first = startLive(connection);
+  require(first > 0, "capture: live start reported no generation");
+  checkCaptureRun(connection, events, direct, first, direct ? "direct first" : "owned first");
+
+  // captureCounterNonBlocking: the counter is a local mirror, read during live transport.
+  std::vector<std::chrono::steady_clock::duration> samples;
+  samples.reserve(1000);
+  for (int index = 0; index < 1000; ++index) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto mark = connection.captureMark(session);
+    samples.push_back(std::chrono::steady_clock::now() - started);
+    require(mark.has_value(), "capture: counter unavailable during live");
+  }
+  std::sort(samples.begin(), samples.end());
+  require(samples[samples.size() * 99 / 100] < 1ms, "capture: counter read p99 is not below 1 ms");
+  connection.request(Operation::StopLive, {}, 10s, session);
+  events.clear();
+
+  // generationBumpsOnRestart: a new live run is a new capture generation.
+  const auto second = startLive(connection);
+  require(second > first, "capture: restart did not bump the generation");
+  checkCaptureRun(connection, events, direct, second, direct ? "direct restart" : "owned restart");
+  connection.request(Operation::StopLive, {}, 10s, session);
+  events.clear();
+  connection.request(Operation::Close, {}, 10s, session);
+  if (direct) connection.destroyFramePool(session);
+  connection.close();
+}
+
 void checkM9(const std::filesystem::path& worker, const std::filesystem::path& cti) {
   ScenarioGuard guard("M9", true);
   Connection connection(worker, cti);
@@ -2064,6 +2146,8 @@ int main(int argc, char** argv) try {
   std::cout << "T4 shared metadata suite: M1-M7 passed\n";
 
   checkFallbackScenario(worker, cti, "M8", 1, true, false);
+  checkCaptureIdentity(worker, cti, false);
+  checkCaptureIdentity(worker, cti, true);
   checkM9(worker, cti);
   checkFallbackScenario(worker, cti, "M10", 1, false, true);
   std::cout << "T4 fallback suite: M8-M10 passed\n";

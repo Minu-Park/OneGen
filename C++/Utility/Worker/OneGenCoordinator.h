@@ -61,8 +61,19 @@ public:
   FeatureNode write_node(int module, std::string_view name, std::string_view op,
                          std::string_view value);
   void grab_one(const FrameFn& deliver);
-  void live();
+  /** @brief Live-start facts reported by the worker. */
+  struct LiveStart {
+    /** Capture generation of this live run; frames and marks carry it. */
+    std::uint64_t generation = 0;
+    /** TriggerMode=On with an executable TriggerSoftware after the start. */
+    bool software_trigger = false;
+  };
+  LiveStart live();
   void trigger();
+  /** @brief Executes TriggerSoftware; frames dequeued afterwards carry `id` in their marks. */
+  void trigger(std::uint64_t id, std::chrono::milliseconds timeout);
+  /** @brief Returns the newest worker capture mark without a worker round trip. */
+  [[nodiscard]] std::optional<CaptureMark> capture_mark() const;
   void stop();
   void set_frame_callback(FrameFn cb);
   void set_shared_frame_callback(SharedFrameFn cb);

@@ -288,6 +288,8 @@ struct Connection::Impl {
   std::shared_ptr<FramePoolBudget> frame_pool_budget = std::make_shared<FramePoolBudget>();
   std::map<std::uint32_t, std::shared_ptr<std::mutex>> pool_lifecycles;
   std::shared_ptr<ReleaseMailbox> release_mailbox = std::make_shared<ReleaseMailbox>();
+  /** Newest worker capture mark per session; its own lock, never held during transport. */
+  CaptureBoard capture_board;
   bool frame_trace = onegen::frame_trace_enabled();
   std::uint32_t next_id = 1;
   bool running = true;
@@ -575,6 +577,7 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
             PendingFrame frame;
             frame.session = message.session;
             frame.frame = readFrame(reader);
+            frame.frame.capture = impl_->capture_board.stamp(message.session, frame.frame.frame_id);
             if (impl_->frame_trace) {
               frame.received = std::chrono::steady_clock::now();
               frame.read_ms = pending_read_ms;
@@ -586,11 +589,15 @@ Connection::Connection(std::filesystem::path worker_executable, std::filesystem:
             std::lock_guard lock(impl_->mutex);
             impl_->frames.push(std::move(frame));
             impl_->cv.notify_all();
+          } else if (message.operation == Operation::CaptureMark) {
+            Reader reader(message.payload);
+            impl_->capture_board.update(message.session, readCaptureMark(reader));
           } else if (message.operation == Operation::FrameReady) {
             Reader reader(message.payload);
             auto ready = readFrameReady(reader);
             auto& identity = ready.identity;
             auto& metadata = ready.metadata;
+            metadata.capture = impl_->capture_board.stamp(message.session, metadata.frame_id);
             std::shared_ptr<FramePoolState> pool;
             {
               std::lock_guard lock(impl_->mutex);
@@ -848,6 +855,11 @@ bool Connection::alive() const
 bool Connection::beginRetirement(const std::chrono::milliseconds timeout)
 {
   return impl_->beginRetirement(timeout);
+}
+
+std::optional<CaptureMark> Connection::captureMark(const std::uint32_t session) const
+{
+  return impl_->capture_board.latest(session);
 }
 
 bool Connection::inactive() const

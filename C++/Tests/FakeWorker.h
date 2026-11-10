@@ -50,6 +50,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
   std::set<std::uint32_t> live;
   std::map<std::uint32_t, bool> transport_credit;
   std::map<std::uint32_t, std::uint64_t> transport_drops;
+  std::map<std::uint32_t, std::uint64_t> live_generations;
   // CreditBoard withholds the first Trigger reply until it receives FrameAck,
   // so the client's callback can prove the credit returns before it runs.
   std::map<std::uint32_t, bool> gate_next_trigger;
@@ -424,6 +425,8 @@ inline int fakeWorker(const std::filesystem::path& cti)
       continue;
     }
     if (request.operation == Operation::StartLive) {
+      payload.scalar(++live_generations[request.session]);
+      payload.scalar(std::uint8_t{1});
       live.insert(request.session);
       transport_credit[request.session] = true;
       transport_drops[request.session] = 0;

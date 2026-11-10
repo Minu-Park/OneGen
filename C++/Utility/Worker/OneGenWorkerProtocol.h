@@ -12,7 +12,7 @@
 
 namespace onegen::worker {
 
-inline constexpr std::uint32_t protocol_version = 16;
+inline constexpr std::uint32_t protocol_version = 17;
 inline constexpr std::uint32_t maximum_message_size = 256U * 1024U * 1024U;
 inline constexpr std::uint32_t maximum_frame_ready_size = 64U * 1024U;
 inline constexpr std::uint32_t maximum_metadata_components = 1024;
@@ -20,7 +20,8 @@ inline constexpr std::uint32_t maximum_metadata_string_bytes = 4096;
 inline constexpr std::uint32_t maximum_metadata_diagnostic_bytes = 16384;
 
 // FrameAck returns the single non-direct transport credit after the client has
-// read the frame. It is not a consumer-completion signal.
+// read the frame. It is not a consumer-completion signal. CaptureMark is a
+// one-way worker message sent for every dequeued live buffer.
 enum class Operation : std::uint8_t {
   Probe, Open, Close, ListStreams, SelectStream, DescribeFeatures, NodeRead, NodeWrite,
   GrabOne, StartLive, StopLive, Trigger, Shutdown, Frame, Error, Invalidate, FrameAck,
@@ -30,6 +31,7 @@ enum class Operation : std::uint8_t {
   ObserveNode, WriteNodeChecked,
   ProducerInactive,
   FramePoolAttach, FramePoolDetach, FrameReady, SlotRelease,
+  CaptureMark,
 };
 
 /** @brief Host-created pool handshake; the worker validates bounds before mapping. */
@@ -53,7 +55,7 @@ struct SlotIdentity {
   std::uint64_t used_bytes = 0;
 };
 
-/** @brief Derived host view; this struct is never encoded on the v16 wire. */
+/** @brief Derived host view; this struct is never encoded on the v17 wire. */
 struct FrameDescriptor {
   std::uint32_t session = 0;
   std::uint64_t epoch = 0;

@@ -113,6 +113,20 @@ struct Frame {
   std::uint64_t timestamp_ns = 0;
   std::uint32_t stream_index = 0;
   std::string stream_id;
+
+  /**
+   * Live capture identity stamped by the worker client from the worker's
+   * capture mark for this frame; it is not part of the worker frame encoding.
+   * `sequence` is derived only from the GenTL frame id (wraps unwrapped);
+   * `generation` increases on every live start.
+   */
+  struct Capture {
+    bool valid = false;
+    std::uint64_t generation = 0;
+    std::uint64_t sequence = 0;
+    std::uint64_t trigger_id = 0;
+  };
+  Capture capture;
 };
 
 }  // namespace onegen

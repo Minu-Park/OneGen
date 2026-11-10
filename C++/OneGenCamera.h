@@ -55,6 +55,13 @@ public:
   void set_frame_callback(FrameFn cb);
   /** Replaces the live-error callback. The callback may call stop(), but must not destroy this camera. */
   void set_error_callback(ErrorFn cb);
+  using CaptureFn = std::function<void(std::uint64_t frame_id)>;
+  /**
+   * Replaces the capture observer. It runs on the acquisition thread for every
+   * buffer dequeued from GenTL, before the buffer is copied, published or
+   * dropped. It must be short, must not throw and must not call into this camera.
+   */
+  void set_capture_callback(CaptureFn cb);
 
   NodeMap& features();
   NodeMap& features(Module module);

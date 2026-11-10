@@ -19,13 +19,13 @@ struct MetadataLimits {
   std::uint32_t body_bytes = maximum_frame_ready_size;
 };
 
-/** @brief Write view of one v16 FrameReady body; metadata never carries pixels. */
+/** @brief Write view of one v17 FrameReady body; metadata never carries pixels. */
 struct FrameReadyRecord {
   SlotIdentity identity;
   const Frame* metadata = nullptr;
 };
 
-/** @brief Decoded v16 FrameReady body with an owned metadata copy. */
+/** @brief Decoded v17 FrameReady body with an owned metadata copy. */
 struct DecodedFrameReady {
   SlotIdentity identity;
   Frame metadata;
@@ -358,7 +358,7 @@ inline Frame readFrame(Reader& in)
   return value;
 }
 
-/** @brief Exact v16 FrameReady body size; saturates on overflow for a noexcept gate. */
+/** @brief Exact v17 FrameReady body size; saturates on overflow for a noexcept gate. */
 inline std::size_t encodedFrameReadySize(const Frame& value) noexcept
 {
   constexpr auto maximum = (std::numeric_limits<std::size_t>::max)();
@@ -473,7 +473,7 @@ inline Frame readFrameMetadataTail(Reader& in, const MetadataLimits& limits = {}
   return value;
 }
 
-/** @brief Encodes a complete v16 FrameReady body through the owned metadata tail writer. */
+/** @brief Encodes a complete v17 FrameReady body through the owned metadata tail writer. */
 inline void write(Writer& out, const FrameReadyRecord& value)
 {
   if (!value.metadata) throw std::invalid_argument("FrameReady metadata is missing.");
@@ -483,7 +483,7 @@ inline void write(Writer& out, const FrameReadyRecord& value)
   writeFrameMetadataTail(out, *value.metadata);
 }
 
-/** @brief Decodes a v16 FrameReady body after bounds checks and rejects trailing bytes. */
+/** @brief Decodes a v17 FrameReady body after bounds checks and rejects trailing bytes. */
 inline DecodedFrameReady readFrameReady(Reader& in, const MetadataLimits& limits = {})
 {
   if (in.remainingSize() > limits.body_bytes)
@@ -495,7 +495,7 @@ inline DecodedFrameReady readFrameReady(Reader& in, const MetadataLimits& limits
   return value;
 }
 
-/** @brief Derives the legacy host descriptor from the v16 identity and metadata. */
+/** @brief Derives the legacy host descriptor from the v17 identity and metadata. */
 inline FrameDescriptor describeFrame(const SlotIdentity& identity, const Frame& metadata)
 {
   FrameDescriptor value;

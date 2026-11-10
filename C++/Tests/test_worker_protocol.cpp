@@ -1,5 +1,6 @@
 #include "OneGenWorkerMessages.h"
 #include "OneGenParameterMessages.h"
+#include "WorkerCaptureMark.h"
 #include "../Internal/FramePayload.h"
 
 #include <algorithm>
@@ -8,8 +9,59 @@
 #include <cstring>
 #include <limits>
 
+namespace {
+
+void checkCaptureMarks()
+{
+  using onegen::worker::CaptureBoard;
+  using onegen::worker::CaptureMark;
+  using onegen::worker::CaptureSequence;
+
+  // The sequence follows GenTL frame ids, unwraps a 16-bit wrap and rejects repeats.
+  CaptureSequence sequence;
+  assert(sequence.observe(5).value() == 5);
+  assert(sequence.observe(9).value() == 9);
+  assert(!sequence.observe(9).has_value());
+  assert(sequence.current() == 9);
+  assert(sequence.observe(65535).value() == 65535);
+  assert(sequence.observe(1).value() == 65536);
+  sequence.reset();
+  assert(sequence.observe(1).value() == 1);
+
+  CaptureMark mark;
+  mark.valid = true;
+  mark.generation = 3;
+  mark.frame_id = 12;
+  mark.sequence = 65548;
+  mark.trigger_id = 7;
+  mark.dropped = 2;
+  onegen::worker::Writer out;
+  onegen::worker::write(out, mark);
+  const auto bytes = out.take();
+  onegen::worker::Reader in(bytes);
+  const auto decoded = onegen::worker::readCaptureMark(in);
+  assert(decoded.valid && decoded.generation == 3 && decoded.frame_id == 12);
+  assert(decoded.sequence == 65548 && decoded.trigger_id == 7 && decoded.dropped == 2);
+
+  // A frame is stamped only by the mark of its own buffer.
+  CaptureBoard board;
+  assert(!board.stamp(1, 12).valid);
+  board.update(1, mark);
+  const auto stamped = board.stamp(1, 12);
+  assert(stamped.valid && stamped.generation == 3 && stamped.sequence == 65548);
+  assert(stamped.trigger_id == 7);
+  assert(!board.stamp(1, 13).valid);
+  assert(!board.stamp(2, 12).valid);
+  assert(board.latest(1)->dropped == 2);
+  board.clear(1);
+  assert(!board.latest(1).has_value());
+}
+
+}  // namespace
+
 int main()
 {
+  checkCaptureMarks();
   onegen::worker::Message message{onegen::worker::Operation::Frame};
   message.session = 42;
   assert(onegen::worker::decode(onegen::worker::encode(message)).session == 42);

@@ -204,6 +204,7 @@ struct Camera::Impl {
   std::thread live_thread;
   FrameFn on_frame;
   ErrorFn on_error;
+  CaptureFn on_capture;
   std::shared_ptr<detail::DirectFrameSink> direct_sink;
   std::mutex callback_mu;
 
@@ -336,6 +337,11 @@ std::uint32_t Camera::selected_data_stream() const {
 void Camera::set_frame_callback(FrameFn cb) {
   std::lock_guard<std::mutex> lk(impl_->callback_mu);
   impl_->on_frame = std::move(cb);
+}
+
+void Camera::set_capture_callback(CaptureFn cb) {
+  std::lock_guard<std::mutex> lk(impl_->callback_mu);
+  impl_->on_capture = std::move(cb);
 }
 
 void Camera::poll_features(std::int64_t elapsed_ms) {
@@ -805,6 +811,19 @@ detail::AcquisitionContext Camera::Impl::context() {
   out.stream_id = &stream_id;
   out.scan3d_geometry = &scan3d_geometry;
   out.components = &components;
+  out.capture = [](void* user, std::uint64_t frame_id) noexcept {
+    auto* self = static_cast<Camera::Impl*>(user);
+    try {
+      CaptureFn callback;
+      {
+        std::lock_guard<std::mutex> lk(self->callback_mu);
+        callback = self->on_capture;
+      }
+      if (callback) callback(frame_id);
+    } catch (...) {
+    }
+  };
+  out.capture_user = this;
   return out;
 }
 
@@ -1058,6 +1077,9 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
                                                 u64(GenTL::BUFFER_INFO_FRAMEID));
   }
   f.frame_id = u64(GenTL::BUFFER_INFO_FRAMEID);
+  // Report the capture before any copy so a consumer's counter tracks the
+  // producer, not this thread's copy or transport time.
+  if (context.capture) context.capture(context.capture_user, f.frame_id);
   f.timestamp = u64(GenTL::BUFFER_INFO_TIMESTAMP);
   f.timestamp_ns = u64(GenTL::BUFFER_INFO_TIMESTAMP_NS);
   f.stream_index = context.stream_index;

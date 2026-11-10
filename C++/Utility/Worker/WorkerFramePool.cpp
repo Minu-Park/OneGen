@@ -418,8 +418,15 @@ void WorkerDirectSink::cancel(const onegen::detail::DirectReservation& reservati
   }
 }
 
+void WorkerDirectSink::set_drop_counter(
+    std::shared_ptr<std::atomic<std::uint64_t>> counter) noexcept
+{
+  drop_counter_ = std::move(counter);
+}
+
 void WorkerDirectSink::note_slot_exhausted() noexcept
 {
+  if (drop_counter_) drop_counter_->fetch_add(1, std::memory_order_relaxed);
   try {
     if (auto pool = pool_snapshot()) pool->note_slot_exhausted();
   } catch (...) {

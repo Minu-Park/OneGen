@@ -30,6 +30,9 @@ struct AcquisitionContext {
   const std::string* stream_id = nullptr;
   const std::optional<Frame::Scan3dGeometry>* scan3d_geometry = nullptr;
   const std::vector<Frame::ComponentIdentity>* components = nullptr;
+  /** Optional observer called once per dequeued buffer, before extraction. */
+  void (*capture)(void* user, std::uint64_t frame_id) noexcept = nullptr;
+  void* capture_user = nullptr;
 };
 
 enum class PinnedExtraction : std::uint8_t { Owned, BorrowedImageOnly, DirectOrOwned };

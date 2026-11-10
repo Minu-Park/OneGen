@@ -2,12 +2,14 @@
 
 #include "OneGenWorkerProtocol.h"
 #include "OneGenTypes.h"
+#include "WorkerCaptureMark.h"
 
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -97,6 +99,12 @@ public:
                        std::string& error);
   /** @brief Detaches a pool; retained leases keep the mapping and budget charged. */
   void destroyFramePool(std::uint32_t session);
+  /**
+   * @brief Returns the newest capture mark the worker sent for a session.
+   * @note Non-blocking: it reads a mirror updated by the IO thread and never
+   *       sends a request or waits for frame transport.
+   */
+  [[nodiscard]] std::optional<CaptureMark> captureMark(std::uint32_t session) const;
 
 private:
   struct Impl;
