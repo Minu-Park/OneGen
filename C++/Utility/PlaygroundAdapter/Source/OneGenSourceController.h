@@ -60,6 +60,8 @@ public:
    * @note Reads atomics only; it never waits for acquisition or the worker.
    */
   [[nodiscard]] SourceRuntimeDiagnostics runtimeDiagnostics(unsigned sourceIndex) const;
+  /** @brief Copies the same per-camera counters sampled by the panel. */
+  std::optional<SourceRuntimeDiagnostics> sourceRuntimeDiagnostics(unsigned sourceIndex) const override;
   /** @brief Configures existing module discovery and copied device inventory. */
   void configureControl(std::shared_ptr<onegen::worker::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices);
   /** @brief Replaces copied discovery results on the consumer thread. */
@@ -121,6 +123,7 @@ signals:
   void inventoryChanged();
 
 private:
+  friend class FeatureTreeTests;
   void deliver(const onegen::Frame& source, const std::string& sourceName);
   void deliverShared(const onegen::worker::SharedFrame& source, const std::string& sourceName);
   void bindLease();
@@ -137,12 +140,15 @@ private:
   bool direct_pool_attached_ = false;
   std::optional<std::uint64_t> direct_pool_slot_bytes_;
   FrameConsumer consumer_;
+  // A child counts delivery in the parent forwarding callback, after the final consumer returns.
+  bool forwarded_by_parent_ = false;
   std::atomic<bool> grabbing_{false};
   std::atomic<std::uint64_t> sequence_{0};
   std::atomic<std::uint64_t> rejected_frames_{0};
   std::atomic<std::uint64_t> incomplete_frames_{0};
   std::atomic<std::uint64_t> received_frames_{0};
   std::atomic<std::uint64_t> converted_frames_{0};
+  std::atomic<std::uint64_t> delivered_frames_{0};
   std::atomic<std::uint64_t> partial_frames_{0};
   std::shared_ptr<onegen::worker::Lease> owned_lease_;
   std::shared_ptr<onegen::worker::Coordinator> coordinator_;

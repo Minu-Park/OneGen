@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Separate delivered diagnostics from conversion counts, including parent camera forwarding; expose per-camera counters through the common source diagnostics query.
+
 - Show live producer telemetry in each camera statusbar: an `fps` bubble over the delivered-frame delta and a warning `failed` bubble only when a frame was rejected. Counters reset when a live run starts, and both bubbles stay hidden while not grabbing.
 - Remove host-coupled live pacing from the worker. The SHM slot ring is now the bound: `WorkerFramePool::reserve()` returns `Busy` instead of waiting, the worker dequeues and requeues one frame without a direct-slot copy (chunk and multipart layouts still extract their metadata) and counts that dropped frame as `slot_exhausted`, and the non-direct stdout path keeps one worker/client transport credit that returns when the client reads the message, before the consumer callback; a frame dropped while the credit is held is counted as `transport_dropped`. `FrameAck` no longer waits for consumer completion, and `SlotRelease` remains the final-reader lease release.
 - Add the internal R3a bounded frame-write boundary: eligible single images copy once from the pinned GenTL buffer into caller-owned storage with exactly-once requeue, unsupported layouts are rejected without a fallback, and the owned path now runs the same core. `grab_one_into` has no production caller; the worker still uses the owned payload path.

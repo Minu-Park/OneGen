@@ -120,10 +120,14 @@ OneGenSourceController* OneGenSourceController::cameraController(const std::stri
     connect(child.get(), &AbstractSourceController::diagnosticAcquisitionChanged, this,
         [this, id](bool active, const QString&) { emit diagnosticAcquisitionChanged(active, QString::fromStdString(id)); },
         Qt::DirectConnection);
-    child->setFrameConsumer([this, index](SessionFrame&& frame, unsigned int) {
+    child->forwarded_by_parent_ = true;
+    child->setFrameConsumer([this, index, childPtr = child.get()](SessionFrame&& frame, unsigned int) {
       FrameConsumer consumer;
       { std::lock_guard lock(mutex_); consumer = consumer_; }
-      if (consumer) consumer(std::move(frame), index);
+      if (consumer) {
+        consumer(std::move(frame), index);
+        childPtr->delivered_frames_.fetch_add(1, std::memory_order_relaxed);
+      }
       else qWarning() << "[GenICam] outcome=rejected reason=no-parent-presentation-consumer sourceIndex="
           << index << "sequence=" << frame.frameSeq;
     });
@@ -196,6 +200,7 @@ void OneGenSourceController::setLease(onegen::worker::Lease* lease)
   incomplete_frames_.store(0, std::memory_order_relaxed);
   received_frames_.store(0, std::memory_order_relaxed);
   converted_frames_.store(0, std::memory_order_relaxed);
+  delivered_frames_.store(0, std::memory_order_relaxed);
   partial_frames_.store(0, std::memory_order_relaxed);
   bindLease();
 }
@@ -352,6 +357,7 @@ void OneGenSourceController::start()
   }
   received_frames_.store(0, std::memory_order_relaxed);
   converted_frames_.store(0, std::memory_order_relaxed);
+  delivered_frames_.store(0, std::memory_order_relaxed);
   rejected_frames_.store(0, std::memory_order_relaxed);
   incomplete_frames_.store(0, std::memory_order_relaxed);
   partial_frames_.store(0, std::memory_order_relaxed);
@@ -389,7 +395,7 @@ void OneGenSourceController::stopLive()
         "[GenICam] live diagnostics: camera=%1 received=%2 delivered=%3 failed=%4 incomplete=%5")
         .arg(QString::fromStdString(sourceName))
         .arg(static_cast<qulonglong>(received_frames_.load(std::memory_order_relaxed)))
-        .arg(static_cast<qulonglong>(converted_frames_.load(std::memory_order_relaxed)))
+        .arg(static_cast<qulonglong>(delivered_frames_.load(std::memory_order_relaxed)))
         .arg(static_cast<qulonglong>(rejected_frames_.load(std::memory_order_relaxed)))
         .arg(static_cast<qulonglong>(incomplete_frames_.load(std::memory_order_relaxed)));
     emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
@@ -409,6 +415,13 @@ bool OneGenSourceController::isGrabbing() const {
   return grabbing_;
 }
 
+std::optional<SourceRuntimeDiagnostics> OneGenSourceController::sourceRuntimeDiagnostics(unsigned sourceIndex) const {
+  const auto sources = sourceDescriptors();
+  if (!(sources.empty() && sourceIndex == 0) && std::none_of(sources.begin(), sources.end(), [sourceIndex](const auto& s) { return s.index == sourceIndex; }))
+    return std::nullopt;
+  return runtimeDiagnostics(sourceIndex);
+}
+
 SourceRuntimeDiagnostics OneGenSourceController::runtimeDiagnostics(
     const unsigned sourceIndex) const {
   {
@@ -423,7 +436,7 @@ SourceRuntimeDiagnostics OneGenSourceController::runtimeDiagnostics(
   }
   if (sourceIndex != 0U) return {};
   return {grabbing_.load(std::memory_order_acquire),
-      converted_frames_.load(std::memory_order_acquire),
+      delivered_frames_.load(std::memory_order_acquire),
       rejected_frames_.load(std::memory_order_acquire)};
 }
 
@@ -440,6 +453,8 @@ void OneGenSourceController::grabOne(const QString& diagnosticDirectory)
     }
   }
   if (!lease) return;
+  delivered_frames_.store(0, std::memory_order_relaxed);
+  rejected_frames_.store(0, std::memory_order_relaxed);
   emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
   struct DiagnosticEnd {
     OneGenSourceController* controller;
@@ -553,6 +568,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     const auto consumerStarted = frameTrace ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
     consumer(std::move(frame), source.stream_index);
+    if (!forwarded_by_parent_) delivered_frames_.fetch_add(1, std::memory_order_relaxed);
     if (frameTrace) {
       const auto consumerFinished = std::chrono::steady_clock::now();
       qDebug().noquote() << QStringLiteral(
@@ -566,8 +582,10 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
           .arg(onegen::frame_trace_ms(consumerStarted, consumerFinished), 0, 'f', 3);
     }
   } catch (const std::exception& error) {
+    rejected_frames_.fetch_add(1, std::memory_order_relaxed);
     qWarning() << "[GenICam] frame delivery failed:" << error.what();
   } catch (...) {
+    rejected_frames_.fetch_add(1, std::memory_order_relaxed);
     qWarning() << "[GenICam] frame delivery failed with an unknown exception.";
   }
 }
@@ -617,9 +635,12 @@ void OneGenSourceController::deliverShared(
       return;
     }
     consumer(std::move(frame), source.stream_index);
+    if (!forwarded_by_parent_) delivered_frames_.fetch_add(1, std::memory_order_relaxed);
   } catch (const std::exception& error) {
+    rejected_frames_.fetch_add(1, std::memory_order_relaxed);
     qWarning() << "[GenICam] direct frame delivery failed:" << error.what();
   } catch (...) {
+    rejected_frames_.fetch_add(1, std::memory_order_relaxed);
     qWarning() << "[GenICam] direct frame delivery failed with an unknown exception.";
   }
 }
@@ -654,13 +675,13 @@ DeviceConnectionState OneGenSourceController::connectionState() const {
     const bool connected = owned_lease_->alive();
     return {connected, connected && grabbing_.load(), connected ? connection_id_.toStdString() : std::string(),
         connected ? targetId(deviceKey(info)).toStdString() : std::string(),
-        connected ? (info.display_name.empty() ? info.id : info.display_name) : std::string(), converted_frames_.load()};
+        connected ? (info.display_name.empty() ? info.id : info.display_name) : std::string(), delivered_frames_.load()};
   }
   for (const auto& [id, child] : children_) {
     const auto state = child.controller->connectionState();
     if (state.connected) return state;
   }
-  return {false, false, {}, {}, {}, converted_frames_.load()};
+  return {false, false, {}, {}, {}, delivered_frames_.load()};
 }
 
 DeviceConnectionCapabilities OneGenSourceController::connectionCapabilities() const {

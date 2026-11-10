@@ -1,5 +1,6 @@
 #include "OneGenFeatureTree.h"
 #include "QOneGenWidget.h"
+#include "OneGenSourceController.h"
 #ifdef ONEGEN_FEATURE_THEME
 #include "Resources.h"
 #endif
@@ -87,6 +88,34 @@ onegen::FeatureNode snapshot(bool present, bool enabled) {
 class FeatureTreeTests final : public QObject {
   Q_OBJECT
 private slots:
+  void producerDiagnosticsCountConsumerDelivery() {
+    OneGenSourceController controller;
+    onegen::Frame frame;
+    frame.width = 2; frame.height = 2; frame.stride = 2;
+    frame.pixel_format = 0x01080001;
+    frame.payload = {1, 2, 3, 4};
+    controller.deliver(frame, "test");
+    QCOMPARE(controller.converted_frames_.load(), std::uint64_t(1));
+    QCOMPARE(controller.runtimeDiagnostics(0).delivered, std::uint64_t(0));
+    int calls = 0;
+    controller.setFrameConsumer([&](SessionFrame&&, unsigned) { ++calls; });
+    controller.deliver(frame, "test");
+    QCOMPARE(calls, 1);
+    QCOMPARE(controller.converted_frames_.load(), std::uint64_t(2));
+    QCOMPARE(controller.runtimeDiagnostics(0).delivered, std::uint64_t(1));
+    QCOMPARE(controller.sourceRuntimeDiagnostics(0)->delivered, controller.runtimeDiagnostics(0).delivered);
+    controller.setFrameConsumer([](SessionFrame&&, unsigned) { throw std::runtime_error("consumer failure"); });
+    controller.deliver(frame, "test");
+    QCOMPARE(controller.runtimeDiagnostics(0).delivered, std::uint64_t(1));
+    QVERIFY(!controller.sourceRuntimeDiagnostics(4));
+    OneGenSourceController parent;
+    auto* child = parent.cameraController("c", "camera");
+    child->deliver(frame, "test");
+    QCOMPARE(parent.runtimeDiagnostics(0).delivered, std::uint64_t(0));
+    parent.setFrameConsumer([&](SessionFrame&&, unsigned) { ++calls; });
+    child->deliver(frame, "test");
+    QCOMPARE(parent.runtimeDiagnostics(0).delivered, std::uint64_t(1));
+  }
   void init() {
     QSettings settings(QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
         .filePath(QStringLiteral("OneGenFeatures.ini")), QSettings::IniFormat);
