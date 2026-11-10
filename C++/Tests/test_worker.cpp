@@ -1030,35 +1030,36 @@ int runTests(int argc, char** argv)
     assert(coordinator.reset_idle_search());
     coordinator.shutdown();
   }
-  // clientCreditReturnsBeforeConsumer: the worker can send the next frame while
-  // the previous consumer callback is still running.
+  // clientCreditReturnsBeforeConsumer: the worker withholds the first Trigger
+  // reply until it receives FrameAck, so the callback can only proceed after the
+  // client returned the credit; a slow callback then leaves the next trigger
+  // without a credit and the worker reports that drop.
   {
     const auto boards = root / "credit-board";
     std::filesystem::create_directories(boards);
     const auto cti = boards / "CreditBoard.cti";
     std::ofstream(cti).put('\0');
     onegen::worker::Connection connection(argv[0], cti);
-    std::atomic<int> ack_probe{0};
     std::atomic<int> drop_probe{0};
     connection.set_invalidate_callback([&](int, std::string_view name) {
-      if (name == "AckProbe") ++ack_probe;
       if (name == "DropProbe") ++drop_probe;
     }, 1);
     std::atomic<int> frames{0};
+    std::atomic<bool> trigger_returned{false};
     std::atomic<bool> ack_before_return{false};
     std::atomic<bool> drop_while_busy{false};
     std::atomic<bool> request_failed{false};
+    std::atomic<bool> callback_done{false};
     std::mutex mutex;
     std::condition_variable ready;
     connection.set_frame_callback([&](const auto&) {
       if (++frames == 1) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (std::chrono::steady_clock::now() < deadline) {
-          if (ack_probe.load(std::memory_order_acquire) > 0) {
+        {
+          std::unique_lock lock(mutex);
+          if (ready.wait_for(lock, std::chrono::seconds(5),
+                             [&] { return trigger_returned.load(std::memory_order_acquire); })) {
             ack_before_return.store(true, std::memory_order_release);
-            break;
           }
-          std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         // The credit is back, so one trigger sends the next frame and the
         // following trigger is dropped while that frame waits for delivery.
@@ -1078,6 +1079,7 @@ int runTests(int argc, char** argv)
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        callback_done.store(true, std::memory_order_release);
       }
       ready.notify_all();
     }, 1);
@@ -1086,10 +1088,17 @@ int runTests(int argc, char** argv)
     open.string("board");
     connection.request(onegen::worker::Operation::Open, open.take(), 30s, 1);
     connection.request(onegen::worker::Operation::StartLive, {}, 30s, 1);
+    // The gated reply arrives only after the delivery thread returned the
+    // credit, which it does before invoking the consumer callback.
     connection.request(onegen::worker::Operation::Trigger, {}, 30s, 1);
     {
+      std::lock_guard lock(mutex);
+      trigger_returned.store(true, std::memory_order_release);
+    }
+    ready.notify_all();
+    {
       std::unique_lock lock(mutex);
-      assert(ready.wait_for(lock, 30s, [&] { return frames.load() >= 1; }));
+      assert(ready.wait_for(lock, 30s, [&] { return callback_done.load(); }));
     }
     assert(!request_failed.load());
     assert(ack_before_return.load());

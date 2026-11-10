@@ -1059,6 +1059,7 @@ struct TestSink final : onegen::detail::DirectFrameSink {
   onegen::detail::FallbackReason fallback_reason = onegen::detail::FallbackReason::None;
   onegen::detail::CancelCause cancel_cause = onegen::detail::CancelCause::Exception;
   std::size_t cancel_count = 0;
+  std::size_t slot_exhausted_count = 0;
   std::size_t report_count = 0;
   std::size_t reported_required = 0;
   std::size_t reported_available = 0;
@@ -1086,6 +1087,10 @@ struct TestSink final : onegen::detail::DirectFrameSink {
     mark("cancel");
     ++cancel_count;
     cancel_cause = cause;
+  }
+  void note_slot_exhausted() noexcept override {
+    mark("slot_exhausted");
+    ++slot_exhausted_count;
   }
   void note_fallback(onegen::detail::FallbackReason reason,
                      const onegen::Frame& frame) noexcept override {
@@ -1370,6 +1375,38 @@ void direct_run_step_order_and_cancel() {
     assert(step == onegen::detail::DirectStep::Stopped);
     assert((fixture.state.log == std::vector<std::string>{"reserve"}));
     assert(fixture.state.queue_count == 0);
+  }
+  {
+    // Busy consumes and requeues exactly one frame and counts only that drop.
+    reset_fake(fixture, input);
+    TestSink sink;
+    sink.trace = &fixture.state.log;
+    sink.reserve_status = onegen::detail::ReserveStatus::Busy;
+    onegen::Frame fallback;
+    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    assert(step == onegen::detail::DirectStep::Busy);
+    assert(fixture.state.queue_count == 1);
+    assert((fixture.state.log
+            == std::vector<std::string>{"reserve", "event", "queue", "slot_exhausted"}));
+    assert(sink.slot_exhausted_count == 1);
+    assert(sink.cancel_count == 0 && sink.published_used == 0);
+    assert(std::all_of(fixture.state.buffer.transport.begin(),
+                       fixture.state.buffer.transport.end(),
+                       [](std::uint8_t b) { return b == queued_byte; }));
+  }
+  {
+    // A Busy reserve with no frame available is a retry, not a drop.
+    reset_fake(fixture, input);
+    fixture.state.timeout = true;
+    TestSink sink;
+    sink.trace = &fixture.state.log;
+    sink.reserve_status = onegen::detail::ReserveStatus::Busy;
+    onegen::Frame fallback;
+    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    assert(step == onegen::detail::DirectStep::Busy);
+    assert(fixture.state.queue_count == 0);
+    assert((fixture.state.log == std::vector<std::string>{"reserve", "event"}));
+    assert(sink.slot_exhausted_count == 0);
   }
 
   {

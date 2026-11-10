@@ -254,7 +254,8 @@ remains experimental until the physical acceptance gate in #348 passes.
   `FrameReady` descriptor. No GenTL pointer, writable mapping or 127 MB body
   crosses the stdout protocol on the optimized path.
 - **Backpressure:** the slot ring is the bound. When no slot is free, the
-  worker dequeues and requeues one frame without copying and increments
+  worker dequeues and requeues one frame without a direct-slot copy (chunk and
+  multipart layouts still extract their metadata) and increments
   `slot_exhausted` for that dropped frame; it never waits for the consumer.
   The non-direct stdout path keeps one transport credit and counts
   `transport_dropped` before serialization when the credit is held. Ordered and

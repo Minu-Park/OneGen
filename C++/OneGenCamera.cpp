@@ -1281,9 +1281,10 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
   if (reserved == ReserveStatus::NoPool) return DirectStep::NoPool;
   if (reserved == ReserveStatus::Stopped) return DirectStep::Stopped;
   if (reserved == ReserveStatus::Busy) {
-    // Consume and requeue one acquired frame without copying. The caller counts
-    // that frame as the slot-exhaustion drop; reserve retries themselves are
-    // not drops.
+    // Consume and requeue one acquired frame without a direct-slot copy; chunk
+    // and multipart layouts still extract their metadata and payload. The
+    // caller counts that frame as the slot-exhaustion drop; reserve retries
+    // themselves are not drops.
     try {
       bool dequeued = false;
       with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned,

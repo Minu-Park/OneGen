@@ -50,6 +50,10 @@ inline int fakeWorker(const std::filesystem::path& cti)
   std::set<std::uint32_t> live;
   std::map<std::uint32_t, bool> transport_credit;
   std::map<std::uint32_t, std::uint64_t> transport_drops;
+  // CreditBoard withholds the first Trigger reply until it receives FrameAck,
+  // so the client's callback can prove the credit returns before it runs.
+  std::map<std::uint32_t, bool> gate_next_trigger;
+  std::map<std::uint32_t, std::uint32_t> gated_trigger;
   std::map<std::uint32_t, Message> pending_single;
   std::map<std::uint32_t, std::uint32_t> streams;
   std::map<std::uint32_t, std::uint64_t> stream_generations;
@@ -410,11 +414,11 @@ inline int fakeWorker(const std::filesystem::path& cti)
     if (request.operation == Operation::FrameAck) {
       if (live.count(request.session)) {
         transport_credit[request.session] = true;
-        if (cti.stem() == "CreditBoard") {
-          Writer notification;
-          notification.scalar(std::int32_t{0});
-          notification.string("AckProbe");
-          transmit({Operation::Invalidate, 0, true, {}, notification.take(), request.session});
+        const auto gated = gated_trigger.find(request.session);
+        if (gated != gated_trigger.end()) {
+          const auto id = gated->second;
+          gated_trigger.erase(gated);
+          transmit({Operation::Trigger, id, true, {}, {}, request.session});
         }
       }
       continue;
@@ -423,6 +427,7 @@ inline int fakeWorker(const std::filesystem::path& cti)
       live.insert(request.session);
       transport_credit[request.session] = true;
       transport_drops[request.session] = 0;
+      if (cti.stem() == "CreditBoard") gate_next_trigger[request.session] = true;
     }
     if (request.operation == Operation::GrabOne) {
       if (cti.stem() == "ApiBoard") write(payload, frame(request.session));
@@ -441,6 +446,8 @@ inline int fakeWorker(const std::filesystem::path& cti)
       live.erase(request.session);
       transport_credit.erase(request.session);
       transport_drops.erase(request.session);
+      gate_next_trigger.erase(request.session);
+      gated_trigger.erase(request.session);
     }
     if (request.operation == Operation::Trigger) {
       if (const auto found = pending_single.find(request.session); found != pending_single.end()) {
@@ -468,6 +475,11 @@ inline int fakeWorker(const std::filesystem::path& cti)
           Writer frame_payload;
           write(frame_payload, produced);
           transmit({Operation::Frame, 0, true, {}, frame_payload.take(), request.session});
+          if (gate_next_trigger[request.session]) {
+            gate_next_trigger[request.session] = false;
+            gated_trigger[request.session] = request.id;
+            continue;
+          }
         }
       } else if (shared_stem) {
         const auto found = shared_pools.find(request.session);

@@ -470,6 +470,7 @@ void checkM9(const std::filesystem::path& worker, const std::filesystem::path& c
   onegen::Frame mono10;
   std::size_t mono10_bytes = 0;
   bool has_mono10 = false;
+  bool chunk = false, multipart = false, jpeg = false;
   connection.setSharedFrameCallback([&](const SharedFrame& frame) {
     {
       std::lock_guard lock(mutex);
@@ -487,6 +488,9 @@ void checkM9(const std::filesystem::path& worker, const std::filesystem::path& c
     {
       std::lock_guard lock(mutex);
       frames.push_back(frame);
+      if (frame.buffer_info.contains_chunk_data) chunk = true;
+      if (frame.payload_type == 10) multipart = true;
+      if (frame.payload_type == 5) jpeg = true;
     }
     ready.notify_all();
   }, session);
@@ -495,20 +499,14 @@ void checkM9(const std::filesystem::path& worker, const std::filesystem::path& c
   openCamera(connection);
   connection.request(Operation::StartLive, {}, 10s, session);
   {
+    // The transport credit can drop individual fallback frames, so wait for the
+    // full M9 variant matrix instead of a fixed frame count.
     std::unique_lock lock(mutex);
-    require(ready.wait_for(lock, 10s, [&] { return has_mono10 && frames.size() >= 3; }),
-            "M9: three fallback frames or the Mono10 direct frame were not delivered");
+    require(ready.wait_for(lock, 10s, [&] {
+              return has_mono10 && chunk && multipart && jpeg;
+            }),
+            "M9: direct Mono10 or the chunk/multipart/JPEG fallback variants were not delivered");
   }
-  bool chunk = false, multipart = false, jpeg = false;
-  {
-    std::lock_guard lock(mutex);
-    for (const auto& frame : frames) {
-      if (frame.buffer_info.contains_chunk_data) chunk = true;
-      if (frame.payload_type == 10) multipart = true;
-      if (frame.payload_type == 5) jpeg = true;
-    }
-  }
-  require(chunk && multipart && jpeg, "M9: not all fallback variants were observed");
   require(mono10.pixel_format == 0x01100003,
           "M9: Mono10 was not handled by the direct path");
   require(mono10_bytes == 512, "M9: Mono10 byte count differs");
