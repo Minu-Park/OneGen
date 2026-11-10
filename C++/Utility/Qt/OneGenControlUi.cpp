@@ -106,6 +106,21 @@ void OneGenControlUi::create(QWidget* owner, const QString& settingsFile, const 
   status_->setObjectName(QStringLiteral("CameraStatusLabel"));
   status_->setAlignment(Qt::AlignCenter);
   status_bar->addWidget(status_);
+
+  failed_ = new QLabel;
+  failed_->setObjectName(QStringLiteral("OneGenStatusFailed"));
+  failed_->setProperty("statusRole", QStringLiteral("deviceFailed"));
+  failed_->setAlignment(Qt::AlignCenter);
+  failed_->hide();
+  status_bar->addPermanentWidget(failed_);
+
+  fps_ = new QLabel;
+  fps_->setObjectName(QStringLiteral("OneGenStatusFps"));
+  fps_->setProperty("statusRole", QStringLiteral("deviceFps"));
+  fps_->setAlignment(Qt::AlignCenter);
+  fps_->hide();
+  status_bar->addPermanentWidget(fps_);
+
   layout->addWidget(status_bar);
 
 

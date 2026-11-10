@@ -17,5 +17,7 @@ struct OneGenControlUi {
     QToolButton* grab_one_button_ = nullptr;
     QToolButton* grab_live_button_ = nullptr;
     QLabel* status_ = nullptr;
+    QLabel* failed_ = nullptr;
+    QLabel* fps_ = nullptr;
     OneGenFeatureTree* features_ = nullptr;
 };

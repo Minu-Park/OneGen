@@ -7,11 +7,14 @@
 #include "OneGenCoordinator.h"
 #include "engine/GraphicsFrameAdapter.h"
 
+#include <QElapsedTimer>
 #include <QFutureWatcher>
 #include <QList>
 #include <QSet>
 #include <QString>
 #include <QWidget>
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -105,6 +108,10 @@ private:
   void setOperationActive(bool active);
   /** Refresh only connection/acquisition state; operation details belong in logs. */
   void updateStatus();
+  /** Samples producer counters while live and refreshes the statusbar bubbles. */
+  void updateDiagnostics();
+  /** Shows or hides the failed/fps telemetry bubbles. */
+  void setDiagnosticsVisible(bool visible);
 
   void setFeatureModules(std::vector<std::pair<std::string, onegen::FeatureNode>> modules,
                          FeatureRead read, FeatureWrite write, std::string_view camera_name);
@@ -167,6 +174,12 @@ private:
   std::function<void(const QString&)> title_callback_;
   OneGenDialogShellFactory dialog_shell_factory_;
   QTimer* feature_drain_timer_ = nullptr;
+  QTimer* diagnostics_timer_ = nullptr;
+  QElapsedTimer diagnostics_clock_;
+  std::chrono::steady_clock::time_point diagnostics_sample_{};
+  bool has_diagnostics_sample_ = false;
+  std::uint64_t last_delivered_ = 0;
+  qint64 last_diagnostics_log_ms_ = 0;
   FeatureRead feature_read_;
   FeatureWrite feature_write_;
   std::vector<std::pair<std::string, onegen::FeatureNode>> feature_modules_;

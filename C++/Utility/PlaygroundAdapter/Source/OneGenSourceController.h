@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AbstractSourceController.h"
+#include "DeviceDiagnostics.h"
 #include "engine/GraphicsFrameAdapter.h"
 #include "DeviceConnectionControl.h"
 #include "DeviceParameterControl.h"
@@ -53,6 +54,12 @@ public:
   bool isGrabbing() const override;
   void setFrameConsumer(FrameConsumer consumer) override;
   bool supports3D() const override { return true; }
+  /**
+   * @brief Returns producer counters for the device statusbar.
+   * @param sourceIndex Child-camera source index, or zero for a direct camera.
+   * @note Reads atomics only; it never waits for acquisition or the worker.
+   */
+  [[nodiscard]] SourceRuntimeDiagnostics runtimeDiagnostics(unsigned sourceIndex) const;
   /** @brief Configures existing module discovery and copied device inventory. */
   void configureControl(std::shared_ptr<onegen::worker::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices);
   /** @brief Replaces copied discovery results on the consumer thread. */

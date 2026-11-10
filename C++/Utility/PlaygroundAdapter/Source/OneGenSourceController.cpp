@@ -350,6 +350,11 @@ void OneGenSourceController::start()
     const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
     configureDirectPool(*lease, sourceName);
   }
+  received_frames_.store(0, std::memory_order_relaxed);
+  converted_frames_.store(0, std::memory_order_relaxed);
+  rejected_frames_.store(0, std::memory_order_relaxed);
+  incomplete_frames_.store(0, std::memory_order_relaxed);
+  partial_frames_.store(0, std::memory_order_relaxed);
   emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
   try { lease->live(); }
   catch (...) { emit diagnosticAcquisitionChanged(false, QStringLiteral("camera")); throw; }
@@ -376,8 +381,17 @@ void OneGenSourceController::stopLive()
   }
   if (!lease) return;
   try {
+    const auto& info = lease->info();
+    const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
     lease->stop();
     grabbing_.store(false, std::memory_order_relaxed);
+    qInfo().noquote() << QStringLiteral(
+        "[GenICam] live diagnostics: camera=%1 received=%2 delivered=%3 failed=%4 incomplete=%5")
+        .arg(QString::fromStdString(sourceName))
+        .arg(static_cast<qulonglong>(received_frames_.load(std::memory_order_relaxed)))
+        .arg(static_cast<qulonglong>(converted_frames_.load(std::memory_order_relaxed)))
+        .arg(static_cast<qulonglong>(rejected_frames_.load(std::memory_order_relaxed)))
+        .arg(static_cast<qulonglong>(incomplete_frames_.load(std::memory_order_relaxed)));
     emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
   } catch (const std::exception& error) {
     qWarning().noquote() << QStringLiteral("[GenICam] live stop failed: %1")
@@ -393,6 +407,24 @@ bool OneGenSourceController::isGrabbing() const {
   std::lock_guard lock(mutex_);
   for (const auto& [id, child] : children_) if (child.controller->isGrabbing()) return true;
   return grabbing_;
+}
+
+SourceRuntimeDiagnostics OneGenSourceController::runtimeDiagnostics(
+    const unsigned sourceIndex) const {
+  {
+    // Child queries are atomics only; holding the parent lock keeps the child
+    // alive while a camera panel is removed.
+    std::lock_guard lock(mutex_);
+    if (!children_.empty()) {
+      for (const auto& [id, child] : children_)
+        if (child.index == sourceIndex) return child.controller->runtimeDiagnostics(0U);
+      return {};
+    }
+  }
+  if (sourceIndex != 0U) return {};
+  return {grabbing_.load(std::memory_order_acquire),
+      converted_frames_.load(std::memory_order_acquire),
+      rejected_frames_.load(std::memory_order_acquire)};
 }
 
 void OneGenSourceController::grabOne(const QString& diagnosticDirectory)

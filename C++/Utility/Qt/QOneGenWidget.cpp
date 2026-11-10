@@ -1,6 +1,8 @@
 #include "QOneGenWidget.h"
+#include "DeviceDiagnostics.h"
 #include "SingleCaptureDiagnostics.h"
 #include <QElapsedTimer>
+#include <QStyle>
 #include "NumericFeatureEditor.h"
 #include "OneGenFeatureTree.h"
 
@@ -13,6 +15,7 @@
 #include <QScopeGuard>
 #include <QComboBox>
 #include <QDebug>
+#include <QVariant>
 #include <QLoggingCategory>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -87,6 +90,10 @@ QOneGenWidget::QOneGenWidget(
   feature_drain_timer_ = new QTimer(this);
   feature_drain_timer_->setSingleShot(true);
   feature_drain_timer_->setInterval(50);
+
+  diagnostics_timer_ = new QTimer(this);
+  diagnostics_timer_->setInterval(1000);
+  connect(diagnostics_timer_, &QTimer::timeout, this, &QOneGenWidget::updateDiagnostics);
 
   connect(features_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& position) {
     auto* item = features_->itemAt(position);
@@ -279,6 +286,7 @@ void QOneGenWidget::prepareForShutdown()
   title_callback_ = {};
   shutting_down_ = true;
   if (feature_drain_timer_) feature_drain_timer_->stop();
+  if (diagnostics_timer_) diagnostics_timer_->stop();
   clearFeatureCallback();
   discovery_watcher_.waitForFinished();
   operation_watcher_.waitForFinished();
@@ -686,6 +694,91 @@ void QOneGenWidget::updateStatus()
   const bool live = connected && controller_ && controller_->isGrabbing();
   status_->setText(live ? QStringLiteral("Live") : connected ? QStringLiteral("Connected")
       : QStringLiteral("Idle"));
+  if (live && controller_) {
+    if (diagnostics_timer_ && !diagnostics_timer_->isActive()) {
+      last_delivered_ = 0;
+      has_diagnostics_sample_ = false;
+      last_diagnostics_log_ms_ = 0;
+      diagnostics_clock_.start();
+      setDiagnosticsVisible(true);
+      diagnostics_timer_->start();
+    }
+  } else {
+    if (diagnostics_timer_) diagnostics_timer_->stop();
+    has_diagnostics_sample_ = false;
+    setDiagnosticsVisible(false);
+  }
+}
+
+void QOneGenWidget::setDiagnosticsVisible(const bool visible)
+{
+  if (visible) {
+    if (failed_) {
+      failed_->hide();
+      failed_->setText(QStringLiteral("0 failed"));
+      failed_->setProperty("failedState", QStringLiteral("normal"));
+    }
+    if (fps_) {
+      fps_->setText(QStringLiteral("0.0 fps"));
+      fps_->show();
+    }
+  } else {
+    if (failed_) failed_->hide();
+    if (fps_) fps_->hide();
+  }
+}
+
+void QOneGenWidget::updateDiagnostics()
+{
+  if (!controller_ || shutting_down_ || !controller_->isGrabbing()) return;
+  const auto now = std::chrono::steady_clock::now();
+  const auto diagnostics = controller_->runtimeDiagnostics(0U);
+  double fps = 0.0;
+  if (has_diagnostics_sample_) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        now - diagnostics_sample_).count();
+    if (elapsed > 0 && diagnostics.delivered >= last_delivered_) {
+      fps = static_cast<double>(diagnostics.delivered - last_delivered_)
+          * 1.0e9 / static_cast<double>(elapsed);
+    }
+  }
+  last_delivered_ = diagnostics.delivered;
+  diagnostics_sample_ = now;
+  has_diagnostics_sample_ = true;
+
+  if (failed_) {
+    const bool showFailed = diagnostics.failed > 0;
+    if (showFailed) {
+      failed_->setText(QStringLiteral("%1 failed").arg(
+          static_cast<qulonglong>(diagnostics.failed)));
+      if (failed_->property("failedState").toString()
+          != QStringLiteral("warning")) {
+        failed_->setProperty("failedState", QStringLiteral("warning"));
+        failed_->style()->unpolish(failed_);
+        failed_->style()->polish(failed_);
+      }
+    }
+    failed_->setVisible(showFailed);
+  }
+  if (fps_) fps_->setText(QStringLiteral("%1 fps").arg(fps, 0, 'f', 1));
+
+  const qint64 elapsed = diagnostics_clock_.elapsed();
+  if (elapsed - last_diagnostics_log_ms_ >= 5000) {
+    QString camera = feature_camera_name_;
+    if (camera.isEmpty() && lease_) {
+      const auto& info = lease_->info();
+      camera = QString::fromStdString(
+          info.display_name.empty() ? info.id : info.display_name);
+    }
+    if (camera.isEmpty()) camera = QStringLiteral("camera");
+    qInfo().noquote() << QStringLiteral(
+        "[GenICam] diagnostics: camera=%1 live=%2 failed=%3 fps=%4")
+        .arg(camera)
+        .arg(diagnostics.grabbing ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(static_cast<qulonglong>(diagnostics.failed))
+        .arg(fps, 0, 'f', 1);
+    last_diagnostics_log_ms_ = elapsed;
+  }
 }
 
 void QOneGenWidget::setFeatureModules(
