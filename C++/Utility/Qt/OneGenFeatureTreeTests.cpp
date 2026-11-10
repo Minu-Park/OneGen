@@ -107,6 +107,8 @@ private slots:
     controller.setFrameConsumer([](SessionFrame&&, unsigned) { throw std::runtime_error("consumer failure"); });
     controller.deliver(frame, "test");
     QCOMPARE(controller.runtimeDiagnostics(0).delivered, std::uint64_t(1));
+    QCOMPARE(controller.runtimeDiagnostics(0).failed, std::uint64_t(1));
+    QCOMPARE(controller.sourceRuntimeDiagnostics(0)->failed, std::uint64_t(1));
     QVERIFY(!controller.sourceRuntimeDiagnostics(4));
     OneGenSourceController parent;
     auto* child = parent.cameraController("c", "camera");

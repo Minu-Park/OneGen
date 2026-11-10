@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Assert that consumer failures increment both producer and callable failure observations.
+
 - Separate delivered diagnostics from conversion counts, including parent camera forwarding; expose per-camera counters through the common source diagnostics query.
 
 - Show live producer telemetry in each camera statusbar: an `fps` bubble over the delivered-frame delta and a warning `failed` bubble only when a frame was rejected. Counters reset when a live run starts, and both bubbles stay hidden while not grabbing.
