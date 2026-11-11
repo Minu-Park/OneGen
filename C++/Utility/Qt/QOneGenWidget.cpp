@@ -6,7 +6,7 @@
 #include "NumericFeatureEditor.h"
 #include "OneGenFeatureTree.h"
 
-#include "OneGenCoordinator.h"
+#include "ProducerCoordinator.h"
 #include "OneGenSourceController.h"
 
 #include <QAbstractItemView>
@@ -25,7 +25,7 @@ Q_LOGGING_CATEGORY(onegenDiagnosticLog, "diagnostics.OneGen", QtInfoMsg)
 namespace {
 /** @brief Retains all exposed feature maps at their current selector state after acquisition. */
 template <typename Maps>
-void logOneGenSnapshot(const onegen::worker::Lease& lease, const Maps& features, const QString& reason) {
+void logOneGenSnapshot(const onegen::producer::Lease& lease, const Maps& features, const QString& reason) {
     if (!onegenDiagnosticLog().isDebugEnabled()) return;
     QJsonArray maps;
     for (const auto& [module, tree] : features)
@@ -70,16 +70,10 @@ void expand_camera_only(QTreeWidgetItem* item, int depth) {
   for (int i = 0; i < item->childCount(); ++i) expand_camera_only(item->child(i), depth + 1);
 }
 
-bool workerProcessDead(const QString& error)
-{
-  return error.contains(QLatin1String("Worker process exited"))
-      || error.contains(QLatin1String("Worker process crashed"));
-}
-
 }  // namespace
 
 QOneGenWidget::QOneGenWidget(
-    std::shared_ptr<onegen::worker::Coordinator> coordinator,
+    std::shared_ptr<onegen::producer::Coordinator> coordinator,
     OneGenSourceController* controller, std::vector<onegen::DeviceInfo> devices,
     DiscoverFn discover, QWidget* parent,
     const QString& settingsFile, const QString& favoritesKey)
@@ -315,7 +309,7 @@ void QOneGenWidget::refresh()
   discovery_watcher_.setFuture(QtConcurrent::run([discover = discover_, self] {
     AsyncResult result;
     try {
-      result.devices = discover([self](const onegen::worker::DiscoveryResult& update) {
+      result.devices = discover([self](const onegen::producer::DiscoveryResult& update) {
         if (!self) return;
         QMetaObject::invokeMethod(self, [self, update] {
           if (!self || self->shutting_down_) return;
@@ -375,7 +369,7 @@ void QOneGenWidget::connectCamera()
                 .arg(QLatin1String(stage)).arg(elapsed).arg(QString::fromStdString(selected.id));
         };
         result.lease = controller_->openDevice(coordinator_, selected);
-        mark("open-worker-roundtrip");
+        mark("open");
         const auto& info = result.lease->info();
         const auto name = info.display_name.empty() ? info.id : info.display_name;
         result.title = QString::fromStdString(name);
@@ -548,8 +542,7 @@ void QOneGenWidget::finishOperation()
       const QSignalBlocker blocker(grab_live_button_);
       grab_live_button_->setChecked(false); updateLiveAction();
     }
-    if (operation == Operation::Disconnect || workerProcessDead(result.error)
-        || (lease_ && !lease_->alive())) dropLease();
+    if (operation == Operation::Disconnect || (lease_ && !lease_->alive())) dropLease();
     if (!result.features.empty()) setFeatureSnapshot(result.features);
     else if (operation == Operation::Write && !result.writeNode.isEmpty())
       refreshFeatureEditor(result.writeNode, result.writeMap);
@@ -654,7 +647,7 @@ void QOneGenWidget::finishGrabOne()
   if (!result.error.isEmpty()) {
     qWarning().noquote() << QStringLiteral("[GenICam] single acquisition failed: camera=%1 stream=%2; cause=%3")
         .arg(devices_box_->currentText(), streams_box_->currentText(), result.error);
-    if (lease_ && (workerProcessDead(result.error) || !lease_->alive())) dropLease();
+    if (lease_ && !lease_->alive()) dropLease();
   } else if (lease_) {
     // The complete snapshot supersedes every invalidation queued during Single.
     if (!result.features.empty()) setFeatureSnapshot(result.features);
@@ -1374,7 +1367,7 @@ void QOneGenWidget::writeFeature(const int map_index, const QString& nodeName,
       result.error = QString::fromLocal8Bit(error.what());
     }
     // TriggerSoftware is an acquisition command. Do not insert feature reads
-    // between that command and the worker's pending buffer receive.
+    // between that command and the producer's pending buffer receive.
     if (!explicitSoftwareTrigger) {
       try {
         if (interface_) {

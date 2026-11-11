@@ -27,7 +27,7 @@ QString cameraLabel(const onegen::DeviceInfo& device) {
 }
 }
 
-QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordinator> coordinator,
+QOneGenDeviceWidget::QOneGenDeviceWidget(std::shared_ptr<onegen::producer::Coordinator> coordinator,
     OneGenSourceController* controller, std::vector<onegen::DeviceInfo> devices,
     QOneGenWidget::DiscoverFn discover, QWidget* parent,
     const QString& settingsFile, const QString& favoritesKey)

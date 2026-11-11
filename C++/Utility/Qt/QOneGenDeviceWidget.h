@@ -14,7 +14,7 @@ class QOneGenDeviceWidget final : public QWidget {
   Q_OBJECT
 public:
   /** Creates controls with optional consumer-selected favorite storage. */
-  QOneGenDeviceWidget(std::shared_ptr<onegen::worker::Coordinator> coordinator,
+  QOneGenDeviceWidget(std::shared_ptr<onegen::producer::Coordinator> coordinator,
       OneGenSourceController* controller, std::vector<onegen::DeviceInfo> devices,
       QOneGenWidget::DiscoverFn discover, QWidget* parent = nullptr,
       const QString& settingsFile = {}, const QString& favoritesKey = {});
@@ -61,7 +61,7 @@ private:
   void clearTabs();
   void updateControls();
 
-  std::shared_ptr<onegen::worker::Coordinator> coordinator_;
+  std::shared_ptr<onegen::producer::Coordinator> coordinator_;
   OneGenSourceController* controller_;
   QOneGenWidget::DiscoverFn discover_;
   QString settings_file_;

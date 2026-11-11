@@ -1,6 +1,6 @@
 #pragma once
 
-#include "OneGenCoordinator.h"
+#include "ProducerCoordinator.h"
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
@@ -34,7 +34,7 @@ inline void write(const QString& path, const QByteArray& bytes) {
     throw std::runtime_error(("Diagnostic artifact write failed: " + path).toStdString());
 }
 /** @brief Captures copied feature trees and selected axes/components, restoring every selector. */
-inline QString beforeSingle(worker::Lease& lease) {
+inline QString beforeSingle(producer::Lease& lease) {
   const auto root = qEnvironmentVariable("ONEGEN_SINGLE_DIAGNOSTICS_DIR");
   if (root.isEmpty()) return {};
   const auto directory = QDir(root).filePath(QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz")

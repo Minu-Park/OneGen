@@ -2,7 +2,8 @@
 
 #include "Utility/Qt/QOneGenDeviceWidget.h"
 #include "Chrome/ThemedDialog.h"
-#include "OneGenCoordinator.h"
+#include "ProducerCoordinator.h"
+#include "Utility/Qt/OneGenLogSink.h"
 #include "OneGenSourceController.h"
 #include "OneGen.h"
 #include "StartupDiscovery.h"
@@ -20,8 +21,8 @@
 namespace {
 
 /** @brief Translates module-owned scan outcomes into copied consumer diagnostics. */
-GenTLDiscoverySnapshot consumerStatus(const onegen::worker::StartupDiscovery::Status& status) {
-  using Phase = onegen::worker::StartupDiscovery::Phase;
+GenTLDiscoverySnapshot consumerStatus(const onegen::producer::StartupDiscovery::Status& status) {
+  using Phase = onegen::producer::StartupDiscovery::Phase;
   GenTLDiscoveryPhase phase = GenTLDiscoveryPhase::Waiting;
   switch (status.phase) {
   case Phase::Waiting: break;
@@ -36,8 +37,8 @@ GenTLDiscoverySnapshot consumerStatus(const onegen::worker::StartupDiscovery::St
 }
 
 /** @brief Logs lifecycle transitions without exposing scan ownership or updating UI. */
-void logDiscoveryState(const onegen::worker::StartupDiscovery::Status& before,
-                       const onegen::worker::StartupDiscovery::Status& after) {
+void logDiscoveryState(const onegen::producer::StartupDiscovery::Status& before,
+                       const onegen::producer::StartupDiscovery::Status& after) {
   const auto old_state = consumerStatus(before);
   const auto state = consumerStatus(after);
   qDebug().noquote() << QStringLiteral("[GenTL] consumer=onegen scan=%1 %2 -> %3 reason=%4")
@@ -98,13 +99,13 @@ std::vector<onegen::DeviceInfo> fromDiscoveryData(const QVariantList& values)
 }
 
 std::vector<onegen::DeviceInfo> discover(
-    const std::shared_ptr<onegen::worker::Coordinator>& coordinator,
-    onegen::worker::Coordinator::ProgressFn progress)
+    const std::shared_ptr<onegen::producer::Coordinator>& coordinator,
+    onegen::producer::Coordinator::ProgressFn progress)
 {
   if (!coordinator) throw std::runtime_error("GenICam discovery is shutting down.");
   const auto started = std::chrono::steady_clock::now();
   qInfo().noquote() << QStringLiteral("[GenICam] camera search started with consumer-provided producers");
-  onegen::worker::DiscoveryResult result;
+  onegen::producer::DiscoveryResult result;
   try {
     result = coordinator->discover(std::move(progress));
   } catch (const std::exception& error) {
@@ -144,16 +145,16 @@ std::vector<onegen::DeviceInfo> discover(
   return result.devices;
 }
 
-using RetainScan = std::function<void(std::shared_ptr<onegen::worker::StartupDiscovery>)>;
+using RetainScan = std::function<void(std::shared_ptr<onegen::producer::StartupDiscovery>)>;
 /** @brief Replays a shared initial scan once, then permits explicit control refreshes. */
 QOneGenWidget::DiscoverFn cachedDiscovery(
-    std::shared_ptr<onegen::worker::Coordinator> coordinator,
-    std::shared_ptr<onegen::worker::StartupDiscovery> startup, RetainScan retain) {
+    std::shared_ptr<onegen::producer::Coordinator> coordinator,
+    std::shared_ptr<onegen::producer::StartupDiscovery> startup, RetainScan retain) {
   return [coordinator = std::move(coordinator), initial =
-      std::make_shared<std::shared_ptr<onegen::worker::StartupDiscovery>>(std::move(startup)), retain = std::move(retain)]
-      (onegen::worker::Coordinator::ProgressFn progress) mutable {
+      std::make_shared<std::shared_ptr<onegen::producer::StartupDiscovery>>(std::move(startup)), retain = std::move(retain)]
+      (onegen::producer::Coordinator::ProgressFn progress) mutable {
     if (auto scan = std::exchange(*initial, {})) return scan->finish(std::move(progress));
-    auto scan = std::make_shared<onegen::worker::StartupDiscovery>(
+    auto scan = std::make_shared<onegen::producer::StartupDiscovery>(
         [coordinator](auto update) { return discover(coordinator, std::move(update)); }, logDiscoveryState);
     retain(scan);
     return scan->finish(std::move(progress));
@@ -162,9 +163,9 @@ QOneGenWidget::DiscoverFn cachedDiscovery(
 
 class OneGenPluginSession final : public IDevicePluginSession {
 public:
-  OneGenPluginSession(std::shared_ptr<onegen::worker::Coordinator> coordinator,
+  OneGenPluginSession(std::shared_ptr<onegen::producer::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
-                      std::shared_ptr<onegen::worker::StartupDiscovery> startup, QString settingsFile,
+                      std::shared_ptr<onegen::producer::StartupDiscovery> startup, QString settingsFile,
                       std::function<void(QOneGenDeviceWidget*)> registerWidget, RetainScan retain)
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
         startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
@@ -210,9 +211,9 @@ public:
   { title_changed_ = std::move(callback); }
 
 private:
-  std::shared_ptr<onegen::worker::Coordinator> coordinator_;
+  std::shared_ptr<onegen::producer::Coordinator> coordinator_;
   std::vector<onegen::DeviceInfo> devices_;
-  std::shared_ptr<onegen::worker::StartupDiscovery> startup_;
+  std::shared_ptr<onegen::producer::StartupDiscovery> startup_;
   QString settings_file_;
   std::unique_ptr<OneGenSourceController> controller_;
   QPointer<QOneGenDeviceWidget> widget_;
@@ -230,6 +231,9 @@ class OneGenPlugin final : public DevicePluginTemplate, public IDevicePluginSett
   Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
   Q_INTERFACES(IDevicePlugin IDevicePluginSettings IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus IDevicePluginGenTLRetry)
 public:
+  /** Producers run in the consumer process; their diagnostics go to its Qt log. */
+  OneGenPlugin() { onegen::qt::installLogSink(); }
+
   /** Selects consumer settings without coupling the reusable UI to host paths. */
   void setSettingsFile(const QString& fileName) override { settings_file_ = fileName; }
 
@@ -238,7 +242,7 @@ public:
     try {
       const auto reason = genTLPathChangeBlockReason();
       if (!reason.isEmpty()) throw std::runtime_error(reason.toStdString());
-      const auto worker_coordinator = coordinator();
+      const auto producer_coordinator = coordinator();
       std::vector<std::filesystem::path> producers;
       for (const auto& file : files) {
 #ifdef _WIN32
@@ -247,8 +251,8 @@ public:
         producers.emplace_back(file.toStdString());
 #endif
       }
-      if (!worker_coordinator || !worker_coordinator->set_producer_files(std::move(producers)))
-        throw std::runtime_error("Release idle GenICam workers before changing producer files.");
+      if (!producer_coordinator || !producer_coordinator->set_producer_files(std::move(producers)))
+        throw std::runtime_error("Disconnect GenICam devices and interfaces before changing producer files.");
       { std::lock_guard lock(mutex_); producers_configured_ = true; discovery_state_.transition(GenTLDiscoveryEvent::Reset); }
       qDebug().noquote() << QStringLiteral("[GenICam] consumer producer inventory: %1")
           .arg(files.isEmpty() ? QStringLiteral("(none)") : files.join(QLatin1Char('\n')));
@@ -271,12 +275,12 @@ public:
   /** @brief Starts one retained scan shared by startup and later control panels. */
   bool startGenTLDiscovery(QString* error) override {
     try {
-      const auto worker_coordinator = coordinator();
+      const auto producer_coordinator = coordinator();
       std::lock_guard lock(mutex_);
-      if (!worker_coordinator || !producers_configured_)
+      if (!producer_coordinator || !producers_configured_)
         throw std::runtime_error("The consumer must provide GenICam producer files before discovery.");
-      if (!startup_) startup_ = std::make_shared<onegen::worker::StartupDiscovery>(
-          [worker_coordinator](auto progress) { return discover(worker_coordinator, std::move(progress)); }, logDiscoveryState);
+      if (!startup_) startup_ = std::make_shared<onegen::producer::StartupDiscovery>(
+          [producer_coordinator](auto progress) { return discover(producer_coordinator, std::move(progress)); }, logDiscoveryState);
       return true;
     } catch (const std::exception& exception) {
       const auto detail = QString::fromLocal8Bit(exception.what());
@@ -294,7 +298,7 @@ public:
     try {
       QString startup_error;
       if (!startGenTLDiscovery(&startup_error)) throw std::runtime_error(startup_error.toStdString());
-      std::shared_ptr<onegen::worker::StartupDiscovery> startup;
+      std::shared_ptr<onegen::producer::StartupDiscovery> startup;
       { std::lock_guard lock(mutex_); startup = startup_; }
       const auto devices = startup->waitForCamera(std::chrono::milliseconds{0}, [] {
         return QThread::currentThread()->isInterruptionRequested();
@@ -314,12 +318,12 @@ public:
       const QVariantMap& data, QString* error) override
   {
     try {
-      const auto worker_coordinator = coordinator();
-      if (!worker_coordinator) return {};
-      std::shared_ptr<onegen::worker::StartupDiscovery> startup;
+      const auto producer_coordinator = coordinator();
+      if (!producer_coordinator) return {};
+      std::shared_ptr<onegen::producer::StartupDiscovery> startup;
       { std::lock_guard lock(mutex_); startup = startup_; }
       return std::make_unique<OneGenPluginSession>(
-          worker_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
+          producer_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
           std::move(startup), settings_file_, [this](auto* widget) { widgets_.push_back(widget); },
           [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); });
     } catch (const std::exception& exception) {
@@ -340,19 +344,19 @@ public:
     return {};
   }
 
-  /** @brief Retries the retained inventory without retiring successful producer workers. */
+  /** @brief Retries the retained inventory without closing successful producers. */
   bool retryGenTLDiscovery(QString* error) override {
     const auto reason = genTLPathChangeBlockReason();
     if (!reason.isEmpty()) { if (error) *error = reason; return false; }
-    std::shared_ptr<onegen::worker::StartupDiscovery> scan;
-    std::shared_ptr<onegen::worker::Coordinator> worker_coordinator;
+    std::shared_ptr<onegen::producer::StartupDiscovery> scan;
+    std::shared_ptr<onegen::producer::Coordinator> producer_coordinator;
     try {
-      worker_coordinator = coordinator();
+      producer_coordinator = coordinator();
       std::lock_guard lock(mutex_);
-      if (!worker_coordinator || !producers_configured_)
+      if (!producer_coordinator || !producers_configured_)
         throw std::runtime_error("The consumer must provide GenICam producer files before discovery.");
-      scan = std::make_shared<onegen::worker::StartupDiscovery>(
-          [worker_coordinator](auto progress) { return discover(worker_coordinator, std::move(progress)); }, logDiscoveryState);
+      scan = std::make_shared<onegen::producer::StartupDiscovery>(
+          [producer_coordinator](auto progress) { return discover(producer_coordinator, std::move(progress)); }, logDiscoveryState);
       startup_ = scan;
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
@@ -360,12 +364,12 @@ public:
     }
     std::erase_if(widgets_, [](const auto& widget) { return widget.isNull(); });
     for (const auto& widget : widgets_) if (widget)
-      widget->retryGenTLDiscovery(cachedDiscovery(worker_coordinator, scan,
+      widget->retryGenTLDiscovery(cachedDiscovery(producer_coordinator, scan,
           [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); }));
     return true;
   }
 
-  /** @brief Retires disconnected producer workers without unloading the plugin. */
+  /** @brief Closes idle producers without unloading the plugin. */
   bool resetGenTLSearch(QString* error) override {
     const auto reason = genTLPathChangeBlockReason();
     if (!reason.isEmpty()) { if (error) *error = reason; return false; }
@@ -403,26 +407,20 @@ public:
 private:
   QString settings_file_;
   std::vector<QPointer<QOneGenDeviceWidget>> widgets_;
-  std::shared_ptr<onegen::worker::Coordinator> coordinator()
+  std::shared_ptr<onegen::producer::Coordinator> coordinator()
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutting_down_) return {};
     if (!coordinator_) {
-      const char* worker_value = std::getenv("ONEGEN_WORKER_PATH");
-      if (!worker_value || !*worker_value)
-        throw std::runtime_error("ONEGEN_WORKER_PATH is not configured for the GenICam package.");
-      const std::filesystem::path worker(worker_value);
-      if (!std::filesystem::is_regular_file(worker))
-        throw std::runtime_error("OneGenWorker is missing from the GenICam package.");
-      coordinator_ = std::make_shared<onegen::worker::Coordinator>(worker);
+      coordinator_ = std::make_shared<onegen::producer::Coordinator>();
 
     }
     return coordinator_;
   }
 
   mutable std::mutex mutex_;
-  std::shared_ptr<onegen::worker::Coordinator> coordinator_;
-  std::shared_ptr<onegen::worker::StartupDiscovery> startup_;
+  std::shared_ptr<onegen::producer::Coordinator> coordinator_;
+  std::shared_ptr<onegen::producer::StartupDiscovery> startup_;
   GenTLDiscoveryState discovery_state_;
   bool shutting_down_ = false;
   bool producers_configured_ = false;

@@ -21,7 +21,7 @@ cmake --build build --target check
 The standalone plugin consumes `PlaygroundPluginSDK` through `find_package`.
 Only this repository, the installed SDK, Qt and the pinned EMVA GenICam package
 are needed; no host checkout, renderer, VTK or theme installation is required.
-The plugin switch enables its adapter, Qt widget and isolated worker.
+The plugin switch enables its adapter and Qt widget.
 
 ```sh
 cmake -S . -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DCMAKE_CONFIGURATION_TYPES=Release -DCMAKE_BUILD_TYPE=Release -DONEGEN_BUILD_PLAYGROUND_PLUGIN=ON -DONEGEN_BUILD_TESTS=ON
@@ -31,7 +31,7 @@ cmake --build build/plugin --config Release --target OneGenPluginPackageStage
 ```
 
 The generated package is `build/plugin/packages/Release/plugins/onegen/current`
-for a multi-configuration generator. It contains the module, worker, runtime,
+for a multi-configuration generator. It contains the module, runtime,
 manifest, icon and SDK build identity. Staging reconciles only this generated
 package and never writes to installed user packages. Use a Release SDK with
 the recorded platform, architecture, compiler and exact Qt version; this first
@@ -49,13 +49,13 @@ CMake retains discovered package directories in its cache.
 ## Runtime
 
 The consumer package declares on-demand discovery. Loading its metadata does not
-start workers. Explicit session discovery starts one shared scan and waits for
+load producers. Explicit session discovery starts one shared scan and waits for
 the first camera or scan completion, with cooperative caller cancellation.
 Copied running status includes checked/total CTIs and camera count for consumer
 loading views. Remaining producers continue after the first camera is available;
 later controls replay the retained scan. Full completion records each producer's
-outcome and original failure reason at INFO. Discovery-only worker diagnostics
-retain their original text at INFO; device/interface operations retain their
+outcome and original failure reason at INFO. Records emitted while a producer is
+being probed are reported at Debug; device/interface operations retain their
 normal warning/error levels.
 
 Pass a vendor CTI file to `OneGen::loadCti()`, then enumerate devices or open a
@@ -64,18 +64,22 @@ model. Loading a CTI executes vendor code, so only use trusted producers.
 Standalone discovery resolves `.cti` entries from `GENICAM_GENTL64_PATH` or
 `GENICAM_GENTL32_PATH`, without vendor-specific paths or filenames. The consumer
 adapter uses the exact injected producer inventory; an empty list never falls
-back to ambient paths. Discovery starts one
-`OneGenWorker` process per CTI; the first camera adopts that worker, and additional
-cameras use separate workers so Open cannot close another camera. Successfully
-closed camera workers retain their discovery caches for reconnect. Each worker preserves the producer install directory for
-relative dependencies while isolating incompatible vendor runtimes. The worker
-uses a versioned binary stdin/stdout protocol and has no Qt dependency. Do not
-copy a CTI without its producer tree.
+back to ambient paths. Producers load in the consumer process, one OneGen system
+per canonical CTI, and every SDK call for a producer is serialized by its lock.
+Each producer loads from its install directory so relative dependencies resolve.
+A CTI whose shipped libraries collide with different same-named libraries
+already loaded in the process is refused before load. On Windows, OneGen also
+follows the CTI's static and delay-load imports, registers the producer's
+library directories (including vendor runtimes found through `PATH`) for the
+process, and refuses a CTI with an import it cannot find. Producer libraries stay
+mapped until process exit, and a native fault in a producer terminates the
+process. Do not copy a CTI without its producer tree. See
+[In-Process GenTL Producers](docs/IN_PROCESS_PRODUCERS.md).
 
 The selector explicitly distinguishes every enumerated Interface from Device entries.
 InterfaceIDs are opaque and producer-scoped; DeviceIDs are Interface-scoped.
 Opening an Interface requires no manufacturer adapter or attached Device. Connected
-Interfaces share one worker with their independent Device/DataStream sessions.
+Interfaces share their producer with their independent Device/DataStream sessions.
 Physical-board equivalence across producers or SDKs is not inferred; native
 Producer/SDK resource arbitration determines whether a connection is available.
 
@@ -88,7 +92,7 @@ and use the same module commands. A target retains producer, Interface and Devic
 identity; each connection gets a fresh UUID. Pending GUI/API/discovery or Interface
 work is refused as Busy, and accepted external work drains before teardown.
 Explicit close and Live stop retain state on backend refusal. Closed leases reject
-RPCs even when their worker is reused. Single completes after frame conversion;
+every request even when their camera is reused for a later connection. Single completes after frame conversion;
 consumer presentation and artifact export remain separate authorities.
 
 The source controller also implements the consumer's optional
@@ -99,16 +103,16 @@ use `DataStream:<index>:<generation>`; changing away and back invalidates old
 targets. Connection UUIDs, current
 transitive selector values and query-observed revisions qualify targets. Integer
 values remain signed 64-bit; SDK readback may differ from a requested value.
-The checked worker request revalidates access, constraints and complete selector
-context under the existing node-map lock through the SDK setter. After setter
-preparation completes, the worker observes actual state. Failed observation retains an applied effect
+The checked write revalidates access, constraints and complete selector
+context under the producer lock through the SDK setter. After setter
+preparation completes, the lease observes actual state. Failed observation retains an applied effect
 and explicitly unavailable readback.
 Unreadable values are absent and incomplete selector observations refuse writes.
 GUI operations and external requests share control admission; raw-register modal
 inspection also holds that admission. Writes never select a context or stop Live
 implicitly. TriggerSoftware retains the existing trigger/receive path.
 Revisions count observed changes; stream generations additionally fence selection
-ABA. The node-map lock serializes consumer SDK access, but does not make an
+ABA. The producer lock serializes consumer SDK access, but does not make an
 autonomously changing physical device transactional. Interface/System
 parameters, raw-register API writes, multiple-connection lifecycle control and
 cancellation of pending Single remain outside this contract.
@@ -161,13 +165,13 @@ and subsequent URLs are still tried. The transfer limit does not bound ZIP
 expansion inside GenApi. File URL paths decode percent escapes and use UTF-8 filesystem paths.
 
 Set `ONEGEN_TRACE_CONNECT=1` before starting the consumer to enable monotonic
-Connect stage timings. The worker reports device refresh/open, per-module XML,
-stream preparation, and feature snapshots; the Qt controls report worker round
-trips and GUI tree construction. Worker timing lines are forwarded to system logs
-with the CTI path. Timings are disabled by default.
+Connect stage timings. The producer layer reports device refresh/open, per-module
+XML, stream preparation, and feature snapshots; the Qt controls report the open
+call and GUI tree construction. Timing lines go to the consumer log. Timings are
+disabled by default.
 
 Controls do not periodically poll or refresh the feature tree. Operation-boundary
-refreshes and queued GenApi invalidations remain. The explicit worker polling API
+refreshes and queued GenApi invalidations remain. The explicit lease polling API
 can advance GenApi-declared intervals and drain events; the control panel no longer
 invokes it on a timer. Producers that
 support `EVENT_FEATURE_INVALIDATE`, `EVENT_MODULE`, or `EVENT_REMOTE_DEVICE`
@@ -183,12 +187,11 @@ bounded to 64 KiB and registers are not read eagerly during tree snapshots.
 The feature-tree context menu copies/restores the selected module's GenApi feature
 bag through the clipboard. Restoration uses selector state and verifies values.
 A failed restore can have applied earlier entries; it is not transactional.
-The worker and client must both use protocol version 13.
 
 Copied `FeatureNode` observations include direct GenApi selecting features,
 including hidden or unreadable selectors. Selector records are shallow copies;
 their readable flags and observation errors determine whether a value is known.
-Integer values retain signed 64-bit precision through the worker protocol and
+Integer values retain signed 64-bit precision through copied observations and
 diagnostic JSON. Value/constraint observation failures are explicit rather than
 successful default values. These observations do not change selectors or provide
 an atomic write-validation/acquisition fence; consumer feature commands must
@@ -198,7 +201,7 @@ Single-image payloads are copied from the producer's image offset using the
 declared row stride and delivered height; prefix bytes, Y padding and trailing
 chunk metadata are excluded. Available chunk descriptors are validated against
 delivered bytes and retained in `Frame::chunks` as owned ID/offset/raw-byte data,
-including through worker IPC. Chunk-only and other non-image payloads retain
+including in delivered frames. Chunk-only and other non-image payloads retain
 their raw bytes but are not interpreted as images by the graphics adapter.
 Chunk geometry is read while attached to the GenApi node map; general decoded
 chunk values are not exposed by this raw-byte contract. Compressed images with
@@ -224,7 +227,7 @@ Cylindrical ABC/AC/RectifiedC samples are converted to Cartesian using radians a
 scale/offset. Meter and inch distance units convert physical axes to millimetres
 and leave PixelGrid X/Y as pixel indices. Confidence1 and Confidence1p are preserved
 as 0/1 auxiliaries. Calibration availability, output mode, coordinate system and
-stereo parameters survive worker IPC.
+stereo parameters are retained in delivered frames.
 Endian identifier 0 retains the legacy native-host interpretation; explicit
 little/big endian identifiers use byte-order conversion for unpacked multi-byte
 coordinates and 2D images. Packed `p` formats stay LSB-first.
@@ -250,8 +253,8 @@ for (const auto& device : gentl.enumerate())
 The repository follows the Camera/Gocator layout: public headers live next to
 sources in `C++/`, internals in `C++/Internal/`, `QOneGenWidget` in
 `C++/Utility/Qt/`, and the Playground plugin under
-`C++/Utility/PlaygroundAdapter/`. Isolated CTI workers stay in
-`C++/Utility/Worker/`. The EMVA GenICam fetch cache is `genicam/`; vendor `.cti`
+`C++/Utility/PlaygroundAdapter/`. In-process producer coordination and the frame
+pool live in `C++/Utility/Producer/`. The EMVA GenICam fetch cache is `genicam/`; vendor `.cti`
 files are not stored in the module.
 
 Playground composes the optional `OneGen::QtWidget`, `OneGen::PlaygroundAdapter`,
@@ -259,7 +262,7 @@ and `OneGenPlugin` targets while OneGen keeps its implementation and package
 identity independent.
 
 The Playground session contract is documented in
-[Multi-Vendor CTI Runtime](docs/MULTI_VENDOR_CTI_WORKERS.md).
+[In-Process GenTL Producers](docs/IN_PROCESS_PRODUCERS.md).
 
 ## Qt feature browsing
 

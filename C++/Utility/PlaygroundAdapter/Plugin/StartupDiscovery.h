@@ -1,6 +1,6 @@
 #pragma once
 
-#include "OneGenCoordinator.h"
+#include "ProducerCoordinator.h"
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <stdexcept>
 
-namespace onegen::worker {
+namespace onegen::producer {
 
 /** Owns one scan across the startup wait and subsequent control-panel updates. */
 class StartupDiscovery {
@@ -153,4 +153,4 @@ private:
   std::shared_future<std::vector<DeviceInfo>> task_;
 };
 
-} // namespace onegen::worker
+} // namespace onegen::producer

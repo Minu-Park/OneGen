@@ -1,5 +1,5 @@
 #include "OneGenSourceController.h"
-#include "OneGenCoordinator.h"
+#include "ProducerCoordinator.h"
 #include <QDebug>
 #include <QThread>
 #include <QtConcurrent>
@@ -14,7 +14,7 @@ using Error = DeviceParameterError;
 using Kind = DeviceParameterKind;
 using NodeKind = onegen::NodeKind;
 constexpr std::array<const char*, 3> scopes{"RemoteDevice", "DataStream", "Device"};
-std::string parameterScope(int module, const onegen::worker::NodeObservation& observed) {
+std::string parameterScope(int module, const onegen::producer::NodeObservation& observed) {
   return module == 1 ? "DataStream:" + std::to_string(observed.stream_index) + ":" + std::to_string(observed.stream_generation) : scopes.at(module);
 }
 int parameterModule(const std::string& scope) {
@@ -113,7 +113,7 @@ DeviceParameterResult OneGenSourceController::parameterAdmission() {
   return {};
 }
 DeviceParameterDescriptor OneGenSourceController::observeParameter(
-    const std::shared_ptr<onegen::worker::Lease>& lease, const std::string& connection,
+    const std::shared_ptr<onegen::producer::Lease>& lease, const std::string& connection,
     int module, const onegen::FeatureNode& node, bool completeContext, const std::string& scopeOverride) {
   DeviceParameterDescriptor result;
   result.target = {connection, scopeOverride.empty() ? scopes.at(module) : scopeOverride, node.name, {}};
@@ -184,7 +184,7 @@ DeviceParameterResult OneGenSourceController::requestParameters(InventoryComplet
   if (!completion) return failure(Error::InvalidArgument, "A completion is required.");
   const auto admission = parameterAdmission();
   if (admission.error != Error::None) return admission;
-  std::vector<std::pair<std::shared_ptr<onegen::worker::Lease>, std::string>> connections;
+  std::vector<std::pair<std::shared_ptr<onegen::producer::Lease>, std::string>> connections;
   for (auto* controller : parameterControllers()) {
     std::lock_guard lock(controller->mutex_);
     if (controller->owned_lease_) connections.emplace_back(controller->owned_lease_, controller->connection_id_.toStdString());
@@ -239,7 +239,7 @@ DeviceParameterResult OneGenSourceController::requestParameter(DeviceParameterTa
   const int module = parameterModule(target.scope);
   if (module < 0) return failure(Error::Unsupported, "Exact RemoteDevice, Device or qualified DataStream scope required.");
   OneGenSourceController* selected = nullptr;
-  std::shared_ptr<onegen::worker::Lease> lease;
+  std::shared_ptr<onegen::producer::Lease> lease;
   bool connected = false;
   for (auto* controller : parameterControllers()) {
     std::lock_guard lock(controller->mutex_);
@@ -268,8 +268,8 @@ DeviceParameterResult OneGenSourceController::requestParameter(DeviceParameterTa
             const auto operation = value ? setter(current.kind, *value) : std::pair<std::string, std::string>{"execute", ""};
             dispatched = true;
             const auto written = lease->write_node_checked(module, target.name, operation.first, operation.second, observed, revision.has_value());
-            using Status = onegen::worker::NodeWriteStatus;
-            using Effect = onegen::worker::NodeWriteEffect;
+            using Status = onegen::producer::NodeWriteStatus;
+            using Effect = onegen::producer::NodeWriteEffect;
             result.effect = written.effect == Effect::Applied ? DeviceParameterEffect::Applied
                 : written.effect == Effect::Unknown ? DeviceParameterEffect::Unknown : DeviceParameterEffect::None;
             result.error = written.status == Status::Success ? Error::None : written.status == Status::Conflict ? Error::Conflict
@@ -278,7 +278,7 @@ DeviceParameterResult OneGenSourceController::requestParameter(DeviceParameterTa
             result.descriptor.reset();
             if (written.observation) result.descriptor = observeParameter(lease, target.connectionId, module,
                 written.observation->node, true, parameterScope(module, *written.observation));
-            // The worker retains trigger/receive ordering; acquisition commands have no extra feature reads.
+            // The producer retains trigger/receive ordering; acquisition commands have no extra feature reads.
             if (result.effect == DeviceParameterEffect::Applied && !(module == 0 && target.name == "TriggerSoftware" && !value)) selected->refreshControlSnapshot();
           }
         } else if (!current.available) result.error = Error::Unavailable;

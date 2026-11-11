@@ -1,11 +1,9 @@
 option(ONEGEN_BUILD_TESTS "Build OneGen tests" ${PROJECT_IS_TOP_LEVEL})
-option(ONEGEN_BUILD_WORKER "Build the isolated GenTL worker" OFF)
 option(ONEGEN_BUILD_QT_WIDGET "Build the optional OneGen Qt widget target." OFF)
 option(ONEGEN_BUILD_PLAYGROUND_ADAPTER "Build the Playground GraphicsFrame adapter" OFF)
 option(ONEGEN_BUILD_PLAYGROUND_PLUGIN "Build the Playground device plugin" OFF)
 
 if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
-  set(ONEGEN_BUILD_WORKER ON)
   set(ONEGEN_BUILD_QT_WIDGET ON)
   set(ONEGEN_BUILD_PLAYGROUND_ADAPTER ON)
 endif()
@@ -22,6 +20,7 @@ add_library(onegen
   OneGenCamera.cpp
   OneGenNode.cpp
   Internal/Gentl.cpp
+  Internal/ModuleGuard.cpp
   Internal/XmlHttp.cpp
   Internal/Match.cpp
   Internal/OneGenDefaults.cpp
@@ -74,12 +73,6 @@ if(ONEGEN_BUILD_TESTS)
   target_link_libraries(test_node PRIVATE onegen)
   add_test(NAME test_node COMMAND test_node)
 
-  add_executable(test_worker_protocol Tests/test_worker_protocol.cpp)
-  target_include_directories(test_worker_protocol PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Worker")
-  target_link_libraries(test_worker_protocol PRIVATE onegen)
-  add_test(NAME test_worker_protocol COMMAND test_worker_protocol)
-
   add_executable(test_pinned_acquisition Tests/test_pinned_acquisition.cpp)
   target_link_libraries(test_pinned_acquisition PRIVATE onegen)
   add_test(NAME test_pinned_acquisition COMMAND test_pinned_acquisition)
@@ -88,14 +81,27 @@ if(ONEGEN_BUILD_TESTS)
   target_link_libraries(test_pixel_layout PRIVATE onegen)
   add_test(NAME test_pixel_layout COMMAND test_pixel_layout)
 
-  add_executable(test_worker_frame_pool Tests/test_worker_frame_pool.cpp
-    Utility/Worker/WorkerFramePool.cpp)
-  target_include_directories(test_worker_frame_pool PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Worker")
-  target_link_libraries(test_worker_frame_pool PRIVATE onegen)
-  add_test(NAME test_worker_frame_pool COMMAND test_worker_frame_pool)
-  foreach(_test test_open_query test_node test_worker_protocol test_pinned_acquisition
-      test_pixel_layout test_worker_frame_pool)
+  add_library(GuardProbe SHARED Tests/GuardProbe.cpp)
+  add_executable(test_module_guard Tests/test_module_guard.cpp)
+  target_link_libraries(test_module_guard PRIVATE onegen ${CMAKE_DL_LIBS})
+  add_dependencies(test_module_guard GuardProbe)
+  if(MSVC)
+    add_library(GuardDependency SHARED Tests/GuardDependency.cpp)
+    set_target_properties(GuardDependency PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY $<1:${CMAKE_CURRENT_BINARY_DIR}/guard_dependency>)
+    add_library(GuardDelayed SHARED Tests/GuardDelayed.cpp)
+    set_target_properties(GuardDelayed PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY $<1:${CMAKE_CURRENT_BINARY_DIR}/guard_delayed>)
+    target_link_libraries(GuardDelayed PRIVATE GuardDependency delayimp)
+    target_link_options(GuardDelayed PRIVATE /DELAYLOAD:GuardDependency.dll)
+    add_dependencies(test_module_guard GuardDelayed)
+    add_test(NAME test_module_guard COMMAND test_module_guard $<TARGET_FILE:GuardProbe>
+      $<TARGET_FILE:GuardDelayed> $<TARGET_FILE:GuardDependency>)
+  else()
+    add_test(NAME test_module_guard COMMAND test_module_guard $<TARGET_FILE:GuardProbe>)
+  endif()
+  foreach(_test test_open_query test_node test_pinned_acquisition
+      test_pixel_layout test_module_guard)
     target_compile_options(${_test} PRIVATE
       $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
       $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
@@ -125,16 +131,37 @@ if(ONEGEN_BUILD_TESTS)
   endif()
 endif()
 
-if(ONEGEN_BUILD_WORKER)
-  add_executable(OneGenWorker
-    Utility/Worker/OneGenWorkerMain.cpp
-    Utility/Worker/OneGenWorkerMessages.h
-    Utility/Worker/OneGenWorkerProtocol.h
-    Utility/Worker/WorkerFramePool.cpp
-    Utility/Worker/WorkerFramePool.h)
-  target_include_directories(OneGenWorker PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Worker")
-  target_link_libraries(OneGenWorker PRIVATE onegen)
+# In-process producer coordination: discovery, device leases and the frame slot pool.
+add_library(OneGenProducer STATIC
+  Utility/Producer/FramePool.cpp
+  Utility/Producer/FramePool.h
+  Utility/Producer/ParameterTypes.h
+  Utility/Producer/ProducerCoordinator.cpp
+  Utility/Producer/ProducerCoordinator.h)
+add_library(OneGen::Producer ALIAS OneGenProducer)
+target_include_directories(OneGenProducer PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Producer")
+target_link_libraries(OneGenProducer PUBLIC onegen)
+if(ONEGEN_BUILD_TESTS)
+  add_executable(test_frame_pool Tests/test_frame_pool.cpp)
+  target_link_libraries(test_frame_pool PRIVATE OneGen::Producer)
+  add_test(NAME test_frame_pool COMMAND test_frame_pool)
+  add_executable(test_producer Tests/test_producer.cpp)
+  target_link_libraries(test_producer PRIVATE OneGen::Producer)
+  add_dependencies(test_producer SyntheticGenTL FailingInitProducer)
+  add_test(NAME test_producer COMMAND test_producer
+    $<TARGET_FILE:SyntheticGenTL> $<TARGET_FILE:FailingInitProducer>)
+  foreach(_test test_frame_pool test_producer)
+    target_compile_options(${_test} PRIVATE
+      $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+      $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+  endforeach()
+  set_tests_properties(test_producer PROPERTIES TIMEOUT 300)
+  if(ONEGEN_GENICAM_RUNTIME_FILES)
+    set_tests_properties(test_producer PROPERTIES ENVIRONMENT_MODIFICATION
+      "PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+  endif()
 endif()
 
 if(ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUGIN)
@@ -147,24 +174,9 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
   if(ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     find_package(Qt6 REQUIRED COMPONENTS Concurrent)
   endif()
-  if(NOT ONEGEN_BUILD_WORKER)
-    message(FATAL_ERROR "OneGen Qt support requires ONEGEN_BUILD_WORKER")
-  endif()
-  add_library(OneGenWorkerClient STATIC
-    Utility/Worker/OneGenCoordinator.cpp
-    Utility/Worker/OneGenCoordinator.h
-    Utility/Worker/OneGenWorkerClient.cpp
-    Utility/Worker/OneGenWorkerClient.h
-    Utility/Worker/OneGenWorkerMessages.h
-    Utility/Worker/OneGenWorkerProtocol.h)
-  add_library(OneGen::WorkerClient ALIAS OneGenWorkerClient)
-  target_include_directories(OneGenWorkerClient PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Worker")
-  target_link_libraries(OneGenWorkerClient PUBLIC onegen Qt6::Core)
   if(ONEGEN_BUILD_TESTS)
     add_executable(test_logging Tests/test_logging.cpp)
-    target_link_libraries(test_logging PRIVATE OneGen::WorkerClient)
+    target_link_libraries(test_logging PRIVATE onegen Qt6::Core)
     target_compile_options(test_logging PRIVATE
       $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
       $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
@@ -185,42 +197,6 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
     endif()
-    add_executable(test_worker Tests/test_worker.cpp)
-    target_link_libraries(test_worker PRIVATE OneGen::WorkerClient)
-    target_compile_options(test_worker PRIVATE
-      $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
-      $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
-    add_test(NAME test_worker COMMAND test_worker $<TARGET_FILE:OneGenWorker>)
-    add_executable(test_worker_direct_shm Tests/test_worker_direct_shm.cpp)
-    target_link_libraries(test_worker_direct_shm PRIVATE OneGen::WorkerClient)
-    target_compile_options(test_worker_direct_shm PRIVATE
-      $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
-      $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
-    add_dependencies(test_worker_direct_shm OneGenWorker SyntheticGenTL)
-    add_test(NAME test_worker_direct_shm COMMAND test_worker_direct_shm
-      $<TARGET_FILE:OneGenWorker> $<TARGET_FILE:SyntheticGenTL>)
-    set_tests_properties(test_worker_direct_shm PROPERTIES TIMEOUT 300
-      ENVIRONMENT_MODIFICATION
-        "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
-    add_test(NAME test_worker_inactive_producer COMMAND test_worker --inactive-producer
-      $<TARGET_FILE:OneGenWorker> $<TARGET_FILE:FailingInitProducer>)
-    add_executable(test_worker_errors Tests/test_worker_errors.cpp)
-    target_link_libraries(test_worker_errors PRIVATE OneGen::WorkerClient)
-    add_dependencies(test_worker_errors test_worker OneGenWorker FailingInitProducer)
-    add_test(NAME test_worker_errors COMMAND test_worker_errors
-      $<TARGET_FILE:test_worker> $<TARGET_FILE:OneGenWorker> $<TARGET_FILE:FailingInitProducer>)
-    set_tests_properties(test_worker_errors PROPERTIES ENVIRONMENT_MODIFICATION
-      "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
-    add_test(NAME test_worker_package COMMAND ${CMAKE_COMMAND}
-      "-DWORKER_FILE=$<TARGET_FILE:OneGenWorker>"
-      "-DCMAKE_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_worker_package.cmake")
-    if(ONEGEN_GENICAM_RUNTIME_FILES)
-      list(GET ONEGEN_GENICAM_RUNTIME_FILES 0 _onegen_runtime_file)
-      get_filename_component(_onegen_runtime_dir "${_onegen_runtime_file}" DIRECTORY)
-      set_tests_properties(test_worker test_worker_inactive_producer PROPERTIES ENVIRONMENT_MODIFICATION
-        "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_runtime_dir}")
-    endif()
   endif()
 endif()
 
@@ -230,9 +206,6 @@ if(ONEGEN_BUILD_QT_WIDGET)
   endif()
   if(NOT Qt6_FOUND)
     message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires Qt 6.")
-  endif()
-  if(NOT TARGET OneGen::WorkerClient)
-    message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires OneGen::WorkerClient.")
   endif()
   if(NOT TARGET Playground::DevicePlugin)
     message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires Playground::DevicePlugin.")
@@ -249,6 +222,7 @@ if(ONEGEN_BUILD_QT_WIDGET)
     Utility/Qt/QOneGenWidget.cpp
     Utility/Qt/QOneGenWidget.h
     Utility/Qt/NumericFeatureEditor.h
+    Utility/Qt/OneGenLogSink.h
   )
   add_library(OneGen::QtWidget ALIAS OneGenQtWidget)
   set_target_properties(OneGenQtWidget PROPERTIES AUTOMOC ON)
@@ -259,7 +233,7 @@ if(ONEGEN_BUILD_QT_WIDGET)
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source")
   target_link_libraries(OneGenQtWidget
     PUBLIC
-      OneGen::WorkerClient
+      OneGen::Producer
       Playground::DevicePlugin
       Resources::Widgets
       Qt6::Widgets
@@ -340,20 +314,19 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
   endforeach()
   set_target_properties(OneGenPlugin PROPERTIES
     PLAYGROUND_PLUGIN_RUNTIME_PAYLOAD_DIR "${_onegen_runtime_payload}"
-    PLAYGROUND_PLUGIN_RUNTIME_DEPENDENCY_DEST "runtime"
-    PLAYGROUND_PLUGIN_AUXILIARY_TARGETS OneGenWorker)
+    PLAYGROUND_PLUGIN_RUNTIME_DEPENDENCY_DEST "runtime")
   if(PROJECT_NAME STREQUAL "OneGen" AND PROJECT_IS_TOP_LEVEL)
     if(APPLE)
-      set_target_properties(OneGenPlugin OneGenWorker PROPERTIES
+      set_target_properties(OneGenPlugin PROPERTIES
         BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "@loader_path/runtime;@executable_path/../Frameworks")
     elseif(UNIX)
-      set_target_properties(OneGenPlugin OneGenWorker PROPERTIES
+      set_target_properties(OneGenPlugin PROPERTIES
         BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "$ORIGIN/runtime")
     endif()
     playground_sdk_package_plugin(OneGenPlugin
       PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
       ICON "${PlaygroundPluginSDK_ICON_DIR}/genicam-48.png"
-      AUXILIARY_TARGETS OneGenWorker RUNTIME_FILES ${ONEGEN_GENICAM_RUNTIME_FILES})
+      RUNTIME_FILES ${ONEGEN_GENICAM_RUNTIME_FILES})
   endif()
   message(STATUS "[OneGen] OneGenPlugin enabled.")
   if(ONEGEN_BUILD_TESTS)
@@ -363,12 +336,12 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     target_link_libraries(test_plugin_discovery PRIVATE Playground::DevicePlugin Qt6::Widgets Qt6::Test)
     target_compile_definitions(test_plugin_discovery PRIVATE
       ONEGEN_TEST_PLUGIN="$<TARGET_FILE:OneGenPlugin>"
-      ONEGEN_TEST_PEER="$<TARGET_FILE:test_worker>")
-    add_dependencies(test_plugin_discovery OneGenPlugin test_worker)
+      ONEGEN_TEST_PRODUCER="$<TARGET_FILE:SyntheticGenTL>")
+    add_dependencies(test_plugin_discovery OneGenPlugin SyntheticGenTL)
     add_test(NAME test_plugin_discovery COMMAND test_plugin_discovery)
     set_tests_properties(test_plugin_discovery PROPERTIES TIMEOUT 30
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
   endif()
 endif()
 
