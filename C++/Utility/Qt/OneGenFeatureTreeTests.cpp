@@ -17,6 +17,7 @@
 #include <QHoverEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLoggingCategory>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -31,6 +32,8 @@
 #include <QUuid>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <mutex>
 #include <stdexcept>
 
 namespace {
@@ -83,6 +86,32 @@ onegen::FeatureNode snapshot(bool present, bool enabled) {
   return root;
 }
 
+std::mutex capturedLogMutex;
+QStringList capturedLogs;
+
+/** @brief Captures every emitted message so tests can assert Debug-gated diagnostics. */
+struct LogCapture {
+  QtMessageHandler previous = qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString& text) {
+    std::lock_guard lock(capturedLogMutex);
+    capturedLogs.push_back(text);
+  });
+  LogCapture() { std::lock_guard lock(capturedLogMutex); capturedLogs.clear(); }
+  ~LogCapture() {
+    qInstallMessageHandler(previous);
+    QLoggingCategory::setFilterRules({});
+  }
+  qsizetype count(const QString& text) const {
+    std::lock_guard lock(capturedLogMutex);
+    return std::count_if(capturedLogs.begin(), capturedLogs.end(), [&](const QString& line) { return line.contains(text); });
+  }
+};
+
+/** @brief Mirrors the consumer Debug switch, which toggles diagnostics.* debug output. */
+void setDebug(bool enabled) {
+  QLoggingCategory::setFilterRules(enabled ? QStringLiteral("diagnostics.*.debug=true")
+                                           : QStringLiteral("diagnostics.*.debug=false"));
+}
+
 } // namespace
 
 class FeatureTreeTests final : public QObject {
@@ -117,6 +146,52 @@ private slots:
     parent.setFrameConsumer([&](SessionFrame&&, unsigned) { ++calls; });
     child->deliver(frame, "test");
     QCOMPARE(parent.runtimeDiagnostics(0).delivered, std::uint64_t(1));
+  }
+  void firstFrameDetailIsDebugOnly() {
+    LogCapture logs;
+    onegen::Frame frame;
+    frame.width = 2; frame.height = 2; frame.stride = 2;
+    frame.pixel_format = 0x01080001;
+    frame.payload = {1, 2, 3, 4};
+    setDebug(false);
+    OneGenSourceController quiet;
+    quiet.setFrameConsumer([](SessionFrame&&, unsigned) {});
+    quiet.deliver(frame, "test");
+    QCOMPARE(logs.count(QStringLiteral("first frame received:")), qsizetype(0));
+    QCOMPARE(logs.count(QStringLiteral("first frame converted:")), qsizetype(0));
+    setDebug(true);
+    OneGenSourceController verbose;
+    verbose.setFrameConsumer([](SessionFrame&&, unsigned) {});
+    verbose.deliver(frame, "test");
+    QCOMPARE(logs.count(QStringLiteral("first frame received:")), qsizetype(1));
+    QCOMPARE(logs.count(QStringLiteral("first frame converted:")), qsizetype(1));
+  }
+  void liveTelemetryFollowsDebug() {
+    LogCapture logs;
+    OneGenSourceController controller;
+    QOneGenWidget panel({}, &controller, {}, {});
+    controller.grabbing_.store(true);
+    controller.rejected_frames_.store(2);
+    panel.diagnostics_clock_.start();
+    setDebug(false);
+    panel.last_diagnostics_log_ms_ = -10000;  // Make the periodic log due on this tick.
+    panel.updateDiagnostics();
+    QVERIFY(panel.fps_->isHidden());
+    QVERIFY(panel.failed_->isHidden());
+    QCOMPARE(logs.count(QStringLiteral("[GenICam] diagnostics:")), qsizetype(0));
+    // A mid-run toggle is observed on the next tick without restarting acquisition.
+    setDebug(true);
+    panel.last_diagnostics_log_ms_ = -10000;
+    panel.updateDiagnostics();
+    QCOMPARE(logs.count(QStringLiteral("[GenICam] diagnostics:")), qsizetype(1));
+    QVERIFY(!panel.fps_->isHidden());
+    QVERIFY(!panel.failed_->isHidden());
+    QCOMPARE(panel.failed_->text(), QStringLiteral("2 failed"));
+    setDebug(false);
+    panel.updateDiagnostics();
+    QVERIFY(panel.fps_->isHidden());
+    QVERIFY(panel.failed_->isHidden());
+    controller.grabbing_.store(false);
   }
   void init() {
     QSettings settings(QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))

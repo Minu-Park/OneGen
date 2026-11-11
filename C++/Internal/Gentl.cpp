@@ -1,4 +1,5 @@
 #include "Internal/Gentl.h"
+#include "Internal/ModuleGuard.h"
 #include "Internal/StageLog.h"
 
 #include <sstream>
@@ -34,15 +35,6 @@ void* load_lib(const std::filesystem::path& p) {
 #endif
 }
 
-void unload_lib(void* h) {
-  if (!h) return;
-#ifdef _WIN32
-  FreeLibrary(static_cast<HMODULE>(h));
-#else
-  dlclose(h);
-#endif
-}
-
 void* sym(void* h, const char* name) {
 #ifdef _WIN32
   return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(h), name));
@@ -74,13 +66,23 @@ void Gentl::check(GenTL::GC_ERROR err, const char* where) const {
 
 void Gentl::load(const std::filesystem::path& cti) {
   const auto started = std::chrono::steady_clock::now();
+  // A same-name library already bound to another file would be silently shared by this
+  // producer; refuse before the loader runs any of its code.
+  // A missing delay-loaded import would terminate the process on first use. The consumer
+  // process does not search PATH, so the producer's library directories are registered.
+  const auto environment = detail::inspect_producer(cti);
+  if (!environment.conflicts.empty() || !environment.missing.empty()) {
+    stage_log_warning("producer refused: cti=%s conflicts=%zu missing=%zu", cti.string().c_str(),
+                      environment.conflicts.size(), environment.missing.size());
+    throw Error(detail::describe_producer_refusal(cti, environment));
+  }
+  detail::register_producer_directories(environment.directories);
   lib = load_lib(cti);
   const auto loaded = std::chrono::steady_clock::now();
 #define OG_SYM(name)                                                \
   do {                                                              \
     name = reinterpret_cast<decltype(name)>(sym(lib, #name));       \
     if (!name) {                                                    \
-      unload_lib(lib);                                              \
       lib = nullptr;                                                \
       throw Error(std::string("loadCti: missing symbol ") + #name); \
     }                                                               \
@@ -99,7 +101,6 @@ void Gentl::load(const std::filesystem::path& cti) {
   if (init_result != GenTL::GC_ERR_SUCCESS) {
     // A failed initialization does not establish a usable producer runtime.
     // Preserve its return code without calling GCGetLastError or GCCloseLib.
-    unload_lib(lib);
     *this = Gentl{};
     throw Error("GCInitLib failed (" + std::to_string(init_result) + ")");
   }
@@ -125,10 +126,12 @@ void Gentl::close_tl() {
   }
 }
 
+// Producer libraries stay mapped until process exit. Unloading a vendor runtime that may
+// still own threads, callbacks or process-global state is not safe in the consumer process;
+// loading the same canonical CTI again reuses the mapped module.
 void Gentl::unload() {
   close_tl();
   if (GCCloseLib) GCCloseLib();
-  unload_lib(lib);
   lib = nullptr;
 }
 

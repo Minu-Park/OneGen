@@ -286,6 +286,11 @@ bool Camera::is_acquiring() const {
   std::lock_guard<std::mutex> lock(impl_->acq_mu);
   return impl_->acquiring;
 }
+std::size_t Camera::payload_size() {
+  if (!impl_->opened) throw Error("payload_size: camera not open");
+  impl_->prepare_stream();
+  return impl_->payload_size();
+}
 const DeviceInfo& Camera::info() const { return impl_->info; }
 NodeMap& Camera::features() {
   return impl_->features.empty() ? impl_->device_features : impl_->features;

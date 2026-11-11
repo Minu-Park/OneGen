@@ -15,6 +15,8 @@
 #include <string_view>
 
 namespace onegen {
+
+void set_log_sink(LogSink sink) noexcept { detail::log_sink.store(sink); }
 namespace {
 
 std::string dotted_ipv4(std::uint32_t v) {

@@ -4,7 +4,7 @@
 
 #include "OneGenNode.h"
 #include "OneGenTypes.h"
-#include "OneGenCoordinator.h"
+#include "ProducerCoordinator.h"
 #include "engine/GraphicsFrameAdapter.h"
 
 #include <QElapsedTimer>
@@ -30,7 +30,7 @@ class QTimer;
 class QToolButton;
 class OneGenFeatureTree;
 class QTreeWidgetItem;
-namespace onegen::worker {
+namespace onegen::producer {
 class Coordinator;
 class Lease;
 }
@@ -40,9 +40,9 @@ class QOneGenWidget final : public QWidget, protected OneGenControlUi {
   Q_OBJECT
 public:
   using DiscoverFn = std::function<std::vector<onegen::DeviceInfo>(
-      onegen::worker::Coordinator::ProgressFn)>;
+      onegen::producer::Coordinator::ProgressFn)>;
   /** Creates controls with optional consumer-selected favorite storage. */
-  QOneGenWidget(std::shared_ptr<onegen::worker::Coordinator> coordinator,
+  QOneGenWidget(std::shared_ptr<onegen::producer::Coordinator> coordinator,
                 OneGenSourceController* controller,
                 std::vector<onegen::DeviceInfo> devices,
                 DiscoverFn discover,
@@ -73,6 +73,7 @@ signals:
   void stateChanged();
 
 private:
+  friend class FeatureTreeTests;
   using FeatureRead = std::function<onegen::FeatureNode(int, std::string_view)>;
   using FeatureWrite =
       std::function<onegen::FeatureNode(int, std::string_view, std::string_view, std::string_view)>;
@@ -83,7 +84,7 @@ private:
     std::vector<onegen::DeviceInfo> devices;
     std::vector<onegen::DataStreamInfo> streams;
     std::vector<std::pair<std::string, onegen::FeatureNode>> features;
-    std::shared_ptr<onegen::worker::Lease> lease;
+    std::shared_ptr<onegen::producer::Lease> lease;
     QString writeNode;
     QString writeOp;
     QString writeValue;
@@ -164,8 +165,8 @@ private:
   void writeFeature(int map_index, const QString& nodeName, std::string_view op,
                     std::string_view value);
 
-  std::shared_ptr<onegen::worker::Coordinator> coordinator_;
-  std::shared_ptr<onegen::worker::Lease> lease_;
+  std::shared_ptr<onegen::producer::Coordinator> coordinator_;
+  std::shared_ptr<onegen::producer::Lease> lease_;
   std::optional<onegen::InterfaceInfo> interface_;
   std::unique_ptr<GraphicsFrameCallbackGate> invalidation_gate_;
   OneGenSourceController* controller_ = nullptr;

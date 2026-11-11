@@ -1,13 +1,14 @@
 #include "OneGenSourceController.h"
 #include "../../Qt/SingleCaptureDiagnostics.h"
 
-#include "OneGenCoordinator.h"
+#include "ProducerCoordinator.h"
 #include "OneGenGraphicsFrameAdapter.h"
 #include "../DirectPoolPolicy.h"
 #include "SessionFrame.h"
 #include "Internal/FrameTrace.h"
 
 #include <QDebug>
+#include <QLoggingCategory>
 #include <QString>
 #include <QStringList>
 #include <chrono>
@@ -21,19 +22,14 @@
 #include <QUuid>
 
 namespace {
+// Host Debug enables diagnostics.* debug output; per-run detail dumps stay behind it.
+Q_LOGGING_CATEGORY(onegenSourceDiagnosticLog, "diagnostics.OneGen", QtInfoMsg)
 
-bool directShmEnabled()
-{
-  const auto* value = std::getenv("ONEGEN_DIRECT_SHM_TEST");
-  return value && std::string_view(value) == "1";
-}
-
-std::optional<std::uint64_t> directSlotBytes(onegen::worker::Lease& lease, std::string& error)
+std::optional<std::uint64_t> directSlotBytes(onegen::producer::Lease& lease, std::string& error)
 {
   try {
-    const auto payload = lease.read_node(0, "PayloadSize");
-    if (payload.int_value > 0) return static_cast<std::uint64_t>(payload.int_value);
-    error = "PayloadSize is unavailable; retaining the owned path.";
+    if (const auto payload = lease.payload_size()) return payload;
+    error = "Stream payload size is unavailable.";
   } catch (const std::exception& exception) {
     error = exception.what();
   } catch (...) {
@@ -58,7 +54,7 @@ OneGenSourceController::~OneGenSourceController()
   owned_lease_.reset();
 }
 
-void OneGenSourceController::configureControl(std::shared_ptr<onegen::worker::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices) {
+void OneGenSourceController::configureControl(std::shared_ptr<onegen::producer::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices) {
   coordinator_ = std::move(coordinator);
   setDevices(std::move(devices));
 }
@@ -67,7 +63,7 @@ void OneGenSourceController::setDevices(std::vector<onegen::DeviceInfo> devices)
   std::lock_guard lock(mutex_);
   devices_ = std::move(devices);
 }
-std::shared_ptr<onegen::worker::Lease> OneGenSourceController::deviceLease() const {
+std::shared_ptr<onegen::producer::Lease> OneGenSourceController::deviceLease() const {
   std::lock_guard lock(mutex_);
   return owned_lease_;
 }
@@ -88,10 +84,10 @@ void OneGenSourceController::refreshControlSnapshot() {
   std::lock_guard lock(mutex_);
   control_streams_ = std::move(streams); control_features_ = std::move(features);
 }
-std::shared_ptr<onegen::worker::Lease> OneGenSourceController::openDevice(
-    std::shared_ptr<onegen::worker::Coordinator> coordinator, const onegen::DeviceInfo& device) {
+std::shared_ptr<onegen::producer::Lease> OneGenSourceController::openDevice(
+    std::shared_ptr<onegen::producer::Coordinator> coordinator, const onegen::DeviceInfo& device) {
   if (deviceLease()) throw std::runtime_error("Disconnect the current device before connecting.");
-  auto opened = std::shared_ptr<onegen::worker::Lease>(coordinator->open(device).release());
+  auto opened = std::shared_ptr<onegen::producer::Lease>(coordinator->open(device).release());
   { std::lock_guard lock(mutex_); owned_lease_ = opened; connection_id_ = QUuid::createUuid().toString(QUuid::WithoutBraces); }
   try { setLease(opened.get()); }
   catch (...) { closeDevice(); throw; }
@@ -175,7 +171,7 @@ std::vector<GraphicsSourceDescriptor> OneGenSourceController::sourceDescriptors(
   return result;
 }
 
-void OneGenSourceController::setLease(onegen::worker::Lease* lease)
+void OneGenSourceController::setLease(onegen::producer::Lease* lease)
 {
   std::unique_lock poolLock(direct_pool_mutex_);
   std::unique_lock lock(mutex_);
@@ -188,8 +184,8 @@ void OneGenSourceController::setLease(onegen::worker::Lease* lease)
     lease_->set_error_callback({});
     lease_->destroy_frame_pool();
   }
-  direct_pool_attached_ = false;
-  direct_pool_slot_bytes_.reset();
+  frame_pool_.reset();
+  pool_slots_.store(0, std::memory_order_relaxed);
   lock.unlock();
   // Frame callbacks never acquire direct_pool_mutex_; holding it across the gate
   // drain prevents start from attaching a pool to the lease being replaced.
@@ -213,7 +209,8 @@ void OneGenSourceController::bindLease()
   const auto& info = lease_->info();
   const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
   // Inspect the copied node tree without changing selectors or acquisition settings.
-  try {
+  // The inventory is a Debug detail dump; skip its feature round trip otherwise.
+  if (onegenSourceDiagnosticLog().isDebugEnabled()) try {
     std::size_t componentNodes = 0;
     const std::function<void(const onegen::FeatureNode&, const std::string&)> inspect =
         [&](const onegen::FeatureNode& node, const std::string& module) {
@@ -231,7 +228,7 @@ void OneGenSourceController::bindLease()
         }
         QStringList entries;
         for (const auto& entry : node.enum_entries) entries.push_back(QString::fromStdString(entry));
-        qInfo().noquote() << "[GenICam] component node: camera=" << QString::fromStdString(sourceName)
+        qCDebug(onegenSourceDiagnosticLog).noquote() << "[GenICam] component node: camera=" << QString::fromStdString(sourceName)
             << "module=" << QString::fromStdString(module) << "node=" << name
             << "label=" << QString::fromStdString(node.display_name)
             << "readable=" << node.readable << "writable=" << node.writable
@@ -241,7 +238,7 @@ void OneGenSourceController::bindLease()
       for (const auto& child : node.children) inspect(child, module);
     };
     for (const auto& [module, root] : lease_->describe_features()) inspect(root, module);
-    qInfo() << "[GenICam] component inventory: nodes=" << componentNodes
+    qCDebug(onegenSourceDiagnosticLog) << "[GenICam] component inventory: nodes=" << componentNodes
             << "selectorUnchanged=true; selected values do not map every multipart sibling";
   } catch (const std::exception& error) {
     qWarning() << "[GenICam] component inventory unavailable:" << error.what();
@@ -260,81 +257,51 @@ void OneGenSourceController::bindLease()
   });
 }
 
-bool OneGenSourceController::configureDirectPool(
-    onegen::worker::Lease& lease, const std::string& sourceName)
+void OneGenSourceController::configureFramePool(
+    onegen::producer::Lease& lease, const std::string& sourceName)
 {
-  const auto disable = [&]() {
-    try { lease.set_shared_frame_callback({}); } catch (...) {}
-    lease.destroy_frame_pool();
-    std::lock_guard lock(mutex_);
-    direct_pool_attached_ = false;
-    direct_pool_slot_bytes_.reset();
-  };
-
   bool attached = false;
   std::optional<std::uint64_t> attachedSlotBytes;
   GraphicsFrameCallbackGate::Token token;
   {
     std::lock_guard lock(mutex_);
-    attached = direct_pool_attached_;
-    attachedSlotBytes = direct_pool_slot_bytes_;
+    attached = static_cast<bool>(frame_pool_);
+    if (frame_pool_) attachedSlotBytes = frame_pool_->slot_bytes();
     if (callback_gate_) token = callback_gate_->token();
   }
+  if (!token) throw std::runtime_error("Frame delivery is not bound to a consumer.");
 
-  if (!directShmEnabled()) {
-    if (attached) disable();
-    return false;
-  }
-  if (!token) {
-    if (attached) disable();
-    qWarning() << "[GenICam] direct-SHM unavailable: callback gate is missing.";
-    return false;
-  }
+  std::string error;
+  const auto payload = directSlotBytes(lease, error);
+  const auto decision = onegen::direct_pool::decide(attached, attachedSlotBytes, payload);
+  if (decision.action == onegen::direct_pool::Action::Reuse) return;
+  if (decision.action == onegen::direct_pool::Action::Disabled)
+    throw std::runtime_error(error.empty() ? decision.reason : error);
 
-  std::string directError;
-  const auto slotBytes = directSlotBytes(lease, directError);
-  const auto decision = onegen::direct_pool::decide(attached, attachedSlotBytes, slotBytes);
-  if (decision.action == onegen::direct_pool::Action::Disabled) {
-    if (attached) disable();
-    qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM disabled: %1")
-        .arg(QString::fromStdString(directError.empty() ? decision.reason : directError));
-    return false;
-  }
-  if (decision.action == onegen::direct_pool::Action::Reuse) {
-    return true;
-  }
-
-  disable();
-  if (!lease.create_frame_pool(3, decision.slot_bytes, directError)) {
-    qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM pool unavailable: %1")
-        .arg(QString::fromStdString(directError));
-    return false;
-  }
-  try {
-    lease.set_shared_frame_callback(
-        [this, sourceName, token](const onegen::worker::SharedFrame& source) {
-          GraphicsFrameCallbackGate::Lease callback(token);
-          if (callback) deliverShared(source, sourceName);
-        });
-  } catch (const std::exception& error) {
-    lease.destroy_frame_pool();
-    {
-      std::lock_guard lock(mutex_);
-      direct_pool_slot_bytes_.reset();
-    }
-    qWarning().noquote() << QStringLiteral("[GenICam] direct-SHM callback unavailable: %1")
-        .arg(QString::fromLocal8Bit(error.what()));
-    return false;
-  }
+  lease.destroy_frame_pool();
   {
     std::lock_guard lock(mutex_);
-    direct_pool_attached_ = true;
-    direct_pool_slot_bytes_ = decision.slot_bytes;
+    frame_pool_.reset();
+    pool_slots_.store(0, std::memory_order_relaxed);
   }
-  qInfo().noquote() << QStringLiteral(
-      "[GenICam] direct-SHM enabled: camera=%1 slots=3 slotBytes=%2")
-      .arg(QString::fromStdString(sourceName)).arg(decision.slot_bytes);
-  return true;
+  const auto plan = onegen::producer::plan_frame_pool(decision.slot_bytes,
+      onegen::direct_pool::minimum_slots, onegen::direct_pool::preferred_slots,
+      onegen::direct_pool::budget_bytes);
+  if (!plan.refusal.empty()) throw std::runtime_error(plan.refusal);
+  if (!lease.create_frame_pool(plan.slot_count, plan.slot_bytes, error)) throw std::runtime_error(error);
+  lease.set_shared_frame_callback(
+      [this, sourceName, token](const onegen::producer::SharedFrame& source) {
+        GraphicsFrameCallbackGate::Lease callback(token);
+        if (callback) deliverShared(source, sourceName);
+      });
+  {
+    std::lock_guard lock(mutex_);
+    frame_pool_ = lease.frame_pool();
+    pool_slots_.store(plan.slot_count, std::memory_order_relaxed);
+  }
+  qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral(
+      "[GenICam] frame pool attached: camera=%1 slots=%2 slotBytes=%3")
+      .arg(QString::fromStdString(sourceName)).arg(plan.slot_count).arg(plan.slot_bytes);
 }
 
 void OneGenSourceController::start()
@@ -343,7 +310,7 @@ void OneGenSourceController::start()
   std::vector<OneGenSourceController*> children;
   { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
   for (auto* child : children) child->start();
-  onegen::worker::Lease* lease = nullptr;
+  onegen::producer::Lease* lease = nullptr;
   {
     std::unique_lock poolLock(direct_pool_mutex_);
     {
@@ -353,7 +320,7 @@ void OneGenSourceController::start()
     if (!lease) return;
     const auto& info = lease->info();
     const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
-    configureDirectPool(*lease, sourceName);
+    configureFramePool(*lease, sourceName);
   }
   received_frames_.store(0, std::memory_order_relaxed);
   converted_frames_.store(0, std::memory_order_relaxed);
@@ -361,6 +328,10 @@ void OneGenSourceController::start()
   rejected_frames_.store(0, std::memory_order_relaxed);
   incomplete_frames_.store(0, std::memory_order_relaxed);
   partial_frames_.store(0, std::memory_order_relaxed);
+  {
+    std::lock_guard lock(mutex_);
+    exhausted_baseline_.store(frame_pool_ ? frame_pool_->exhausted() : 0, std::memory_order_relaxed);
+  }
   emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
   try { lease->live(); }
   catch (...) { emit diagnosticAcquisitionChanged(false, QStringLiteral("camera")); throw; }
@@ -380,7 +351,7 @@ void OneGenSourceController::stopLive()
   std::vector<OneGenSourceController*> children;
   { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
   for (auto* child : children) child->stopLive();
-  onegen::worker::Lease* lease = nullptr;
+  onegen::producer::Lease* lease = nullptr;
   {
     std::lock_guard lock(mutex_);
     lease = lease_;
@@ -392,12 +363,13 @@ void OneGenSourceController::stopLive()
     lease->stop();
     grabbing_.store(false, std::memory_order_relaxed);
     qInfo().noquote() << QStringLiteral(
-        "[GenICam] live diagnostics: camera=%1 received=%2 delivered=%3 failed=%4 incomplete=%5")
+        "[GenICam] live diagnostics: camera=%1 received=%2 delivered=%3 failed=%4 incomplete=%5 dropped=%6")
         .arg(QString::fromStdString(sourceName))
         .arg(static_cast<qulonglong>(received_frames_.load(std::memory_order_relaxed)))
         .arg(static_cast<qulonglong>(delivered_frames_.load(std::memory_order_relaxed)))
         .arg(static_cast<qulonglong>(rejected_frames_.load(std::memory_order_relaxed)))
-        .arg(static_cast<qulonglong>(incomplete_frames_.load(std::memory_order_relaxed)));
+        .arg(static_cast<qulonglong>(incomplete_frames_.load(std::memory_order_relaxed)))
+        .arg(static_cast<qulonglong>(droppedFrames()));
     emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
   } catch (const std::exception& error) {
     qWarning().noquote() << QStringLiteral("[GenICam] live stop failed: %1")
@@ -437,12 +409,39 @@ SourceRuntimeDiagnostics OneGenSourceController::runtimeDiagnostics(
   if (sourceIndex != 0U) return {};
   return {grabbing_.load(std::memory_order_acquire),
       delivered_frames_.load(std::memory_order_acquire),
-      rejected_frames_.load(std::memory_order_acquire)};
+      rejected_frames_.load(std::memory_order_acquire) + droppedFrames()};
+}
+
+std::uint64_t OneGenSourceController::droppedFrames() const
+{
+  std::shared_ptr<const onegen::producer::FramePool> pool;
+  {
+    std::lock_guard lock(mutex_);
+    pool = frame_pool_;
+  }
+  if (!pool) return 0;
+  const auto exhausted = pool->exhausted();
+  const auto baseline = exhausted_baseline_.load(std::memory_order_relaxed);
+  return exhausted > baseline ? exhausted - baseline : 0;
+}
+
+SourceProducerCapabilities OneGenSourceController::producerCapabilities(unsigned sourceIndex) const
+{
+  {
+    std::lock_guard lock(mutex_);
+    if (!children_.empty()) {
+      for (const auto& [id, child] : children_)
+        if (child.index == sourceIndex) return child.controller->producerCapabilities(0U);
+      return {};
+    }
+  }
+  if (sourceIndex != 0U) return {};
+  return {pool_slots_.load(std::memory_order_relaxed)};
 }
 
 void OneGenSourceController::grabOne(const QString& diagnosticDirectory)
 {
-  onegen::worker::Lease* lease = nullptr;
+  onegen::producer::Lease* lease = nullptr;
   std::string sourceName;
   {
     std::lock_guard lock(mutex_);
@@ -469,7 +468,7 @@ void OneGenSourceController::grabOne(const QString& diagnosticDirectory)
 
 void OneGenSourceController::trigger()
 {
-  onegen::worker::Lease* lease = nullptr;
+  onegen::producer::Lease* lease = nullptr;
   { std::lock_guard lock(mutex_); lease = lease_; }
   if (lease) lease->trigger();
 }
@@ -480,26 +479,26 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     const auto sequence = sequence_.fetch_add(1, std::memory_order_relaxed);
     const bool firstFrame = received_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
     if (firstFrame) {
-      qInfo().noquote() << QStringLiteral("[GenICam] first frame received: camera=%1 frame=%2 payloadType=%3 PFNC=0x%4 %5x%6 bytes=%7 parts=%8 scan3d=%9")
+      qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral("[GenICam] first frame received: camera=%1 frame=%2 payloadType=%3 PFNC=0x%4 %5x%6 bytes=%7 parts=%8 scan3d=%9")
           .arg(QString::fromStdString(sourceName)).arg(source.frame_id).arg(source.payload_type)
           .arg(QString::number(source.pixel_format, 16)).arg(source.width).arg(source.height)
           .arg(source.payload.size()).arg(source.parts.size()).arg(source.scan3d_geometry.has_value());
-      qInfo() << "[GenICam] first frame chunk count:" << source.chunks.size()
+      qCDebug(onegenSourceDiagnosticLog) << "[GenICam] first frame chunk count:" << source.chunks.size()
               << "(presence does not establish Scan3d chunk overrides)";
       if (source.scan3d_geometry) {
         const auto& g = *source.scan3d_geometry;
-        qInfo().noquote() << "[GenICam] effective Scan3d: mode=" << QString::fromStdString(g.output_mode)
+        qCDebug(onegenSourceDiagnosticLog).noquote() << "[GenICam] effective Scan3d: mode=" << QString::fromStdString(g.output_mode)
             << "system=" << QString::fromStdString(g.coordinate_system)
             << "unit=" << QString::fromStdString(g.distance_unit);
         for (std::size_t axis = 0; axis < 3; ++axis)
-          qInfo() << "[GenICam] effective Scan3d axis:" << axis
+          qCDebug(onegenSourceDiagnosticLog) << "[GenICam] effective Scan3d axis:" << axis
               << "calibrated=" << g.calibrated_axes[axis] << "scale=" << g.scale[axis]
               << "offset=" << g.offset[axis] << "invalidEnabled=" << g.invalid_enabled[axis]
               << "invalidValue=" << g.invalid_value[axis];
       }
       std::size_t partIndex = 0;
       for (const auto& part : source.parts)
-        qInfo().noquote() << QStringLiteral("[GenICam] first frame part: type=%1 PFNC=0x%2 %3x%4 stride=%5 bytes=%6 source=%7 region=%8 purpose=%9")
+        qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral("[GenICam] first frame part: type=%1 PFNC=0x%2 %3x%4 stride=%5 bytes=%6 source=%7 region=%8 purpose=%9")
             .arg(part.data_type).arg(QString::number(part.data_format, 16)).arg(part.width).arg(part.height)
             .arg(part.stride).arg(part.payload.size()).arg(part.source_id).arg(part.region_id).arg(part.purpose_id)
             << "partIndex=" << partIndex++;
@@ -563,7 +562,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
           << "sequence=" << sequence << "frameId=" << source.frame_id;
       return;
     }
-    if (firstConverted) qInfo().noquote() << QStringLiteral("[GenICam] first frame converted: images=%1 ranges=%2 pointClouds=%3; forwarding to presentation")
+    if (firstConverted) qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral("[GenICam] first frame converted: images=%1 ranges=%2 pointClouds=%3; forwarding to presentation")
         .arg(frame.payload.images.size()).arg(frame.payload.ranges.size()).arg(frame.payload.pointClouds.size());
     const auto consumerStarted = frameTrace ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
@@ -591,7 +590,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
 }
 
 void OneGenSourceController::deliverShared(
-    const onegen::worker::SharedFrame& shared, const std::string& sourceName)
+    const onegen::producer::SharedFrame& shared, const std::string& sourceName)
 {
   try {
     if (!shared.lease) return;
@@ -600,7 +599,7 @@ void OneGenSourceController::deliverShared(
     const auto sequence = sequence_.fetch_add(1, std::memory_order_relaxed);
     const bool firstFrame = received_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
     if (firstFrame) {
-      qInfo().noquote() << QStringLiteral(
+      qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral(
           "[GenICam] first direct frame received: camera=%1 frame=%2 bytes=%3")
           .arg(QString::fromStdString(sourceName))
           .arg(static_cast<qulonglong>(source.frame_id))

@@ -19,10 +19,11 @@
 
 namespace onegen {
 struct Frame;
-namespace worker {
+namespace producer {
 class Lease;
 class Coordinator;
 struct SharedFrame;
+class FramePool;
 }
 }
 
@@ -43,7 +44,7 @@ public:
   void clearCameraControllers();
   /** Reports one stable presentation source per child camera. */
   std::vector<GraphicsSourceDescriptor> sourceDescriptors() const override;
-  void setLease(onegen::worker::Lease* lease);
+  void setLease(onegen::producer::Lease* lease);
   void start() override;
   void stop() override;
   /** @brief Stops acquisition with acknowledged success or an explicit backend failure. */
@@ -57,13 +58,15 @@ public:
   /**
    * @brief Returns producer counters for the device statusbar.
    * @param sourceIndex Child-camera source index, or zero for a direct camera.
-   * @note Reads atomics only; it never waits for acquisition or the worker.
+   * @note Reads atomics only; it never waits for acquisition or the producer.
    */
   [[nodiscard]] SourceRuntimeDiagnostics runtimeDiagnostics(unsigned sourceIndex) const;
   /** @brief Copies the same per-camera counters sampled by the panel. */
   std::optional<SourceRuntimeDiagnostics> sourceRuntimeDiagnostics(unsigned sourceIndex) const override;
+  /** @brief Reports the attached frame pool's slot count so the host can check its lease bound. */
+  SourceProducerCapabilities producerCapabilities(unsigned sourceIndex) const override;
   /** @brief Configures existing module discovery and copied device inventory. */
-  void configureControl(std::shared_ptr<onegen::worker::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices);
+  void configureControl(std::shared_ptr<onegen::producer::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices);
   /** @brief Replaces copied discovery results on the consumer thread. */
   void setDevices(std::vector<onegen::DeviceInfo> devices);
   /** @brief Copies the module's current producer-scoped inventory. */
@@ -77,11 +80,11 @@ public:
   /** @brief Drains accepted API work before consumer panels are removed. */
   void drainControl() { tool_work_.waitForFinished(); }
   /** @brief Opens an exact device through the existing Coordinator and owns its lease. */
-  std::shared_ptr<onegen::worker::Lease> openDevice(std::shared_ptr<onegen::worker::Coordinator> coordinator, const onegen::DeviceInfo& device);
+  std::shared_ptr<onegen::producer::Lease> openDevice(std::shared_ptr<onegen::producer::Coordinator> coordinator, const onegen::DeviceInfo& device);
   /** @brief Stops and closes the owning device channel, preserving failed-close state. */
   void closeDevice();
   /** @brief Copies a borrowed lease reference for existing feature controls. */
-  std::shared_ptr<onegen::worker::Lease> deviceLease() const;
+  std::shared_ptr<onegen::producer::Lease> deviceLease() const;
   /** @brief Copies cached feature/stream observations without SDK calls on the GUI thread. */
   std::vector<std::pair<std::string, onegen::FeatureNode>> controlFeatures() const;
   std::vector<onegen::DataStreamInfo> controlStreams() const;
@@ -99,7 +102,7 @@ public:
   DeviceConnectionResult requestDisconnect(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
   /** @brief Waits for native single acquisition and conversion on the exact connection. */
   DeviceConnectionResult requestSingle(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
-  /** @brief Starts acquisition on the exact connection; completion is worker acknowledgement. */
+  /** @brief Starts acquisition on the exact connection; completion is producer acknowledgement. */
   DeviceConnectionResult requestLiveStart(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
   /** @brief Stops acquisition on the exact connection. */
   DeviceConnectionResult requestLiveStop(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
@@ -125,20 +128,25 @@ signals:
 private:
   friend class FeatureTreeTests;
   void deliver(const onegen::Frame& source, const std::string& sourceName);
-  void deliverShared(const onegen::worker::SharedFrame& source, const std::string& sourceName);
+  void deliverShared(const onegen::producer::SharedFrame& source, const std::string& sourceName);
   void bindLease();
-  /** @brief Configures direct SHM while the caller holds direct_pool_mutex_. */
-  bool configureDirectPool(onegen::worker::Lease& lease, const std::string& sourceName);
+  /** @brief Frames dropped for lack of a free slot since the last start. */
+  std::uint64_t droppedFrames() const;
+  /** @brief Sizes and attaches the frame pool while the caller holds direct_pool_mutex_. */
+  void configureFramePool(onegen::producer::Lease& lease, const std::string& sourceName);
   mutable std::mutex mutex_;
-  /** @brief Serializes direct pool ownership with lease replacement without holding callbacks under mutex_. */
+  /** @brief Serializes frame pool ownership with lease replacement without holding callbacks under mutex_. */
   std::mutex direct_pool_mutex_;
   struct Child { unsigned int index; std::string label; std::unique_ptr<OneGenSourceController> controller; };
   std::map<std::string, Child> children_;
   unsigned int next_source_index_ = 0;
-  onegen::worker::Lease* lease_ = nullptr;
+  onegen::producer::Lease* lease_ = nullptr;
   std::unique_ptr<GraphicsFrameCallbackGate> callback_gate_;
-  bool direct_pool_attached_ = false;
-  std::optional<std::uint64_t> direct_pool_slot_bytes_;
+  /** Attached pool, read lock-free by diagnostics; the lease owns its lifetime. */
+  std::shared_ptr<const onegen::producer::FramePool> frame_pool_;
+  std::atomic<std::uint32_t> pool_slots_{0};
+  /** Pool exhaustion count at the last start, so failed counts one run. */
+  std::atomic<std::uint64_t> exhausted_baseline_{0};
   FrameConsumer consumer_;
   // A child counts delivery in the parent forwarding callback, after the final consumer returns.
   bool forwarded_by_parent_ = false;
@@ -150,8 +158,8 @@ private:
   std::atomic<std::uint64_t> converted_frames_{0};
   std::atomic<std::uint64_t> delivered_frames_{0};
   std::atomic<std::uint64_t> partial_frames_{0};
-  std::shared_ptr<onegen::worker::Lease> owned_lease_;
-  std::shared_ptr<onegen::worker::Coordinator> coordinator_;
+  std::shared_ptr<onegen::producer::Lease> owned_lease_;
+  std::shared_ptr<onegen::producer::Coordinator> coordinator_;
   std::vector<onegen::DeviceInfo> devices_;
   QString connection_id_;
   std::atomic<bool> gui_busy_{false}, external_busy_{false};
@@ -168,7 +176,7 @@ private:
       IDeviceConnectionControl::Completion completion, TargetsCompletion targetsCompletion);
   DeviceParameterResult parameterAdmission();
   std::vector<OneGenSourceController*> parameterControllers() const;
-  DeviceParameterDescriptor observeParameter(const std::shared_ptr<onegen::worker::Lease>& lease,
+  DeviceParameterDescriptor observeParameter(const std::shared_ptr<onegen::producer::Lease>& lease,
       const std::string& connection, int module, const onegen::FeatureNode& node,
       bool completeContext = false, const std::string& scopeOverride = {});
   DeviceParameterResult requestParameter(DeviceParameterTarget target,

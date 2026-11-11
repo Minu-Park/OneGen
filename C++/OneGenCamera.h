@@ -48,6 +48,8 @@ public:
   bool is_live() const;
   /** Reports active Single or Live acquisition before stream reconfiguration. */
   bool is_acquiring() const;
+  /** Bytes one stream buffer must hold: the producer-defined size, else PayloadSize. */
+  std::size_t payload_size();
 
   using FrameFn = std::function<void(const Frame&)>;
   using ErrorFn = std::function<void(std::string_view)>;

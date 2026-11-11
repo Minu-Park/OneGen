@@ -1,6 +1,7 @@
 #pragma once
 
 #include "OneGenCamera.h"
+#include "OneGenLog.h"
 #include "OneGenTypes.h"
 
 #include <chrono>
