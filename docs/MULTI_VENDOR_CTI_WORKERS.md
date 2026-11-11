@@ -232,6 +232,24 @@ Interface and device lifecycle detail records are Debug records. `IFOpen`,
 include retained `opened`, `pinned` and `activeDevices` counts with the CTI
 path.
 
+## Live telemetry and consumer Debug
+
+The consumer's Debug switch is observed through the `diagnostics.OneGen` Qt
+logging category: Debug enables its debug output, and there is no other
+dependency on the consumer's logging implementation. The panel re-reads the
+category on each one-second telemetry tick, so a toggle during acquisition
+takes effect without restarting it.
+
+- Debug only: the `fps` and `failed` statusbar bubbles, the five-second
+  `[GenICam] diagnostics:` line, the per-run first-frame detail
+  (`first frame received/chunk count/part/converted`, effective Scan3d) and the
+  component node inventory taken when a lease is bound. Counters and FPS
+  sampling keep running while Debug is off, so values are current when it is
+  enabled.
+- Always retained: the per-run `[GenICam] live diagnostics:` stop summary
+  (received, delivered, failed, incomplete) and every warning or error,
+  including incomplete-frame and rejected-frame records.
+
 ## Bounded frame transport contract (approved)
 
 This contract was approved on 2026-11-07 for the R1/R3 implementation and

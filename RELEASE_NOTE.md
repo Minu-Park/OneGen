@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show live `fps`/`failed` statusbar bubbles, the five-second diagnostics line, first-frame detail and the bound-lease component inventory only while the consumer's Debug switch is on (the `diagnostics.OneGen` debug output). The switch is re-read each telemetry tick, so a mid-run toggle applies immediately. The acquisition stop summary, warnings and errors are always logged. With Debug off, binding a lease no longer reads the feature tree for the component inventory.
+
 - Assert that consumer failures increment both producer and callable failure observations.
 
 - Separate delivered diagnostics from conversion counts, including parent camera forwarding; expose per-camera counters through the common source diagnostics query.

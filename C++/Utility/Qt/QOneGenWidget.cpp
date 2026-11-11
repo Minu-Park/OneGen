@@ -700,7 +700,7 @@ void QOneGenWidget::updateStatus()
       has_diagnostics_sample_ = false;
       last_diagnostics_log_ms_ = 0;
       diagnostics_clock_.start();
-      setDiagnosticsVisible(true);
+      setDiagnosticsVisible(onegenDiagnosticLog().isDebugEnabled());
       diagnostics_timer_->start();
     }
   } else {
@@ -746,8 +746,11 @@ void QOneGenWidget::updateDiagnostics()
   diagnostics_sample_ = now;
   has_diagnostics_sample_ = true;
 
+  // Host Debug toggles the diagnostics.* categories without a signal; sample it
+  // each tick so the bubbles follow a mid-run toggle while counters keep running.
+  const bool debug = onegenDiagnosticLog().isDebugEnabled();
   if (failed_) {
-    const bool showFailed = diagnostics.failed > 0;
+    const bool showFailed = debug && diagnostics.failed > 0;
     if (showFailed) {
       failed_->setText(QStringLiteral("%1 failed").arg(
           static_cast<qulonglong>(diagnostics.failed)));
@@ -760,10 +763,13 @@ void QOneGenWidget::updateDiagnostics()
     }
     failed_->setVisible(showFailed);
   }
-  if (fps_) fps_->setText(QStringLiteral("%1 fps").arg(fps, 0, 'f', 1));
+  if (fps_) {
+    fps_->setText(QStringLiteral("%1 fps").arg(fps, 0, 'f', 1));
+    fps_->setVisible(debug);
+  }
 
   const qint64 elapsed = diagnostics_clock_.elapsed();
-  if (elapsed - last_diagnostics_log_ms_ >= 5000) {
+  if (debug && elapsed - last_diagnostics_log_ms_ >= 5000) {
     QString camera = feature_camera_name_;
     if (camera.isEmpty() && lease_) {
       const auto& info = lease_->info();
@@ -771,7 +777,7 @@ void QOneGenWidget::updateDiagnostics()
           info.display_name.empty() ? info.id : info.display_name);
     }
     if (camera.isEmpty()) camera = QStringLiteral("camera");
-    qInfo().noquote() << QStringLiteral(
+    qCDebug(onegenDiagnosticLog).noquote() << QStringLiteral(
         "[GenICam] diagnostics: camera=%1 live=%2 failed=%3 fps=%4")
         .arg(camera)
         .arg(diagnostics.grabbing ? QStringLiteral("true") : QStringLiteral("false"))

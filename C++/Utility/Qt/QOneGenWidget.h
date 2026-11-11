@@ -73,6 +73,7 @@ signals:
   void stateChanged();
 
 private:
+  friend class FeatureTreeTests;
   using FeatureRead = std::function<onegen::FeatureNode(int, std::string_view)>;
   using FeatureWrite =
       std::function<onegen::FeatureNode(int, std::string_view, std::string_view, std::string_view)>;
