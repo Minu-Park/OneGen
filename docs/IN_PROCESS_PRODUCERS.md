@@ -91,6 +91,25 @@ direction, a plugin activated after the producer that binds to its libraries;
 the consumer must provide a package-activation check for this direction
 ([#413](https://github.com/Minu-Park/Playground/issues/413) WP4).
 
+### Concurrent consumer loaders
+
+The load lock serializes OneGen loader calls only. It is not shared with the
+consumer's plugin manager or other code that loads native libraries. A consumer
+can activate a package while asynchronous OneGen discovery is running. If that
+loader maps a conflicting library after OneGen's inspection but before its
+library load, the producer can bind to that library without a pre-load refusal.
+`Gentl::load` currently has no post-load conflict inspection. The consumer's own
+post-load package check does not make both loader paths one atomic transaction.
+
+Consequently, the guard detects conflicts visible at inspection and serializes
+OneGen-to-OneGen loads; it does not guarantee conflict exclusion against a
+concurrent independent loader. Sequential activation-order tests and concurrent
+OneGen discovery tests do not establish that stronger guarantee. A native fault
+can occur before any post-load check, so a later inspection alone would not
+provide complete protection either. Safe exclusion would require a shared
+consumer/module load-coordination contract covering all participating loaders;
+this is a separate integration decision, not a library-name or device allowlist.
+
 ### Import closure (Windows)
 
 The consumer process removes `PATH` from its DLL search, but producers often

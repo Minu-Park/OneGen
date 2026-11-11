@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document that the producer-load lock coordinates OneGen loads only: concurrent independent consumer loaders can still introduce a conflicting library between inspection and load. Sequential activation and parallel OneGen discovery tests do not prove exclusion across those loaders.
+
 - Serialize producer conflict inspection, directory registration and library initialization across parallel discovery; a conflicting producer is refused before loading. Add simultaneous conflicting-producer discovery coverage.
 
 - Load GenTL producers in the consumer process and remove the per-CTI worker process, its protocol and the shared-memory frame path. Each canonical CTI gets one OneGen system whose lock serializes control and feature calls; blocking Single and Live acquisition run outside that lock so stop can interrupt them; discovery still probes producers in parallel and reports per-producer failures. A native fault inside a producer now terminates the consumer process. Producer libraries stay mapped until process exit (`GCCloseLib` without `FreeLibrary`/`dlclose`).

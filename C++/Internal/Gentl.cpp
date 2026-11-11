@@ -66,8 +66,9 @@ void Gentl::check(GenTL::GC_ERROR err, const char* where) const {
 }
 
 void Gentl::load(const std::filesystem::path& cti) {
-  // Inspection, process-wide directory registration and initialization are one transaction.
-  // Parallel discovery must observe every previously admitted producer before inspecting.
+  // Serialize inspection, process-wide directory registration and initialization among
+  // OneGen loads. Independent consumer loaders do not participate in this lock; see
+  // docs/IN_PROCESS_PRODUCERS.md for the remaining cross-loader race.
   static std::mutex producer_load_mutex;
   const std::lock_guard load_lock(producer_load_mutex);
   const auto started = std::chrono::steady_clock::now();
