@@ -431,9 +431,7 @@ private:
   {
     auto* claims = claims_.load(std::memory_order_acquire);
     if (!claims) throw std::runtime_error("The host did not provide hardware resource claims.");
-    QString key = playgroundSisoBoardResourceKeyFromInterfaceId(QString::fromStdString(info.id));
-    if (key.isEmpty())
-      key = playgroundSisoBoardResourceKeyFromInterfaceId(QString::fromStdString(info.display_name));
+    const QString key = playgroundSisoBoardResourceKeyFromInterfaceId(QString::fromStdString(info.id));
     if (key.isEmpty()) return {};
     QString error;
     auto claim = claims->claimResource(key, &error);
