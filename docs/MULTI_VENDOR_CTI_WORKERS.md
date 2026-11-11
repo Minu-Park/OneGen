@@ -153,10 +153,14 @@ Standalone Device connections retain the existing worker-isolation policy.
 - Duplicate local opens of the same complete Device identity are rejected.
 - Distinct producers reporting equal InterfaceIDs remain distinct targets.
 - Discovery releases temporary Interfaces while retaining active or pinned ones.
-- Physical ownership across producers and SDKs follows native resource arbitration.
-  Automatic board-serial matching and cross-module software claims are removed;
-  the consumer explicitly chose native arbitration. No proactive cross-producer
-  physical equivalence guarantee is claimed.
+- Physical ownership across producers and SDKs otherwise follows native resource
+  arbitration. The Playground consumer adds one explicit exception for a Siso
+  frame-grabber board: the plugin passes the host claim callback into its
+  coordinator and the host-side worker client claims
+  `siso-board:<normalized serial>` from a Siso `SN_<serial>` InterfaceID before
+  the worker calls `TLOpenInterface`. No other board-serial matching or
+  cross-producer physical-equivalence guarantee is added. A denied claim keeps
+  the Interface closed and reports the owning plugin.
 
 ## Acquisition
 

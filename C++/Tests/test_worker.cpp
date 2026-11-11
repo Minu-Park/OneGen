@@ -32,7 +32,9 @@ std::atomic<int> startup_diagnostics{0};
 int runTests(int argc, char** argv)
 {
   QCoreApplication application(argc, argv);
-  if (argc == 3 && std::string_view(argv[1]) == "--cti") return fakeWorker(argv[2]);
+  if (std::string_view(argv[1]) == "--cti"
+      && (argc == 3 || (argc == 4 && std::string_view(argv[3]) == "--resource-claims")))
+    return fakeWorker(argv[2]);
   if (argc == 4 && std::string_view(argv[1]) == "--inactive-producer") {
     onegen::worker::Connection connection(argv[2], argv[3]);
     for (int attempt = 0; attempt < 3; ++attempt) {

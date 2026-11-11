@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Claim the host-owned `siso-board:<serial>` resource before a Siso Interface opens. The Playground plugin passes the host claim callback into `Coordinator`, so the host-side worker client claims from the InterfaceID's `SN_<serial>` token before `TLOpenInterface` and releases it through the existing claim protocol. A board held by Framegrabber is rejected with that plugin's package id and display name. Non-Siso interfaces are unchanged. Requires the ABI 7.0 host resource-claim contract.
+
 - Show live `fps`/`failed` statusbar bubbles, the five-second diagnostics line, first-frame detail and the bound-lease component inventory only while the consumer's Debug switch is on (the `diagnostics.OneGen` debug output). The switch is re-read each telemetry tick, so a mid-run toggle applies immediately. The acquisition stop summary, warnings and errors are always logged. With Debug off, binding a lease no longer reads the feature tree for the component inventory.
 
 - Assert that consumer failures increment both producer and callable failure observations.
