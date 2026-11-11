@@ -21,6 +21,10 @@
 #define TEST_EXPORT __attribute__((visibility("default")))
 #endif
 
+#ifdef ONEGEN_CONFLICT_VALUE
+extern "C" __declspec(dllimport) int onegen_conflict_value();
+#endif
+
 namespace {
 
 using namespace GenTL;
@@ -724,6 +728,11 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCGetLastError(GC_ERROR* code, char* text, std:
 }
 
 TEST_EXPORT GC_ERROR GC_CALLTYPE GCInitLib(void) {
+#ifdef ONEGEN_CONFLICT_VALUE
+  if (onegen_conflict_value() != ONEGEN_CONFLICT_VALUE) return GC_ERR_ERROR;
+  // Widen the inspection/load race for the concurrent discovery regression.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+#endif
   std::lock_guard lock(g_mutex);
   g_xml = makeXml();
   g_last_error = GC_ERR_SUCCESS;

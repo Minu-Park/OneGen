@@ -49,8 +49,11 @@ builds that producers load.
 ## Producer lifecycle
 
 `onegen::producer::Coordinator` owns one OneGen system per canonical CTI path.
-Each producer has one lock that serializes every SDK call for it: discovery,
+Each producer has one lock that serializes control and feature calls: discovery,
 interface and node-map access, stream configuration and acquisition control.
+Blocking Single and Live acquisition run outside that lock so stop can interrupt them.
+A process-wide load lock spans conflict inspection, directory registration, library
+loading and initialization, including TLOpen, even when discovery probes run in parallel.
 Acquisition runs on the camera's own thread. Equivalent forward- and backslash
 spellings of a CTI path share one producer.
 
@@ -85,7 +88,7 @@ Not conflicts: identical contents at another path, compiler runtime
 redistributables (`msvcp*`, `vcruntime*`, `ucrtbase`, `libstdc++`, and similar),
 and modules loaded from the Windows directory. OneGen cannot see the reverse
 direction, a plugin activated after the producer that binds to its libraries;
-that needs a host package-activation check, which is not implemented yet
+the consumer must provide a package-activation check for this direction
 ([#413](https://github.com/Minu-Park/Playground/issues/413) WP4).
 
 ### Import closure (Windows)
@@ -120,6 +123,14 @@ Other platforms use only the directory scan above. Measured examples
 ships 19 libraries that differ from the Framegrabber plugin's same-named Silicon
 Software and pylon GenApi builds, so the two cannot share a process. Euresys,
 Heliotis, Blaze, GEV, U3V and StereoMini producers had no conflicts.
+
+## Live pool limits
+
+Live requires a readable nonzero payload and at least 10 slots within the 2 GiB
+per-source budget, with 12 slots preferred. The maximum payload is 214,748,364
+bytes. An unavailable payload, an over-budget plan or an allocation failure
+refuses Live with an explicit error before acquisition starts. Exhausting an
+allocated pool drops and counts frames; it does not wait on the acquisition thread.
 
 ## Crash policy
 

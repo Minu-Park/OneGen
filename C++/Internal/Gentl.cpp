@@ -7,6 +7,7 @@
 #include <vector>
 #include <filesystem>
 #include <chrono>
+#include <mutex>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -65,6 +66,10 @@ void Gentl::check(GenTL::GC_ERROR err, const char* where) const {
 }
 
 void Gentl::load(const std::filesystem::path& cti) {
+  // Inspection, process-wide directory registration and initialization are one transaction.
+  // Parallel discovery must observe every previously admitted producer before inspecting.
+  static std::mutex producer_load_mutex;
+  const std::lock_guard load_lock(producer_load_mutex);
   const auto started = std::chrono::steady_clock::now();
   // A same-name library already bound to another file would be silently shared by this
   // producer; refuse before the loader runs any of its code.

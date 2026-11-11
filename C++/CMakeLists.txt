@@ -158,6 +158,31 @@ if(ONEGEN_BUILD_TESTS)
       $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
   endforeach()
   set_tests_properties(test_producer PROPERTIES TIMEOUT 300)
+  if(MSVC)
+    foreach(_variant 1 2)
+      add_library(ConflictDependency${_variant} SHARED Tests/ConflictDependency.cpp)
+      target_compile_definitions(ConflictDependency${_variant} PRIVATE ONEGEN_CONFLICT_VALUE=${_variant})
+      set_target_properties(ConflictDependency${_variant} PROPERTIES OUTPUT_NAME ConflictDependency
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/conflict${_variant}"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/conflict${_variant}")
+      add_library(ConflictProducer${_variant} SHARED Tests/SyntheticGenTL.cpp)
+      target_compile_features(ConflictProducer${_variant} PRIVATE cxx_std_20)
+      target_compile_definitions(ConflictProducer${_variant} PRIVATE ONEGEN_CONFLICT_VALUE=${_variant})
+      target_include_directories(ConflictProducer${_variant} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+      target_link_libraries(ConflictProducer${_variant} PRIVATE genicam::genicam ConflictDependency${_variant})
+      set_target_properties(ConflictProducer${_variant} PROPERTIES PREFIX "" SUFFIX ".cti"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/conflict${_variant}")
+    endforeach()
+    add_executable(test_concurrent_producers Tests/test_concurrent_producers.cpp)
+    target_link_libraries(test_concurrent_producers PRIVATE OneGen::Producer)
+    target_compile_options(test_concurrent_producers PRIVATE /UNDEBUG)
+    add_dependencies(test_concurrent_producers ConflictProducer1 ConflictProducer2)
+    add_test(NAME test_concurrent_producers COMMAND test_concurrent_producers
+      $<TARGET_FILE:ConflictProducer1> $<TARGET_FILE:ConflictProducer2>)
+    set_tests_properties(test_concurrent_producers PROPERTIES TIMEOUT 30
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+  endif()
+
   if(ONEGEN_GENICAM_RUNTIME_FILES)
     set_tests_properties(test_producer PROPERTIES ENVIRONMENT_MODIFICATION
       "PATH=path_list_prepend:${_onegen_core_runtime_dir}")
