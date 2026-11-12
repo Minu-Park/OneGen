@@ -68,6 +68,16 @@ spellings of a CTI path share one producer.
   because a vendor runtime may still own threads, callbacks or process-global
   state. Loading the same canonical CTI again reuses the mapped module.
 
+## Consumer hardware claims
+
+The adapter passes the consumer resource-claim callback to the in-process
+Coordinator. For a Siso InterfaceID containing `SN_<serial>`, it claims
+`siso-board:<normalized serial>` before TLOpenInterface. A denied claim leaves
+the Interface closed and reports the owning package; the Interface lifetime
+retains the claim. Other interfaces do not acquire this Siso-specific claim.
+This requires the ABI 7.0 consumer resource-claim contract. It does not infer
+physical equivalence from unrelated device serial numbers or IP addresses.
+
 ## Library conflicts
 
 Windows resolves a name-only import to an already loaded module with the same

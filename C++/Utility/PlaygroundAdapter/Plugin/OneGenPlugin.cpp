@@ -12,6 +12,7 @@
 #include <QDebug>
 #include <QPointer>
 #include <QStringList>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -226,16 +227,21 @@ private:
 } // namespace
 
 class OneGenPlugin final : public DevicePluginTemplate, public IDevicePluginSettings,
-    public IDevicePluginGenTLPaths, public IDevicePluginGenTLProducers, public IDevicePluginGenTLDiscoveryStatus, public IDevicePluginGenTLRetry {
+    public IDevicePluginResourceClaimsReceiver, public IDevicePluginGenTLPaths,
+    public IDevicePluginGenTLProducers, public IDevicePluginGenTLDiscoveryStatus, public IDevicePluginGenTLRetry {
   Q_OBJECT
   Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
-  Q_INTERFACES(IDevicePlugin IDevicePluginSettings IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus IDevicePluginGenTLRetry)
+  Q_INTERFACES(IDevicePlugin IDevicePluginSettings IDevicePluginResourceClaimsReceiver IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus IDevicePluginGenTLRetry)
 public:
   /** Producers run in the consumer process; their diagnostics go to its Qt log. */
   OneGenPlugin() { onegen::qt::installLogSink(); }
 
   /** Selects consumer settings without coupling the reusable UI to host paths. */
   void setSettingsFile(const QString& fileName) override { settings_file_ = fileName; }
+  /** Retains the host service used to claim a Siso board before its Interface opens. */
+  void setResourceClaims(IDevicePluginResourceClaims* claims) override {
+    claims_.store(claims, std::memory_order_release);
+  }
 
   /** @brief Accepts exact CTI files without consulting process search variables. */
   bool setGenTLProducerFiles(const QStringList& files, QString* error) override {
@@ -412,13 +418,27 @@ private:
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutting_down_) return {};
     if (!coordinator_) {
-      coordinator_ = std::make_shared<onegen::producer::Coordinator>();
-
+      coordinator_ = std::make_shared<onegen::producer::Coordinator>(
+          std::filesystem::path{}, std::chrono::milliseconds{10000},
+          [this](const onegen::InterfaceInfo& info) { return claimInterface(info); });
     }
     return coordinator_;
   }
 
+  std::shared_ptr<void> claimInterface(const onegen::InterfaceInfo& info)
+  {
+    auto* claims = claims_.load(std::memory_order_acquire);
+    if (!claims) throw std::runtime_error("The host did not provide hardware resource claims.");
+    const QString key = playgroundSisoBoardResourceKeyFromInterfaceId(QString::fromStdString(info.id));
+    if (key.isEmpty()) return {};
+    QString error;
+    auto claim = claims->claimResource(key, &error);
+    if (!claim) throw std::runtime_error(error.toStdString());
+    return claim;
+  }
+
   mutable std::mutex mutex_;
+  std::atomic<IDevicePluginResourceClaims*> claims_{nullptr};
   std::shared_ptr<onegen::producer::Coordinator> coordinator_;
   std::shared_ptr<onegen::producer::StartupDiscovery> startup_;
   GenTLDiscoveryState discovery_state_;
