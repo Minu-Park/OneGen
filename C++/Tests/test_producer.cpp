@@ -48,6 +48,9 @@ int main(int argc, char** argv) {
     assert(denied.set_producer_files({synthetic}));
     const auto blocked = denied.discover();
     assert(claims > 0 && blocked.devices.empty());
+    assert(blocked.failures.size() == 1);
+    assert(blocked.failures.front().find("Synthetic board is owned by another package.")
+           != std::string::npos);
   }
 
   Coordinator coordinator({}, 2s);
