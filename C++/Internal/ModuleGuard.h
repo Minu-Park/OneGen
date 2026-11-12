@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -49,8 +50,9 @@ std::vector<ModuleConflict> producer_module_conflicts(const std::filesystem::pat
  */
 ProducerEnvironment inspect_producer(const std::filesystem::path& cti);
 
-/** @brief Adds each directory to the process DLL search for the rest of its lifetime. */
-void register_producer_directories(const std::vector<std::filesystem::path>& directories);
+/** @brief Registers DLL search directories until the returned owner tokens are released. */
+std::vector<std::shared_ptr<void>> register_producer_directories(
+    const std::vector<std::filesystem::path>& directories);
 
 /** @brief Formats conflicts as one actionable refusal message. */
 std::string describe_module_conflicts(const std::filesystem::path& cti,

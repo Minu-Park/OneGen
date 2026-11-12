@@ -9,6 +9,11 @@
 #include <QTest>
 #include <QScopeGuard>
 #include <algorithm>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 namespace {
 QMutex log_mutex;
@@ -28,6 +33,47 @@ bool hasInfo(const QString& text) {
 class PluginDiscoveryTests : public QObject {
   Q_OBJECT
 private slots:
+  void shutdownReleasesProducerBeforeReopen() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString cti = temporary.filePath("Retired.cti");
+    QVERIFY(QFile::copy(QString::fromUtf8(ONEGEN_TEST_PRODUCER), cti));
+    const auto mapped = [&] {
+#ifdef _WIN32
+      return GetModuleHandleW(cti.toStdWString().c_str()) != nullptr;
+#else
+      void* module = dlopen(QFile::encodeName(cti).constData(), RTLD_LAZY | RTLD_NOLOAD);
+      if (module) dlclose(module);
+      return module != nullptr;
+#endif
+    };
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      QVERIFY(!mapped());
+      QPluginLoader loader;
+      loader.setLoadHints(QLibrary::LoadHints{});
+      loader.setFileName(QString::fromUtf8(ONEGEN_TEST_PLUGIN));
+      auto* object = loader.instance();
+      QVERIFY2(object, qPrintable(loader.errorString()));
+      auto* plugin = qobject_cast<IDevicePlugin*>(object);
+      auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
+      QVERIFY(plugin && producers);
+      QString error;
+      QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
+      QVariantMap data;
+      QVERIFY2(plugin->discoverDevices(&data, &error), qPrintable(error));
+      QVERIFY(mapped());
+      {
+        auto session = plugin->createSession(data, &error);
+        QVERIFY2(session != nullptr, qPrintable(error));
+        QWidget controls;
+        QVERIFY(!session->createDockWidgets(&controls).empty());
+        session.reset();
+      }
+      plugin->shutdown();
+      QVERIFY(!mapped());
+      QVERIFY(loader.unload());
+    }
+  }
   void cameraThenTerminalInfoLog() {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());

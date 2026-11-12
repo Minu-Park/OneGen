@@ -275,6 +275,7 @@ OneGen::~OneGen() {
     } catch (...) {
     }
   }
+  impl_->cameras.clear();
   for (auto& p : impl_->producers) {
     close_interfaces(*p);
     p->api.unload();

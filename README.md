@@ -71,9 +71,10 @@ A CTI whose shipped libraries collide with different same-named libraries
 already loaded in the process is refused before load. On Windows, OneGen also
 follows the CTI's static and delay-load imports, registers the producer's
 library directories (including vendor runtimes found through `PATH`) for the
-process, and refuses a CTI with an import it cannot find. Producer libraries stay
-mapped until process exit, and a native fault in a producer terminates the
-process. Do not copy a CTI without its producer tree. See
+producer lifetime, and refuses a CTI with an import it cannot find. Retiring a
+drained producer closes its transport, releases its native mapping and removes
+its search registrations. A native fault in a producer terminates the process.
+Do not copy a CTI without its producer tree. See
 [In-Process GenTL Producers](docs/IN_PROCESS_PRODUCERS.md).
 
 The selector explicitly distinguishes every enumerated Interface from Device entries.

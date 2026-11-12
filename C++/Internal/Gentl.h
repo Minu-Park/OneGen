@@ -5,7 +5,9 @@
 #include <GenTL/GenTL.h>
 
 #include <filesystem>
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace onegen {
 
@@ -53,6 +55,13 @@ namespace onegen {
   X(GCGetPortURLInfo)
 
 struct Gentl {
+  Gentl() = default;
+  /** Drains the initialized transport before releasing its native module. */
+  ~Gentl();
+  Gentl(const Gentl&) = delete;
+  Gentl& operator=(const Gentl&) = delete;
+  Gentl(Gentl&& other) noexcept;
+  Gentl& operator=(Gentl&& other) noexcept;
   void* lib = nullptr;
   GenTL::TL_HANDLE tl = nullptr;
 
@@ -72,6 +81,11 @@ struct Gentl {
   /** Reports the failing operation's return code independently of optional SDK detail. */
   [[noreturn]] void fail(const char* where, GenTL::GC_ERROR result) const;
   void check(GenTL::GC_ERROR err, const char* where) const;
+
+private:
+  void swap(Gentl& other) noexcept;
+  std::vector<std::shared_ptr<void>> directories_;
+  bool initialized_ = false;
 };
 
 }  // namespace onegen

@@ -63,10 +63,15 @@ spellings of a CTI path share one producer.
 - `reset_idle_search()` closes every producer when no discovery, Interface
   session or Device lease is active. `set_producer_files()` accepts a new
   file list only while no producer is loaded.
-- Producer libraries stay mapped until process exit. Closing a producer calls
-  `TLClose` and `GCCloseLib`; it never calls `FreeLibrary` or `dlclose`,
-  because a vendor runtime may still own threads, callbacks or process-global
-  state. Loading the same canonical CTI again reuses the mapped module.
+- Retiring a producer closes its devices and Interfaces, calls `TLClose` and
+  `GCCloseLib`, and releases its native library with `FreeLibrary` or `dlclose`.
+  Windows DLL search registrations belong to that producer and are removed
+  after native-library teardown, including failed loads and initialization.
+  Retire only after discovery and control/acquisition work have joined. Consumer
+  frame leases must keep their owning plugin code mapped until final release.
+  Opening the producer again starts a new initialized lifetime. Vendor runtimes
+  must stop their own callbacks/threads on close; never force-release another
+  component's module references. Actual vendor handoff remains a hardware gate.
 
 ## Consumer hardware claims
 
@@ -91,8 +96,9 @@ trees) and compares every shipped library with the module of the same base name
 already loaded in the process. The CTI is refused before the loader runs any of
 its code when a same-named module is loaded from a different file with different
 contents. The refusal names each conflicting library and the loaded path. The
-producer stays inactive until Playground restarts without the owner of those
-libraries.
+producer stays inactive until explicit discovery retries after the owner has
+closed and released those libraries. A vendor runtime that remains mapped is
+still refused; closing a session does not authorize an incompatible binding.
 
 Not conflicts: identical contents at another path, compiler runtime
 redistributables (`msvcp*`, `vcruntime*`, `ucrtbase`, `libstdc++`, and similar),
@@ -142,15 +148,17 @@ system directories, then each `PATH` entry. The result decides the load:
   another directory the producer needs, is a conflict. Delay loads search all
   of those in an unspecified order, so any of them could win.
 - Otherwise, every non-system directory in the closure is added to the process
-  DLL search with `AddDllDirectory` and stays registered until process exit,
-  like the producer libraries themselves. Later loads in the process may also
+  DLL search with `AddDllDirectory` until that producer's library teardown.
+  Later loads in the process may also
   resolve from these directories, which widens the reverse-direction exposure
   described above.
 
 Other platforms use only the directory scan above. Measured examples
 (2026-11-11, Windows): pylon `ProducerCXP.cti`
 ships 19 libraries that differ from the Framegrabber plugin's same-named Silicon
-Software and pylon GenApi builds, so the two cannot share a process. Euresys,
+Software and pylon GenApi builds, so the two cannot be active together. Sequential
+use requires retiring the first runtime completely; actual vendor handoff remains
+a hardware acceptance gate. Euresys,
 Heliotis, Blaze, GEV, U3V and StereoMini producers had no conflicts.
 
 ## Live pool limits

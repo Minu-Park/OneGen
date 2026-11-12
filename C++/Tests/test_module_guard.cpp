@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
   assert(shadowed.conflicts.front().shipped.filename() == dependency.filename());
 
   assert(SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS));
-  onegen::detail::register_producer_directories(environment.directories);
+  auto registrations = onegen::detail::register_producer_directories(environment.directories);
   const HMODULE module = LoadLibraryExW(
       delayed.wstring().c_str(), nullptr,
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
@@ -152,6 +152,15 @@ int main(int argc, char** argv) {
   const auto call = reinterpret_cast<int (*)()>(GetProcAddress(module, "onegen_guard_delayed"));
   assert(call && call() == 7);
   FreeLibrary(module);
+  const auto directory_probe = dependency.parent_path() / "directory-lifetime-probe.dll";
+  fs::copy_file(probe, directory_probe, fs::copy_options::overwrite_existing);
+  const auto registered_probe = LoadLibraryExW(directory_probe.filename().c_str(), nullptr,
+      LOAD_LIBRARY_SEARCH_USER_DIRS);
+  assert(registered_probe);
+  FreeLibrary(registered_probe);
+  registrations.clear();
+  assert(!LoadLibraryExW(directory_probe.filename().c_str(), nullptr, LOAD_LIBRARY_SEARCH_USER_DIRS));
+  fs::remove(directory_probe);
 #endif
 
   fs::remove_all(root);

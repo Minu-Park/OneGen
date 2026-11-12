@@ -59,8 +59,9 @@ if(ONEGEN_BUILD_TESTS)
   set_target_properties(SyntheticGenTL PROPERTIES PREFIX "" SUFFIX ".cti")
   add_executable(test_gentl_init Tests/test_gentl_init.cpp)
   target_link_libraries(test_gentl_init PRIVATE onegen)
-  add_dependencies(test_gentl_init FailingInitProducer)
-  add_test(NAME test_gentl_init COMMAND test_gentl_init $<TARGET_FILE:FailingInitProducer>)
+  add_dependencies(test_gentl_init FailingInitProducer SyntheticGenTL)
+  add_test(NAME test_gentl_init COMMAND test_gentl_init
+    $<TARGET_FILE:FailingInitProducer> $<TARGET_FILE:SyntheticGenTL> $<TARGET_FILE:GuardProbe>)
   target_compile_options(test_gentl_init PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
@@ -82,6 +83,7 @@ if(ONEGEN_BUILD_TESTS)
   add_test(NAME test_pixel_layout COMMAND test_pixel_layout)
 
   add_library(GuardProbe SHARED Tests/GuardProbe.cpp)
+  add_dependencies(test_gentl_init GuardProbe)
   add_executable(test_module_guard Tests/test_module_guard.cpp)
   target_link_libraries(test_module_guard PRIVATE onegen ${CMAKE_DL_LIBS})
   add_dependencies(test_module_guard GuardProbe)
@@ -364,7 +366,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     find_package(Qt6 REQUIRED COMPONENTS Test)
     qt_add_executable(test_plugin_discovery Tests/test_plugin_discovery.cpp)
     set_target_properties(test_plugin_discovery PROPERTIES AUTOMOC ON)
-    target_link_libraries(test_plugin_discovery PRIVATE Playground::DevicePlugin Qt6::Widgets Qt6::Test)
+    target_link_libraries(test_plugin_discovery PRIVATE Playground::DevicePlugin Qt6::Widgets Qt6::Test ${CMAKE_DL_LIBS})
     target_compile_definitions(test_plugin_discovery PRIVATE
       ONEGEN_TEST_PLUGIN="$<TARGET_FILE:OneGenPlugin>"
       ONEGEN_TEST_PRODUCER="$<TARGET_FILE:SyntheticGenTL>")

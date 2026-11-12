@@ -1,4 +1,5 @@
 #include "Internal/ModuleGuard.h"
+#include <stdexcept>
 
 #include <algorithm>
 #include <array>
@@ -358,21 +359,19 @@ ProducerEnvironment inspect_producer(const std::filesystem::path& cti) {
   return result;
 }
 
-void register_producer_directories(const std::vector<std::filesystem::path>& directories) {
+std::vector<std::shared_ptr<void>> register_producer_directories(
+    const std::vector<std::filesystem::path>& directories) {
+  std::vector<std::shared_ptr<void>> registrations;
 #ifdef _WIN32
-  static std::mutex mutex;
-  static std::vector<std::wstring> registered;
-  std::lock_guard lock(mutex);
   for (const auto& directory : directories) {
-    auto key = directory.lexically_normal().wstring();
-    std::transform(key.begin(), key.end(), key.begin(), ::towlower);
-    if (std::find(registered.begin(), registered.end(), key) != registered.end()) continue;
-    // Cookies are never removed: producer libraries stay mapped until process exit.
-    if (AddDllDirectory(directory.lexically_normal().wstring().c_str())) registered.push_back(key);
+    auto* cookie = AddDllDirectory(directory.lexically_normal().wstring().c_str());
+    if (!cookie) throw std::runtime_error("Cannot register producer DLL directory: " + directory.string());
+    registrations.emplace_back(cookie, [](void* value) { RemoveDllDirectory(value); });
   }
 #else
   (void)directories;
 #endif
+  return registrations;
 }
 
 std::string describe_producer_refusal(const std::filesystem::path& cti,
@@ -431,7 +430,8 @@ std::string describe_module_conflicts(const std::filesystem::path& cti,
     message += conflicts[index].shipped.filename().string() + " loaded from "
         + conflicts[index].loaded.string();
   }
-  message += "). Restart without the plugin or producer that owns them to use this producer.";
+  message += "). Close the owning plugin's sessions and release retained frames before retrying. "
+             "Restart without that plugin or producer if its runtime remains loaded.";
   return message;
 }
 

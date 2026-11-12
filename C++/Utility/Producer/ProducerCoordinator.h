@@ -5,8 +5,8 @@
  * @brief Loads GenTL producers in the consumer process and leases their devices.
  *
  * Each canonical CTI gets one OneGen system. Control and feature calls are serialized by the producer lock.
- * Blocking Single and Live acquisition run outside that lock so stop can interrupt them. Producer libraries stay mapped until process
- * exit (see Internal/Gentl.cpp).
+ * Blocking Single and Live acquisition run outside that lock so stop can interrupt them.
+ * Retiring the drained producer closes its transport and releases its native library and search directories.
  */
 
 #include "FramePool.h"
