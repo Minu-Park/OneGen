@@ -1,5 +1,7 @@
 #include "ProducerCoordinator.h"
 
+#include "ProducerMessages.h"
+
 #include "Internal/ConnectTiming.h"
 #include "Internal/PinnedAcquisition.h"
 #include "Internal/StageLog.h"
@@ -498,8 +500,7 @@ std::shared_ptr<Producer> Coordinator::producer(const std::string& cti, bool rel
       system->loadCti(key);
       result->system = std::move(system);
     } catch (const std::exception& error) {
-      result->inactive_error = std::string("Producer inactive: ") + error.what()
-          + ". Retry discovery explicitly after correcting the producer configuration.";
+      result->inactive_error = inactiveProducerMessage(error.what());
       stage_log_warning("producer inactive: cti=%s detail=%s", key.c_str(), error.what());
     }
   }

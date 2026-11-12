@@ -2,6 +2,7 @@
 // failing producer, leases, checked writes, pooled Live with held leases, owned Live, Single,
 // close/reopen and idle reset. Usage: test_producer <SyntheticGenTL.cti> <FailingInitProducer.cti>
 #include "ProducerCoordinator.h"
+#include "ProducerMessages.h"
 
 #include <atomic>
 #include <cassert>
@@ -37,6 +38,20 @@ int main(int argc, char** argv) {
   assert(argc == 3);
   const auto synthetic = std::filesystem::canonical(argv[1]);
   const auto failing = std::filesystem::canonical(argv[2]);
+
+  // Producer refusals already end with a sentence; the inactive wrapper owns the separator.
+  {
+    const auto refusal = onegen::producer::inactiveProducerMessage(
+        "loadCti: refused C:\\vendor\\Producer.cti: the process already loaded different "
+        "libraries with the same names (fglib5.dll loaded from C:\\other\\fglib5.dll). "
+        "Restart without the plugin or producer that owns them to use this producer.");
+    assert(refusal.find("..") == std::string::npos);
+    assert(refusal.find("producer. Retry discovery explicitly") != std::string::npos);
+    assert(refusal.ends_with("configuration."));
+    const auto bare = onegen::producer::inactiveProducerMessage("GCInitLib failed (-1001)");
+    assert(bare == "Producer inactive: GCInitLib failed (-1001). Retry discovery explicitly "
+                   "after correcting the producer configuration.");
+  }
 
   // Consumer claims remain effective after integration with the in-process coordinator.
   {

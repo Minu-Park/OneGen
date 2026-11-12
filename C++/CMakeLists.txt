@@ -137,7 +137,8 @@ add_library(OneGenProducer STATIC
   Utility/Producer/FramePool.h
   Utility/Producer/ParameterTypes.h
   Utility/Producer/ProducerCoordinator.cpp
-  Utility/Producer/ProducerCoordinator.h)
+  Utility/Producer/ProducerCoordinator.h
+  Utility/Producer/ProducerMessages.h)
 add_library(OneGen::Producer ALIAS OneGenProducer)
 target_include_directories(OneGenProducer PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}"
