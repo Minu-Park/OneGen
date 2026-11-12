@@ -113,7 +113,7 @@ std::optional<std::filesystem::path> loaded_path(
 bool is_system_library(const std::filesystem::path& path) {
 #ifdef _WIN32
   std::wstring root(MAX_PATH, L'\0');
-  const auto length = GetWindowsDirectoryW(root.data(), static_cast<UINT>(root.size()));
+  const auto length = GetSystemDirectoryW(root.data(), static_cast<UINT>(root.size()));
   if (length == 0 || length >= root.size()) return false;
   root.resize(length);
   const auto file = lower(path.lexically_normal().string());

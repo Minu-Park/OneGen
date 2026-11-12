@@ -65,7 +65,7 @@ Standalone discovery resolves `.cti` entries from `GENICAM_GENTL64_PATH` or
 `GENICAM_GENTL32_PATH`, without vendor-specific paths or filenames. The consumer
 adapter uses the exact injected producer inventory; an empty list never falls
 back to ambient paths. Producers load in the consumer process, one OneGen system
-per canonical CTI, and every SDK call for a producer is serialized by its lock.
+per canonical CTI, and control and feature calls are serialized by the producer lock; blocking Single and Live acquisition run outside it so stop can interrupt them.
 Each producer loads from its install directory so relative dependencies resolve.
 A CTI whose shipped libraries collide with different same-named libraries
 already loaded in the process is refused before load. On Windows, OneGen also

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Limit Windows system-library conflict exemptions to the actual system directory, excluding Windows Temp; align the README and coordinator lock contract with interruptible acquisition.
+
 - Document that the producer-load lock coordinates OneGen loads only: concurrent independent consumer loaders can still introduce a conflicting library between inspection and load. Sequential activation and parallel OneGen discovery tests do not prove exclusion across those loaders.
 
 - Serialize producer conflict inspection, directory registration and library initialization across parallel discovery; a conflicting producer is refused before loading. Add simultaneous conflicting-producer discovery coverage.
