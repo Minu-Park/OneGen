@@ -1,4 +1,5 @@
 #include "OneGenFeatureTree.h"
+#include "ProducerCoordinator.h"
 #include "QOneGenWidget.h"
 #include "OneGenSourceController.h"
 #ifdef ONEGEN_FEATURE_THEME
@@ -23,16 +24,21 @@
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSettings>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyledItemDelegate>
 #include <QTest>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QToolButton>
 #include <QUuid>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 
@@ -192,6 +198,76 @@ private slots:
     QVERIFY(panel.fps_->isHidden());
     QVERIFY(panel.failed_->isHidden());
     controller.grabbing_.store(false);
+  }
+  void apiAcquisitionUpdatesWidgetStatus() {
+#ifdef ONEGEN_TEST_PRODUCER
+    const auto debug_guard = qScopeGuard([] { setDebug(false); });
+    setDebug(true);
+    const QString producer = QString::fromUtf8(ONEGEN_TEST_PRODUCER);
+    QVERIFY2(QFileInfo::exists(producer), qPrintable(producer));
+#ifdef _WIN32
+    const std::filesystem::path producerPath(producer.toStdWString());
+#else
+    const std::filesystem::path producerPath(producer.toStdString());
+#endif
+
+    auto coordinator = std::make_shared<onegen::producer::Coordinator>(
+        std::filesystem::path{}, std::chrono::seconds(10));
+    QVERIFY(coordinator->set_producer_files({producerPath}));
+    const auto discovery = coordinator->discover();
+    QVERIFY2(discovery.completed, "Synthetic producer discovery did not complete.");
+    QVERIFY(!discovery.devices.empty());
+
+    OneGenSourceController root;
+    root.configureControl(coordinator, discovery.devices);
+    auto* camera = root.cameraController("SyntheticCam0", "Synthetic camera");
+    QOneGenWidget panel({}, camera, {}, {});
+    camera->setFrameConsumer([](SessionFrame&&, unsigned) {});
+
+    const auto lease = camera->openDevice(coordinator, discovery.devices.front());
+    QVERIFY(lease && lease->alive());
+    QTest::qWait(0);
+    QCOMPARE(panel.status_->text(), QStringLiteral("Connected"));
+    QVERIFY(panel.fps_->isHidden());
+    QVERIFY(panel.failed_->isHidden());
+
+    // source.start/source.stop call these methods directly, outside the GUI
+    // operation watcher whose completion normally refreshes the camera panel.
+    root.start();
+    QTest::qWait(0);
+    QCOMPARE(panel.status_->text(), QStringLiteral("Live"));
+    QVERIFY(panel.diagnostics_timer_->isActive());
+    QVERIFY(!panel.fps_->isHidden());
+    QVERIFY(panel.failed_->isHidden());
+
+    camera->rejected_frames_.store(2, std::memory_order_relaxed);
+    panel.updateDiagnostics();
+    QVERIFY(!panel.failed_->isHidden());
+    QCOMPARE(panel.failed_->text(), QStringLiteral("2 failed"));
+
+    setDebug(false);
+    panel.updateDiagnostics();
+    QVERIFY(panel.fps_->isHidden());
+    QVERIFY(panel.failed_->isHidden());
+    setDebug(true);
+    panel.updateDiagnostics();
+    QVERIFY(!panel.failed_->isHidden());
+
+    root.stop();
+    QTest::qWait(0);
+    QCOMPARE(panel.status_->text(), QStringLiteral("Connected"));
+    QVERIFY(!panel.diagnostics_timer_->isActive());
+    QVERIFY(panel.fps_->isHidden());
+    QVERIFY(panel.failed_->isHidden());
+
+    camera->closeDevice();
+    QTest::qWait(0);
+    QCOMPARE(panel.status_->text(), QStringLiteral("Idle"));
+    QVERIFY(panel.fps_->isHidden());
+    QVERIFY(panel.failed_->isHidden());
+#else
+    QSKIP("Synthetic producer is not configured for this build.");
+#endif
   }
   void init() {
     QSettings settings(QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))

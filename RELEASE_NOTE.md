@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Publish acquisition state changes from direct `start()`/`stopLive()` calls. Host source tools that bypass the GUI operation watcher now refresh the camera panel's live controls and Debug FPS/failed bubbles, and stop or disconnect clears them on the GUI thread.
+
 - Apply terminal punctuation once when an inactive-producer refusal is followed by retry guidance, so existing refusal text that already ends a sentence no longer produces `producer.. Retry ...` in discovery failures.
 
 - Limit Windows system-library conflict exemptions to the actual system directory, excluding Windows Temp; align the README and coordinator lock contract with interruptible acquisition.
