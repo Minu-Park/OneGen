@@ -38,6 +38,18 @@ int main(int argc, char** argv) {
   const auto synthetic = std::filesystem::canonical(argv[1]);
   const auto failing = std::filesystem::canonical(argv[2]);
 
+  // Consumer claims remain effective after integration with the in-process coordinator.
+  {
+    std::atomic<int> claims{0};
+    Coordinator denied({}, 2s, [&](const onegen::InterfaceInfo&) -> std::shared_ptr<void> {
+      ++claims;
+      throw std::runtime_error("Synthetic board is owned by another package.");
+    });
+    assert(denied.set_producer_files({synthetic}));
+    const auto blocked = denied.discover();
+    assert(claims > 0 && blocked.devices.empty());
+  }
+
   Coordinator coordinator({}, 2s);
   assert(coordinator.set_producer_files({synthetic, failing}));
 

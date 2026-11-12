@@ -427,10 +427,10 @@ private:
 
   std::shared_ptr<void> claimInterface(const onegen::InterfaceInfo& info)
   {
-    auto* claims = claims_.load(std::memory_order_acquire);
-    if (!claims) throw std::runtime_error("The host did not provide hardware resource claims.");
     const QString key = playgroundSisoBoardResourceKeyFromInterfaceId(QString::fromStdString(info.id));
     if (key.isEmpty()) return {};
+    auto* claims = claims_.load(std::memory_order_acquire);
+    if (!claims) throw std::runtime_error("The host did not provide hardware resource claims.");
     QString error;
     auto claim = claims->claimResource(key, &error);
     if (!claim) throw std::runtime_error(error.toStdString());
