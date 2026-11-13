@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.4.0 (2026-11-13)
+
+- Require Playground 0.6.6 or later; this package uses the device plugin interface introduced in that release.
+
 - Publish acquisition state changes from direct `start()`/`stopLive()` calls. Host source tools that bypass the GUI operation watcher now refresh the camera panel's live controls and Debug FPS/failed bubbles, and stop or disconnect clears them on the GUI thread.
 
 - Release a retired producer's CTI mapping and scoped DLL search registrations after devices, Interfaces and transport teardown. Failed loads and initialization release the same resources. Reopening initializes a fresh runtime; synthetic tests cover repeated close/reopen, mapping release and transferred ownership. Consumers must drain discovery, calls and frame references before plugin unload; vendor-specific handoff requires hardware validation.
@@ -40,7 +44,6 @@
 - Disable connection and Live commands while any asynchronous control operation is pending, including Live start/stop, so the UI does not offer commands rejected by the operation gate.
 
 - Show the next Live grab command with cameras/stop artwork in all pointer and focus states, and keep its tooltip and accessible name synchronized with acquisition state.
-
 
 - Connect icons name the current state (`disconnected`/`connect`); a consumer theme can preview the other state on hover.
 
@@ -98,6 +101,7 @@
 - Expose declared producer-scoped device discovery, connection, single-acquisition and Live tools on the source controller with connection-generation fences and explicit busy/failure outcomes. Consumer views observe copied controller state and share the existing Coordinator/Lease commands.
 - Own device leases in the source controller; drain accepted external work before view/controller teardown, close channels explicitly, and reject RPCs through closed leases even after reconnect. Preserve connection/Live state when native close/stop is refused.
 - Cover standard tool schema/invocation, GUI command parity, stale generations, single/Live exclusion, callback completion and failure recovery with isolated test peers.
+
 ## v0.2.0 (2026-10-08)
 
 - Expose copied discovery phases and failure details independently of start admission. Preserve partial producer results, distinguish failed enumeration from successful empty inventories, and log scan transitions through the consumer adapter. Join stopping scans without allowing late completion to revive them; keep standalone discovery tests independent of consumer SDK headers.
