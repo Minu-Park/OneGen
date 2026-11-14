@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FrameStorage.h"
 #include "AbstractSourceController.h"
 #include "DeviceDiagnostics.h"
 #include "engine/GraphicsFrameAdapter.h"
@@ -28,10 +29,13 @@ class FramePool;
 }
 
 /** Owns OneGen live acquisition and delivers SessionFrame values synchronously. */
-class OneGenSourceController final : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl {
+class OneGenSourceController final : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl,
+                                     public IFrameStorageClient {
   Q_OBJECT
-  Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl)
+  Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient)
 public:
+  /** @brief Applies to this controller and its camera controllers from their next frame pool. */
+  void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
   using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
   explicit OneGenSourceController(QObject* parent = nullptr);
   ~OneGenSourceController() override;
@@ -135,6 +139,7 @@ private:
   /** @brief Sizes and attaches the frame pool while the caller holds direct_pool_mutex_. */
   void configureFramePool(onegen::producer::Lease& lease, const std::string& sourceName);
   mutable std::mutex mutex_;
+  std::shared_ptr<IFrameStorageProvider> frame_storage_;
   /** @brief Serializes frame pool ownership with lease replacement without holding callbacks under mutex_. */
   std::mutex direct_pool_mutex_;
   struct Child { unsigned int index; std::string label; std::unique_ptr<OneGenSourceController> controller; };

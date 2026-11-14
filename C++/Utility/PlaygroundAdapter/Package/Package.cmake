@@ -1,8 +1,8 @@
 # Device-owned Playground plugin identity.
 set(PLAYGROUND_PLUGIN_ID "onegen")
-set(PLAYGROUND_PLUGIN_VERSION "0.4.0")
-# IDevicePlugin/7.0 (standard connection lifecycle, hardware resource claims) first ships in Core 0.6.6.
-set(PLAYGROUND_PLUGIN_MINIMUM_CORE_VERSION "0.6.6")
+set(PLAYGROUND_PLUGIN_VERSION "0.5.0")
+# Host-provided frame storage (IFrameStorageClient) and the image writer first ship in Core 0.7.0.
+set(PLAYGROUND_PLUGIN_MINIMUM_CORE_VERSION "0.7.0")
 set(PLAYGROUND_PLUGIN_DISPLAY_NAME "GenICam")
 # Optional presentation metadata; consumers must export it to manifests/catalogs.
 set(PLAYGROUND_PLUGIN_SUBTITLE "GenTL / GenApi")

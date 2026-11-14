@@ -624,7 +624,7 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source)
 std::optional<GraphicsFrame> oneGenGraphicsFrame(
     const onegen::Frame& source, const std::uint64_t sequence,
     std::string* rejection_reason, std::span<const std::uint8_t> image_payload,
-    std::shared_ptr<const void> payload_owner)
+    std::shared_ptr<const void> payload_owner, GraphicsImageStorage image_storage)
 {
   if (rejection_reason) rejection_reason->clear();
   const auto imageBytes = image_payload.empty()
@@ -674,7 +674,8 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       }
       if (part.data_type == kPart2dImage && !onegen::coordinate_format(part.data_format).components) {
         std::string imageDiagnostic;
-        auto imageFrame = oneGenGraphicsFrame(partFrame(part, source), sequence, &imageDiagnostic);
+        auto imageFrame = oneGenGraphicsFrame(partFrame(part, source), sequence, &imageDiagnostic,
+            {}, {}, image_storage);
         if (imageFrame && !imageFrame->images.empty()) {
           auto image = std::move(imageFrame->images.front());
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
@@ -821,22 +822,39 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   if (payload_owner && !byteSwap) {
     storage = std::shared_ptr<const std::uint8_t>(
         imageBytes.data(), [owner = std::move(payload_owner)](const std::uint8_t*) {});
-  } else {
+  } else if (format == GraphicsImagePixelFormat::Jpeg) {
     auto owned = std::make_shared<std::vector<std::uint8_t>>(
         imageBytes.begin(), imageBytes.end());
+    storage = std::shared_ptr<const std::uint8_t>(owned, owned->data());
+  } else {
+    GraphicsImageWriterSource writerSource;
+    writerSource.data = imageBytes.data();
+    writerSource.size = imageBytes.size();
+    writerSource.width = static_cast<int>(source.width);
+    writerSource.height = static_cast<int>(source.height);
+    writerSource.stride = static_cast<int>(stride);
+    writerSource.pixelFormat = format;
+    writerSource.bitsPerPixel = GraphicsImageValidation::packedBitsPerPixel(format);
+    writerSource.sourceFormat = static_cast<int>(source.pixel_format);
+    writerSource.declaredMonoSourceBits = monoBits(source.pixel_format);
+    writerSource.frameSequence = sequence;
     if (byteSwap) {
       const auto size_bits = static_cast<unsigned>((source.pixel_format >> 16U) & 0xffU);
-      const auto word = size_bits == 32 ? 4U : 2U;
       if (size_bits == 32 || size_bits % 16U == 0) {
-        for (std::uint32_t y = 0; y < source.height; ++y) {
-          auto* row = owned->data() + static_cast<std::size_t>(y) * stride;
-          const auto row_bytes = std::min(stride, owned->size() - static_cast<std::size_t>(y) * stride);
-          for (std::size_t offset = 0; offset + word <= row_bytes; offset += word)
-            std::reverse(row + offset, row + offset + word);
-        }
+        writerSource.operation = GraphicsImageWriterOperation::SwapByteOrder;
+        const auto wordBits = size_bits == 32 ? 32U : 16U;
+        if (graphicsImagePixelFormatInfo(format).componentBits != wordBits)
+          writerSource.pixelFormat = wordBits == 32
+              ? GraphicsImagePixelFormat::Mono32 : GraphicsImagePixelFormat::Mono16;
+      } else {
+        writerSource.operation = GraphicsImageWriterOperation::Copy;
       }
+    } else {
+      writerSource.operation = GraphicsImageWriterOperation::Copy;
     }
-    storage = std::shared_ptr<const std::uint8_t>(owned, owned->data());
+    auto written = writeGraphicsImage(writerSource, image_storage);
+    if (!written.isValid()) return reject("invalid image layout or insufficient payload bytes");
+    storage = std::move(written.storage);
   }
   GraphicsImage image;
   image.storage = storage;

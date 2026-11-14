@@ -10,6 +10,28 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <vector>
+
+namespace {
+
+struct RecordingStorage
+{
+  std::size_t calls = 0;
+  std::vector<std::shared_ptr<std::vector<std::uint8_t>>> buffers;
+
+  GraphicsImageStorage function()
+  {
+    return [this](const std::size_t bytes)
+    {
+      ++calls;
+      auto owner = std::make_shared<std::vector<std::uint8_t>>(bytes, 0);
+      buffers.push_back(owner);
+      return std::shared_ptr<std::uint8_t>(owner, owner->data());
+    };
+  }
+};
+
+} // namespace
 
 int main()
 {
@@ -157,6 +179,53 @@ int main()
   else
     assert(bytes[0] == 1 && bytes[1] == 2 && bytes[2] == 3 && bytes[3] == 4);
   source.pixel_endianness = 0;
+
+  RecordingStorage copyStorage;
+  const auto copied = oneGenGraphicsFrame(source, 70, nullptr, {}, {}, copyStorage.function());
+  assert(copied && copied->hasImage());
+  assert(copyStorage.calls == 1 && copyStorage.buffers.size() == 1);
+  assert(copied->images.front().payload.storage.get() == copyStorage.buffers.front()->data());
+  assert(*copyStorage.buffers.front() == source.payload);
+
+  RecordingStorage swapStorage;
+  source.pixel_endianness = 2;
+  const auto swappedIntoStorage = oneGenGraphicsFrame(
+      source, 71, nullptr, {}, {}, swapStorage.function());
+  assert(swappedIntoStorage && swappedIntoStorage->hasImage());
+  assert(swapStorage.calls == 1 && swapStorage.buffers.size() == 1);
+  assert(swappedIntoStorage->images.front().payload.storage.get()
+      == swapStorage.buffers.front()->data());
+  assert((*swapStorage.buffers.front()) == std::vector<std::uint8_t>({2, 1, 4, 3}));
+  source.pixel_endianness = 0;
+
+  onegen::Frame wordSource;
+  wordSource.width = 1;
+  wordSource.height = 1;
+  wordSource.stride = 4;
+  wordSource.pixel_format = 0x022000a7;
+  wordSource.pixel_endianness = 2;
+  wordSource.payload = {1, 2, 3, 4};
+  RecordingStorage wordStorage;
+  const auto wordSwapped = oneGenGraphicsFrame(
+      wordSource, 72, nullptr, {}, {}, wordStorage.function());
+  assert(wordSwapped && wordSwapped->hasImage());
+  assert(wordSwapped->images.front().payload.pixelFormat
+      == GraphicsImagePixelFormat::BiColorRGBG10);
+  assert(wordStorage.calls == 1 && wordStorage.buffers.size() == 1);
+  assert((*wordStorage.buffers.front()) == std::vector<std::uint8_t>({4, 3, 2, 1}));
+
+  const auto dropped = oneGenGraphicsFrame(source, 73, nullptr, {}, {},
+      GraphicsImageStorage([](const std::size_t) { return std::shared_ptr<std::uint8_t>{}; }));
+  assert(!dropped);
+
+  auto borrowOwner = std::make_shared<int>(3);
+  std::array<std::uint8_t, 4> borrowedBytes{9, 8, 7, 6};
+  RecordingStorage borrowStorage;
+  const auto borrowed = oneGenGraphicsFrame(aliasedSource, 74, nullptr,
+      std::span<const std::uint8_t>(borrowedBytes), borrowOwner, borrowStorage.function());
+  assert(borrowed && borrowed->images.front().payload.storage.get() == borrowedBytes.data());
+  assert(borrowStorage.calls == 0);
+
   std::string rejectionReason;
   source.payload_type = 8;
   assert(!oneGenGraphicsFrame(source, 13, &rejectionReason));
