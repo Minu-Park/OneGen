@@ -271,6 +271,30 @@ int main()
   assert(scene->ranges.front().payload.confidence == std::vector<float>({10.0F, 20.0F}));
   assert(scene->metadata.frameId == "77");
 
+  // Provided storage receives every range channel once; the frame borrows the
+  // block instead of allocating its own arrays.
+  RecordingStorage rangeStorage;
+  const auto storedScene = oneGenGraphicsFrame(
+      multipart, 14, nullptr, {}, {}, rangeStorage.function());
+  assert(storedScene && storedScene->hasRangeFrame());
+  assert(rangeStorage.calls == 1 && rangeStorage.buffers.size() == 1);
+  const auto& storedRange = storedScene->ranges.front().payload;
+  assert(storedRange.zValues.isBorrowed() && storedRange.xValues.isBorrowed()
+      && storedRange.yValues.isBorrowed() && storedRange.validMask.isBorrowed());
+  assert(storedRange.zValues.data()
+      == reinterpret_cast<const float*>(rangeStorage.buffers.front()->data()));
+  assert(storedRange.zValues[0] == 2.0F && storedRange.zValues[1] == 3.0F);
+  assert(storedRange.xValues[0] == 1.0F && storedRange.xValues[1] == 4.0F);
+  assert(storedRange.yValues[0] == 2.0F && storedRange.yValues[1] == 5.0F);
+  assert(storedRange.validMask == std::vector<std::uint8_t>({1, 1}));
+  assert(storedRange.confidence.isBorrowed());
+  assert(storedRange.confidence[0] == 10.0F && storedRange.confidence[1] == 20.0F);
+
+  RecordingStorage refusedRangeStorage;
+  const auto refusedScene = oneGenGraphicsFrame(multipart, 14, nullptr, {}, {},
+      GraphicsImageStorage([](const std::size_t) { return std::shared_ptr<std::uint8_t>(); }));
+  assert(!refusedScene);
+
   onegen::Frame c16Frame;
   c16Frame.scan3d_geometry = multipart.scan3d_geometry;
   c16Frame.scan3d_geometry->invalid_enabled[2] = true;
@@ -292,6 +316,20 @@ int main()
     const auto plane = oneGenGraphicsFrame(planarC, 15, &rejectionReason);
     assert(plane && plane->hasRangeFrame() && rejectionReason.empty());
   }
+  RecordingStorage c16Storage;
+  const auto c16Stored = oneGenGraphicsFrame(c16Frame, 15, nullptr, {}, {}, c16Storage.function());
+  assert(c16Stored && c16Stored->hasRangeFrame());
+  const auto& c16Range = c16Stored->ranges.front().payload;
+  assert(c16Range.zValues.isBorrowed() && c16Range.rangeRaw.isBorrowed());
+  assert(c16Range.zValues[0] == 6.0F && c16Range.rangeRaw[0] == 6U);
+  auto c16BigEndian = c16Frame;
+  c16BigEndian.pixel_endianness = 2;
+  c16BigEndian.parts[0].payload = {0, 6, 0, 0};
+  RecordingStorage c16BigEndianStorage;
+  const auto c16BigEndianScene = oneGenGraphicsFrame(
+      c16BigEndian, 15, nullptr, {}, {}, c16BigEndianStorage.function());
+  assert(c16BigEndianScene && c16BigEndianScene->hasRangeFrame());
+  assert(c16BigEndianScene->ranges.front().payload.rangeRaw[0] == 6U);
   auto missingCalibration = c16Frame;
   missingCalibration.scan3d_geometry->calibrated_axes[2] = false;
   assert(!oneGenGraphicsFrame(missingCalibration, 15, &rejectionReason));

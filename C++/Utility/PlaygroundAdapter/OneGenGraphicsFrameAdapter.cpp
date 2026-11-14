@@ -1,4 +1,5 @@
 #include "OneGenGraphicsFrameAdapter.h"
+#include "graphics/data/GraphicsRangeFrameWriter.h"
 #include "Internal/CoordinateFormat.h"
 #include <algorithm>
 #include <array>
@@ -189,9 +190,108 @@ double readCoordinate(const onegen::Frame::Part& part, const onegen::CoordinateF
   return readSample<std::uint16_t>(bytes, endianness);
 }
 
+enum class AuxiliaryFormat { Unsupported, Float, MaskBit, PackedBit, Byte, Word };
+
+struct AuxiliaryPart
+{
+  const onegen::Frame::Part* part = nullptr;
+  bool confidence = false;
+};
+
+struct AuxiliaryPlan
+{
+  std::vector<AuxiliaryPart> parts;
+  std::vector<std::size_t> used_indices;
+  bool intensity = false;
+  bool confidence = false;
+  bool intensity_raw = false;
+  bool confidence_raw = false;
+  bool intensity_mask = false;
+  bool confidence_mask = false;
+  std::uint8_t intensity_bits = 0;
+  std::uint8_t confidence_bits = 0;
+};
+
+[[nodiscard]] AuxiliaryFormat auxiliaryFormat(const onegen::Frame::Part& part,
+                                              bool& confidence, std::uint8_t& bits)
+{
+  confidence = part.data_type == kPartConfidence
+      || part.data_format == kConfidence1 || part.data_format == kConfidence1p
+      || part.data_format == kConfidence8 || part.data_format == kConfidence16
+      || part.data_format == kConfidence32f;
+  const auto format = pixelFormat(part.data_format);
+  if (!confidence && format != GraphicsImagePixelFormat::Mono8
+      && format != GraphicsImagePixelFormat::Mono16) return AuxiliaryFormat::Unsupported;
+  bits = static_cast<std::uint8_t>((part.data_format >> 16U) & 0xffU);
+  if (part.data_format == kConfidence32f) return AuxiliaryFormat::Float;
+  if (part.data_format == kConfidence1) return AuxiliaryFormat::MaskBit;
+  if (part.data_format == kConfidence1p) return AuxiliaryFormat::PackedBit;
+  if (bits == 8) return AuxiliaryFormat::Byte;
+  if (bits == 16) return AuxiliaryFormat::Word;
+  return AuxiliaryFormat::Unsupported;
+}
+
 template <typename T>
-bool copyScalarPart(const onegen::Frame::Part& part, GraphicsSampleBuffer<float>& values,
-                    GraphicsSampleBuffer<std::uint16_t>* raw = nullptr, std::uint64_t endianness = 0)
+[[nodiscard]] bool scalarPartFits(const onegen::Frame::Part& part)
+{
+  if (!part.width || !part.height
+      || part.width > (std::numeric_limits<std::size_t>::max)() / part.height
+      || part.width > (std::numeric_limits<std::size_t>::max)() / sizeof(T)) return false;
+  const auto rowBytes = static_cast<std::size_t>(part.width) * sizeof(T);
+  return part.stride >= rowBytes && part.height <= part.payload.size() / part.stride;
+}
+
+[[nodiscard]] bool auxiliaryPayloadFits(const onegen::Frame::Part& part,
+                                        const AuxiliaryFormat format)
+{
+  if (format == AuxiliaryFormat::Float) return scalarPartFits<float>(part);
+  if (format == AuxiliaryFormat::MaskBit || format == AuxiliaryFormat::Byte)
+    return scalarPartFits<std::uint8_t>(part);
+  if (format == AuxiliaryFormat::Word) return scalarPartFits<std::uint16_t>(part);
+  if (format == AuxiliaryFormat::PackedBit) {
+    const auto row_bytes = onegen::coordinate_row_bytes({1, 1, false, false, true}, part.width);
+    const auto stride = part.stride ? part.stride : row_bytes;
+    return row_bytes && stride >= row_bytes && part.height <= part.payload.size() / stride;
+  }
+  return false;
+}
+[[nodiscard]] AuxiliaryPlan planAuxiliary(const onegen::Frame& source,
+                                          const onegen::Frame::Part& selected,
+                                          const std::uint32_t width,
+                                          const std::uint32_t height)
+{
+  AuxiliaryPlan plan;
+  if (source.pixel_endianness > 2) return plan;
+  for (std::size_t index = 0; index < source.parts.size(); ++index) {
+    const auto& part = source.parts[index];
+    if (part.data_type != kPartConfidence && part.data_type != kPart2dImage) continue;
+    if (part.source_id != selected.source_id || part.region_id != selected.region_id
+        || part.width != width || part.height != height) continue;
+    bool confidence = false;
+    std::uint8_t bits = 0;
+    const auto format = auxiliaryFormat(part, confidence, bits);
+    if (format == AuxiliaryFormat::Unsupported || !auxiliaryPayloadFits(part, format)) continue;
+    plan.parts.push_back({&part, confidence});
+    plan.used_indices.push_back(index);
+    if (confidence) {
+      plan.confidence = true;
+      plan.confidence_bits = (part.data_format == kConfidence1
+          || part.data_format == kConfidence1p) ? 1 : bits;
+      plan.confidence_raw = format == AuxiliaryFormat::Word;
+      plan.confidence_mask = format == AuxiliaryFormat::Float;
+    } else {
+      plan.intensity = true;
+      plan.intensity_bits = bits;
+      plan.intensity_raw = format == AuxiliaryFormat::Word;
+      plan.intensity_mask = false;
+    }
+  }
+  return plan;
+}
+
+template <typename T>
+bool copyScalarPart(const onegen::Frame::Part& part, float* values,
+                    std::uint16_t* raw, std::uint64_t endianness)
 {
   if (!part.width || !part.height
       || part.width > (std::numeric_limits<std::size_t>::max)() / part.height
@@ -200,85 +300,71 @@ bool copyScalarPart(const onegen::Frame::Part& part, GraphicsSampleBuffer<float>
   const auto rowBytes = static_cast<std::size_t>(part.width) * sizeof(T);
   if (part.stride < rowBytes || part.height > part.payload.size() / part.stride)
     return false;
-  values.resize(count);
-  if (raw) raw->resize(count);
   for (std::uint32_t y = 0; y < part.height; ++y) {
     const auto* row = part.payload.data() + static_cast<std::size_t>(y) * part.stride;
     for (std::uint32_t x = 0; x < part.width; ++x) {
       const auto sample = readSample<T>(row + static_cast<std::size_t>(x) * sizeof(T), endianness);
       const auto index = static_cast<std::size_t>(y) * part.width + x;
       values[index] = static_cast<float>(sample);
-      if (raw) (*raw)[index] = static_cast<std::uint16_t>(sample);
+      if (raw) raw[index] = static_cast<std::uint16_t>(sample);
     }
   }
   return true;
 }
 
-bool sameShape(const onegen::Frame::Part& part, const RangeFrame& range) noexcept
+bool writeAuxiliary(const AuxiliaryPart& source, GraphicsRangeFrameWriter& writer,
+                    const std::uint64_t endianness)
 {
-  return part.width == static_cast<std::uint32_t>(range.width)
-      && part.height == static_cast<std::uint32_t>(range.height);
-}
+  const auto& part = *source.part;
+  bool confidence = false;
+  std::uint8_t bits = 0;
+  const auto format = auxiliaryFormat(part, confidence, bits);
+  if (format == AuxiliaryFormat::Unsupported) return false;
+  float* const values = confidence ? writer.confidenceData() : writer.intensityData();
+  std::uint16_t* const raw = confidence
+      ? writer.confidenceRawData() : writer.intensityRawData();
+  std::uint8_t* const mask = confidence
+      ? writer.confidenceValidMaskData() : writer.intensityValidMaskData();
+  if (values == nullptr) return false;
 
-bool appendAuxiliary(const onegen::Frame::Part& part, RangeFrame& range,
-                     const std::uint64_t endianness)
-{
-  if (!sameShape(part, range)) return false;
-  const bool confidence = part.data_type == kPartConfidence
-      || part.data_format == kConfidence1 || part.data_format == kConfidence1p
-      || part.data_format == kConfidence8 || part.data_format == kConfidence16
-      || part.data_format == kConfidence32f;
-  const auto format = pixelFormat(part.data_format);
-  if (!confidence && format != GraphicsImagePixelFormat::Mono8
-      && format != GraphicsImagePixelFormat::Mono16) return false;
-  const auto bits = static_cast<std::uint8_t>((part.data_format >> 16U) & 0xffU);
-  if (endianness > 2) return false;
-  auto& values = confidence ? range.confidence : range.intensity;
-  auto& raw = confidence ? range.confidenceRaw : range.intensityRaw;
-  bool copied = false;
-  if (part.data_format == kConfidence32f) {
-    copied = copyScalarPart<float>(part, values, nullptr, endianness);
-    if (copied) {
-      raw.clear(); // Floating samples have no lossless uint16 representation.
-      range.confidenceValidMask.resize(values.size());
-      for (std::size_t index = 0; index < values.size(); ++index)
-        range.confidenceValidMask[index] = std::isfinite(values[index]) ? 1U : 0U;
+  if (format == AuxiliaryFormat::Float) {
+    if (!copyScalarPart<float>(part, values, nullptr, endianness)) return false;
+    if (mask != nullptr) {
+      const auto count = static_cast<std::size_t>(part.width) * part.height;
+      for (std::size_t index = 0; index < count; ++index)
+        mask[index] = std::isfinite(values[index]) ? 1U : 0U;
     }
-  } else if (part.data_format == kConfidence1 || part.data_format == kConfidence1p) {
+    return true;
+  }
+  if (format == AuxiliaryFormat::MaskBit) {
+    if (!copyScalarPart<std::uint8_t>(part, values, nullptr, 0)) return false;
     const auto count = static_cast<std::size_t>(part.width) * part.height;
-    if (!count || part.width > (std::numeric_limits<std::size_t>::max)() / part.height)
-      return false;
-    values.resize(count);
-    if (part.data_format == kConfidence1) {
-      copied = copyScalarPart<std::uint8_t>(part, values);
-      if (copied) for (auto& value : values) value = (static_cast<std::uint8_t>(value) & 1U) ? 1.F : 0.F;
-    } else {
-      const auto row_bytes = onegen::coordinate_row_bytes({1, 1, false, false, true}, part.width);
-      const auto stride = part.stride ? part.stride : row_bytes;
-      if (!row_bytes || stride < row_bytes || part.height > part.payload.size() / stride)
-        return false;
-      for (std::uint32_t y = 0; y < part.height; ++y)
-        for (std::uint32_t x = 0; x < part.width; ++x)
-          values[static_cast<std::size_t>(y) * part.width + x] =
-              onegen::packed_bits(part.payload.data() + static_cast<std::size_t>(y) * stride, stride,
-                                  static_cast<std::uint64_t>(x), 1) ? 1.F : 0.F;
-      copied = true;
-    }
-  } else if (bits == 8) {
-    copied = copyScalarPart<std::uint8_t>(part, values);
-  } else if (bits == 16) {
-    copied = copyScalarPart<std::uint16_t>(part, values, &raw, endianness);
+    for (std::size_t index = 0; index < count; ++index)
+      values[index] = (static_cast<std::uint8_t>(values[index]) & 1U) ? 1.F : 0.F;
+    return true;
   }
-  if (!copied) return false;
-  const auto stored_bits = (part.data_format == kConfidence1 || part.data_format == kConfidence1p)
-      ? 1 : bits;
-  (confidence ? range.confidenceBits : range.intensityBits) = stored_bits;
-  (confidence ? range.confidenceField : range.intensityField).bitsPerSample = stored_bits;
-  return true;
+  if (format == AuxiliaryFormat::PackedBit) {
+    const auto row_bytes = onegen::coordinate_row_bytes({1, 1, false, false, true}, part.width);
+    const auto stride = part.stride ? part.stride : row_bytes;
+    if (!row_bytes || stride < row_bytes || part.height > part.payload.size() / stride)
+      return false;
+    for (std::uint32_t y = 0; y < part.height; ++y)
+      for (std::uint32_t x = 0; x < part.width; ++x)
+        values[static_cast<std::size_t>(y) * part.width + x] =
+            onegen::packed_bits(part.payload.data() + static_cast<std::size_t>(y) * stride, stride,
+                                static_cast<std::uint64_t>(x), 1) ? 1.F : 0.F;
+    return true;
+  }
+  if (format == AuxiliaryFormat::Byte) {
+    return copyScalarPart<std::uint8_t>(part, values, nullptr, 0);
+  }
+  return copyScalarPart<std::uint16_t>(part, values, raw, endianness);
 }
-
 std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
-                                     const onegen::Frame& source, std::string* diagnostic = nullptr)
+                                     const onegen::Frame& source,
+                                     const AuxiliaryPlan& auxiliary,
+                                     const GraphicsImageStorage& storage,
+                                     std::string* diagnostic = nullptr)
 {
   const auto reject = [diagnostic](const std::string& reason) {
     if (diagnostic) *diagnostic = reason;
@@ -328,21 +414,14 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   for (std::size_t axis = full_axes ? 0 : 2; axis < 3; ++axis)
     if (!native && (!geometry.calibrated_axes[axis] || !std::isfinite(geometry.scale[axis])
         || !std::isfinite(geometry.offset[axis]))) return reject("missing or invalid calibration for axis=" + std::to_string(axis));
-  RangeFrame range;
-  range.width = static_cast<int>(part.width);
-  range.height = static_cast<int>(part.height);
-  range.sensorType = native ? "GenTL 3D (native scalar preview)" : "GenTL 3D";
-  range.frameId = source.frame_id ? std::to_string(source.frame_id) : std::string{};
-  const auto unit = lower(geometry.distance_unit);
-  double unit_scale = 1;
-  if (!native) {
-    if (unit == "millimeter" || unit == "mm") range.lengthUnit = GraphicsLengthUnit::Millimeter;
-    else if (unit == "micrometer" || unit == "um") range.lengthUnit = GraphicsLengthUnit::Micrometer;
-    else if (unit == "nanometer" || unit == "nm") range.lengthUnit = GraphicsLengthUnit::Nanometer;
-    else if (unit == "meter" || unit == "m") { range.lengthUnit = GraphicsLengthUnit::Millimeter; unit_scale = 1000; }
-    else if (unit == "inch" || unit == "in") { range.lengthUnit = GraphicsLengthUnit::Millimeter; unit_scale = 25.4; }
-    else return reject("unsupported Scan3dDistanceUnit=" + geometry.distance_unit);
-  }
+  const bool disparity = mode == "DisparityC";
+  const bool polar = system == "Spherical" || system == "Cylindrical";
+  const bool project = disparity && std::isfinite(geometry.principal_u)
+      && std::isfinite(geometry.principal_v);
+  const bool explicitXY = layout.components > 1 || (disparity && project) || polar;
+  const bool hasRangeRaw = layout.components == 1 && !layout.floating
+      && layout.sample_bits <= 16 && !disparity && !polar;
+
   const auto row_bytes = onegen::coordinate_row_bytes(layout, part.width);
   if (!row_bytes) return reject("coordinate row size is unsupported");
   const auto stride = part.stride ? part.stride : row_bytes;
@@ -350,31 +429,65 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   if (stride < row_bytes || part.height > part.payload.size() / stride / planes)
     return reject("coordinate payload is truncated or stride is smaller than the row size");
   const auto plane_bytes = stride * part.height;
-  range.zValues.resize(count);
-  range.validMask.resize(count);
-  range.rangeBits = static_cast<std::uint8_t>(layout.sample_bits);
-  range.rangeField = {"gentl.coord3d-c", native ? "Coordinate C (uncalibrated)" : "Coordinate C", "",
-      native ? MeasurementValueDomain::Native : MeasurementValueDomain::Calibrated,
-      MeasurementSampleKind::GridSample, range.rangeBits};
+
+  GraphicsRangeFrameLayout frameLayout;
+  frameLayout.width = static_cast<int>(part.width);
+  frameLayout.height = static_cast<int>(part.height);
+  frameLayout.channels.x = explicitXY;
+  frameLayout.channels.y = explicitXY;
+  frameLayout.channels.validMask = true;
+  frameLayout.channels.rangeRaw = hasRangeRaw;
+  frameLayout.channels.intensity = auxiliary.intensity;
+  frameLayout.channels.intensityRaw = auxiliary.intensity_raw;
+  frameLayout.channels.intensityValidMask = auxiliary.intensity_mask;
+  frameLayout.channels.confidence = auxiliary.confidence;
+  frameLayout.channels.confidenceRaw = auxiliary.confidence_raw;
+  frameLayout.channels.confidenceValidMask = auxiliary.confidence_mask;
+  GraphicsRangeFrameWriter writer(frameLayout, storage);
+  if (!writer.isValid())
+    return reject("provided storage refused the range frame or its layout is unsupported");
+
+  float* const zValues = writer.zData();
+  float* const xValues = writer.xData();
+  float* const yValues = writer.yData();
+  std::uint8_t* const validMask = writer.validMaskData();
+  std::uint16_t* const rangeRaw = writer.rangeRawData();
+
+  GraphicsLengthUnit lengthUnit = GraphicsLengthUnit::Millimeter;
+  double xScale = 1.0;
+  double yScale = 1.0;
+  double zScale = 1.0;
+  double xOffset = 0.0;
+  double yOffset = 0.0;
+  double zOffset = 0.0;
+  RangeFrameXYCoordinateMode xyCoordinateMode = RangeFrameXYCoordinateMode::UniformPhysical;
+  const auto unit = lower(geometry.distance_unit);
+  double unit_scale = 1;
+  if (!native) {
+    if (unit == "millimeter" || unit == "mm") lengthUnit = GraphicsLengthUnit::Millimeter;
+    else if (unit == "micrometer" || unit == "um") lengthUnit = GraphicsLengthUnit::Micrometer;
+    else if (unit == "nanometer" || unit == "nm") lengthUnit = GraphicsLengthUnit::Nanometer;
+    else if (unit == "meter" || unit == "m") { lengthUnit = GraphicsLengthUnit::Millimeter; unit_scale = 1000; }
+    else if (unit == "inch" || unit == "in") { lengthUnit = GraphicsLengthUnit::Millimeter; unit_scale = 25.4; }
+    else return reject("unsupported Scan3dDistanceUnit=" + geometry.distance_unit);
+  }
   if (layout.components > 1) {
-    range.xyCoordinateMode = RangeFrameXYCoordinateMode::ExplicitXY;
-    range.xValues.resize(count);
-    range.yValues.resize(count);
+    xyCoordinateMode = RangeFrameXYCoordinateMode::ExplicitXY;
   } else {
-    range.zScale = native ? 1 : geometry.scale[2];
-    range.zOffset = native ? 0 : geometry.offset[2];
-    if (!layout.floating && layout.sample_bits <= 16) range.rangeRaw.resize(count);
+    zScale = native ? 1 : geometry.scale[2];
+    zOffset = native ? 0 : geometry.offset[2];
     if (mode == "RectifiedC") {
-      range.xScale = geometry.scale[0]; range.xOffset = geometry.offset[0];
-      range.yScale = geometry.scale[1]; range.yOffset = geometry.offset[1];
+      xScale = geometry.scale[0]; xOffset = geometry.offset[0];
+      yScale = geometry.scale[1]; yOffset = geometry.offset[1];
     } else {
       // SFNC CalibratedC guarantees calibrated C only, even if A/B nodes exist.
       // Pixel coordinates are not physical XY; display fitting belongs to the consumer.
-      range.xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
-      range.xScale = range.yScale = std::numeric_limits<double>::quiet_NaN();
-      range.xOffset = range.yOffset = std::numeric_limits<double>::quiet_NaN();
+      xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
+      xScale = yScale = std::numeric_limits<double>::quiet_NaN();
+      xOffset = yOffset = std::numeric_limits<double>::quiet_NaN();
     }
   }
+  if (disparity && project) xyCoordinateMode = RangeFrameXYCoordinateMode::ExplicitXY;
   for (std::uint32_t y = 0; y < part.height; ++y) {
     for (std::uint32_t x = 0; x < part.width; ++x) {
       const auto index = static_cast<std::size_t>(y) * part.width + x;
@@ -389,18 +502,18 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
         valid = valid && std::isfinite(sample) && std::isfinite(world)
             && std::isfinite(static_cast<float>(world)) && std::isfinite(stored)
             && !(geometry.invalid_enabled[axis] && sample == geometry.invalid_value[axis]);
-        if (axis == 0) range.xValues[index] = stored;
-        else if (axis == 1) range.yValues[index] = stored;
+        if (axis == 0) { if (xValues) xValues[index] = stored; }
+        else if (axis == 1) { if (yValues) yValues[index] = stored; }
         else {
-          range.zValues[index] = stored;
-          if (!range.rangeRaw.empty()) range.rangeRaw[index] = static_cast<std::uint16_t>(sample);
+          zValues[index] = stored;
+          if (rangeRaw) rangeRaw[index] = static_cast<std::uint16_t>(sample);
         }
       }
       if (layout.components == 2) {
-        range.yValues[index] = static_cast<float>(y * geometry.scale[1] + geometry.offset[1]);
-        valid = valid && std::isfinite(range.yValues[index]);
+        if (yValues) yValues[index] = static_cast<float>(y * geometry.scale[1] + geometry.offset[1]);
+        valid = valid && (!yValues || std::isfinite(yValues[index]));
       }
-      range.validMask[index] = valid ? 1U : 0U;
+      validMask[index] = valid ? 1U : 0U;
     }
   }
   const auto finite_store = [](double value, float& stored) {
@@ -408,53 +521,44 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
     stored = static_cast<float>(value);
     return true;
   };
-  if (mode == "DisparityC") {
-    const auto scale = range.zScale;
-    const auto offset = range.zOffset;
-    range.zScale = 1;
-    range.zOffset = 0;
-    range.rangeRaw.clear();
-    const bool project = std::isfinite(geometry.principal_u) && std::isfinite(geometry.principal_v);
-    if (project) {
-      range.xyCoordinateMode = RangeFrameXYCoordinateMode::ExplicitXY;
-      range.xValues.resize(count);
-      range.yValues.resize(count);
-    }
+  if (disparity) {
+    const auto scale = zScale;
+    const auto offset = zOffset;
+    zScale = 1;
+    zOffset = 0;
     for (std::uint32_t y = 0; y < part.height; ++y) {
       for (std::uint32_t x = 0; x < part.width; ++x) {
         const auto index = static_cast<std::size_t>(y) * part.width + x;
-        if (!range.validMask[index]) continue;
-        const double disparity = offset + static_cast<double>(range.zValues[index]) * scale;
-        if (disparity == 0 || !std::isfinite(disparity)) { range.validMask[index] = 0; continue; }
-        const double z = geometry.baseline * geometry.focal_length / disparity;
-        if (!finite_store(z, range.zValues[index])) { range.validMask[index] = 0; continue; }
+        if (!validMask[index]) continue;
+        const double disparityValue = offset + static_cast<double>(zValues[index]) * scale;
+        if (disparityValue == 0 || !std::isfinite(disparityValue)) { validMask[index] = 0; continue; }
+        const double z = geometry.baseline * geometry.focal_length / disparityValue;
+        if (!finite_store(z, zValues[index])) { validMask[index] = 0; continue; }
         if (project) {
-          if (!finite_store((static_cast<double>(x) - geometry.principal_u) * z / geometry.focal_length,
-                            range.xValues[index])
+          if (!xValues || !yValues
+              || !finite_store((static_cast<double>(x) - geometry.principal_u) * z / geometry.focal_length,
+                               xValues[index])
               || !finite_store((static_cast<double>(y) - geometry.principal_v) * z / geometry.focal_length,
-                               range.yValues[index]))
-            range.validMask[index] = 0;
+                               yValues[index]))
+            validMask[index] = 0;
         }
       }
     }
-  } else if (system == "Spherical" || system == "Cylindrical") {
-    range.rangeRaw.clear();
-    range.xyCoordinateMode = RangeFrameXYCoordinateMode::ExplicitXY;
-    range.xValues.resize(count);
-    range.yValues.resize(count);
-    range.zScale = 1;
-    range.zOffset = 0;
+  } else if (polar) {
+    xyCoordinateMode = RangeFrameXYCoordinateMode::ExplicitXY;
+    zScale = 1;
+    zOffset = 0;
     for (std::uint32_t y = 0; y < part.height; ++y) {
       for (std::uint32_t x = 0; x < part.width; ++x) {
         const auto index = static_cast<std::size_t>(y) * part.width + x;
-        if (!range.validMask[index]) continue;
+        if (!validMask[index]) continue;
         double theta = 0, second = 0, rho = 0;
         if (layout.components >= 2) {
-          theta = range.xValues[index]; second = range.yValues[index]; rho = range.zValues[index];
+          theta = xValues[index]; second = yValues[index]; rho = zValues[index];
         } else {
           theta = x * geometry.scale[0] + geometry.offset[0];
           second = y * geometry.scale[1] + geometry.offset[1];
-          rho = geometry.offset[2] + static_cast<double>(range.zValues[index]) * geometry.scale[2];
+          rho = geometry.offset[2] + static_cast<double>(zValues[index]) * geometry.scale[2];
         }
         double wx = 0, wy = 0, wz = 0;
         if (system == "Spherical") {
@@ -468,32 +572,64 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
         }
         float stored_x = 0, stored_y = 0, stored_z = 0;
         if (!finite_store(wx, stored_x) || !finite_store(wy, stored_y) || !finite_store(wz, stored_z))
-          range.validMask[index] = 0;
+          validMask[index] = 0;
         else {
-          range.xValues[index] = stored_x;
-          range.yValues[index] = stored_y;
-          range.zValues[index] = stored_z;
+          xValues[index] = stored_x;
+          yValues[index] = stored_y;
+          zValues[index] = stored_z;
         }
       }
     }
   }
   if (unit_scale != 1) {
-    range.zScale *= unit_scale;
-    range.zOffset *= unit_scale;
-    if (range.xyCoordinateMode != RangeFrameXYCoordinateMode::PixelGrid) {
-      range.xScale *= unit_scale;
-      range.xOffset *= unit_scale;
-      range.yScale *= unit_scale;
-      range.yOffset *= unit_scale;
-    for (auto& value : range.xValues) value = static_cast<float>(value * unit_scale);
-    for (auto& value : range.yValues) value = static_cast<float>(value * unit_scale);
-    for (std::size_t index = 0; index < range.validMask.size(); ++index) {
-      if (!range.validMask[index]) continue;
-      if ((!range.xValues.empty() && !std::isfinite(range.xValues[index]))
-          || (!range.yValues.empty() && !std::isfinite(range.yValues[index])))
-        range.validMask[index] = 0;
+    zScale *= unit_scale;
+    zOffset *= unit_scale;
+    if (xyCoordinateMode != RangeFrameXYCoordinateMode::PixelGrid) {
+      xScale *= unit_scale;
+      xOffset *= unit_scale;
+      yScale *= unit_scale;
+      yOffset *= unit_scale;
+      if (xValues)
+        for (std::size_t index = 0; index < count; ++index)
+          xValues[index] = static_cast<float>(xValues[index] * unit_scale);
+      if (yValues)
+        for (std::size_t index = 0; index < count; ++index)
+          yValues[index] = static_cast<float>(yValues[index] * unit_scale);
+      for (std::size_t index = 0; index < count; ++index) {
+        if (!validMask[index]) continue;
+        if ((xValues && !std::isfinite(xValues[index]))
+            || (yValues && !std::isfinite(yValues[index])))
+          validMask[index] = 0;
+      }
     }
-    }
+  }
+  for (const auto& auxiliaryPart : auxiliary.parts) {
+    if (!writeAuxiliary(auxiliaryPart, writer, source.pixel_endianness))
+      return reject("auxiliary channel payload is unsupported");
+  }
+
+  RangeFrame range = writer.takeFrame();
+  range.lengthUnit = lengthUnit;
+  range.xScale = xScale;
+  range.yScale = yScale;
+  range.zScale = zScale;
+  range.xOffset = xOffset;
+  range.yOffset = yOffset;
+  range.zOffset = zOffset;
+  range.xyCoordinateMode = xyCoordinateMode;
+  range.sensorType = native ? "GenTL 3D (native scalar preview)" : "GenTL 3D";
+  range.frameId = source.frame_id ? std::to_string(source.frame_id) : std::string{};
+  range.rangeBits = static_cast<std::uint8_t>(layout.sample_bits);
+  range.rangeField = {"gentl.coord3d-c", native ? "Coordinate C (uncalibrated)" : "Coordinate C", "",
+      native ? MeasurementValueDomain::Native : MeasurementValueDomain::Calibrated,
+      MeasurementSampleKind::GridSample, range.rangeBits};
+  if (auxiliary.intensity) {
+    range.intensityBits = auxiliary.intensity_bits;
+    range.intensityField.bitsPerSample = auxiliary.intensity_bits;
+  }
+  if (auxiliary.confidence) {
+    range.confidenceBits = auxiliary.confidence_bits;
+    range.confidenceField.bitsPerSample = auxiliary.confidence_bits;
   }
   return range.isValid() ? std::optional<RangeFrame>(std::move(range)) : reject("converted range layout is invalid");
 }
@@ -552,9 +688,11 @@ struct PlanarRangeAssembly
   RangeFrame range;
   std::size_t selected_index = 0;
   std::array<std::size_t, 3> consumed_indices{};
+  std::vector<std::size_t> used_auxiliary_indices;
 };
 
-std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source)
+std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
+                                                   const GraphicsImageStorage& storage)
 {
   std::vector<PlanarRangeAssembly> assemblies;
   for (std::size_t base_index = 0; base_index < source.parts.size(); ++base_index) {
@@ -612,8 +750,10 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source)
       }
     }
     if (!valid) continue;
-    if (auto range = rangeFrame(joined, source)) {
-      assemblies.push_back({std::move(*range), base_index, plane_indices});
+    const auto auxiliary = planAuxiliary(source, a, a.width, a.height);
+    if (auto range = rangeFrame(joined, source, auxiliary, storage)) {
+      assemblies.push_back({std::move(*range), base_index, plane_indices,
+                            auxiliary.used_indices});
     }
   }
   return assemblies;
@@ -650,7 +790,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     std::vector<const onegen::Frame::Part*> selected_parts;
     std::vector<bool> consumed_parts(source.parts.size(), false);
     std::vector<bool> confidence_used(source.parts.size(), false);
-    for (auto& assembly : planarPartsRanges(source)) {
+    for (auto& assembly : planarPartsRanges(source, image_storage)) {
       const auto& selected = source.parts[assembly.selected_index];
       const auto group = std::to_string(selected.source_id) + ":"
           + std::to_string(selected.region_id);
@@ -658,16 +798,21 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
                       std::move(assembly.range), "Range", group);
       selected_parts.push_back(&selected);
       for (const std::size_t index : assembly.consumed_indices) consumed_parts[index] = true;
+      for (const std::size_t index : assembly.used_auxiliary_indices)
+        confidence_used[index] = true;
     }
     for (std::size_t index = 0; index < source.parts.size(); ++index) {
       const auto& part = source.parts[index];
       if (!consumed_parts[index]) {
         std::string rangeDiagnostic;
-        if (auto range = rangeFrame(part, source, &rangeDiagnostic)) {
+        const auto auxiliary = planAuxiliary(source, part, part.width, part.height);
+        if (auto range = rangeFrame(part, source, auxiliary, image_storage, &rangeDiagnostic)) {
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
           result.addRange("range." + group + "." + std::to_string(index),
                           std::move(*range), "Range", group);
           selected_parts.push_back(&part);
+          for (const std::size_t auxiliaryIndex : auxiliary.used_indices)
+            confidence_used[auxiliaryIndex] = true;
         } else if (onegen::coordinate_format(part.data_format).components || is3dPart(part.data_type)) {
           dropped(index, rangeDiagnostic);
         }
@@ -704,21 +849,13 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
         if (result.images[imageIndex].descriptor.displayName == "Image")
           result.images[imageIndex].descriptor.displayName = "Image " + std::to_string(imageIndex + 1);
     }
-    for (std::size_t index = 0; index < result.ranges.size(); ++index) {
-      const auto* selected = selected_parts[index];
-      for (std::size_t auxiliary = 0; auxiliary < source.parts.size(); ++auxiliary) {
-        const auto& part = source.parts[auxiliary];
-        if ((part.data_type == kPartConfidence || part.data_type == kPart2dImage)
-            && part.source_id == selected->source_id && part.region_id == selected->region_id)
-          if (appendAuxiliary(part, result.ranges[index].payload, source.pixel_endianness))
-            confidence_used[auxiliary] = true;
-      }
-    }
+
     if (result.ranges.empty() && result.images.empty()) {
       for (std::size_t index = 0; index < source.parts.size(); ++index) {
         const auto& part = source.parts[index];
         if (part.data_format != kConfidence32f) continue;
-        auto preview = oneGenGraphicsFrame(partFrame(part, source), sequence, rejection_reason);
+        auto preview = oneGenGraphicsFrame(
+            partFrame(part, source), sequence, rejection_reason, {}, {}, image_storage);
         if (preview && !preview->ranges.empty()) {
           auto range = std::move(preview->ranges.front());
           const auto group = std::to_string(part.source_id) + ":"
@@ -769,26 +906,32 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     GraphicsFrame frame;
     if (source.pixel_format == kConfidence32f) {
       // Reuse the native scalar preview contract; confidence is not depth.
-      RangeFrame preview;
       if (source.pixel_endianness > 2
           || source.width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
-          || source.height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
-          || !copyScalarPart<float>(part, preview.zValues, nullptr, source.pixel_endianness))
+          || source.height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()))
         return reject("invalid floating confidence layout or byte order");
-      preview.width = static_cast<int>(part.width);
-      preview.height = static_cast<int>(part.height);
+      GraphicsRangeFrameLayout layout;
+      layout.width = static_cast<int>(part.width);
+      layout.height = static_cast<int>(part.height);
+      layout.channels.validMask = true;
+      GraphicsRangeFrameWriter writer(layout, image_storage);
+      if (!writer.isValid()
+          || !copyScalarPart<float>(part, writer.zData(), nullptr, source.pixel_endianness))
+        return reject("invalid floating confidence layout or byte order");
+      float* const values = writer.zData();
+      std::uint8_t* const mask = writer.validMaskData();
+      for (std::size_t i = 0; i < writer.sampleCount(); ++i)
+        mask[i] = std::isfinite(values[i]) ? 1U : 0U;
+      RangeFrame preview = writer.takeFrame();
       preview.xScale = preview.yScale = std::numeric_limits<double>::quiet_NaN();
       preview.rangeBits = 32;
       preview.rangeField = {"gentl.confidence", "Confidence", "",
           MeasurementValueDomain::Native, MeasurementSampleKind::GridSample, 32};
       preview.sensorType = "GenTL confidence (native scalar preview)";
-      preview.validMask.resize(preview.zValues.size());
-      for (std::size_t i = 0; i < preview.zValues.size(); ++i)
-        preview.validMask[i] = std::isfinite(preview.zValues[i]) ? 1U : 0U;
       frame.addRange("confidence", std::move(preview), "Confidence");
     } else {
       std::string diagnostic;
-      if (auto range = rangeFrame(part, source, &diagnostic)) frame.addRange("range", std::move(*range), "Range");
+      if (auto range = rangeFrame(part, source, {}, image_storage, &diagnostic)) frame.addRange("range", std::move(*range), "Range");
       else return reject(diagnostic.c_str());
     }
     frame.metadata.frameIndex = sequence;

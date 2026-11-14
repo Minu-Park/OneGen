@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Deliver GenTL 3D range parts through the GraphicsEngine range writer into Playground shared frame storage. Range, point-cloud and scalar channels are written once into provided storage, including big-endian sources; an empty result drops the range. The explicit point cloud is unchanged.
+
 ## v0.5.0 (2026-11-14)
 
 - Require Playground 0.7.0 or later; this package uses the frame storage interface introduced in that release.
