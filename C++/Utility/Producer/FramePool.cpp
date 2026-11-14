@@ -69,15 +69,17 @@ FramePoolPlan plan_frame_pool(std::uint64_t payload_bytes, std::uint32_t minimum
 }
 
 FrameLease::FrameLease(std::shared_ptr<FramePool> pool, std::uint32_t slot,
-                       std::span<const std::uint8_t> bytes, Frame metadata) noexcept
-    : pool_(std::move(pool)), slot_(slot), bytes_(bytes), metadata_(std::move(metadata)) {}
+                       std::span<const std::uint8_t> bytes, Frame metadata,
+                       std::shared_ptr<std::uint8_t> storage) noexcept
+    : pool_(std::move(pool)), storage_(std::move(storage)), slot_(slot), bytes_(bytes),
+      metadata_(std::move(metadata)) {}
 
 FrameLease::~FrameLease() {
   if (pool_) pool_->release(slot_);
 }
 
 std::shared_ptr<FramePool> FramePool::create(std::uint32_t slots, std::uint64_t slot_bytes,
-                                             std::string& error) {
+                                             std::string& error, FrameStorage storage) {
   if (slots == 0 || slot_bytes == 0) {
     error = "Frame pool requires at least one non-empty slot.";
     return {};
@@ -86,6 +88,12 @@ std::shared_ptr<FramePool> FramePool::create(std::uint32_t slots, std::uint64_t 
   if (!pool) {
     error = "Frame pool allocation failed.";
     return {};
+  }
+  if (storage) {
+    pool->storage_ = std::move(storage);
+    pool->reserved_.resize(slots);
+    for (std::uint32_t index = 0; index < slots; ++index) pool->free_.push_back(index);
+    return pool;
   }
   for (std::uint32_t index = 0; index < slots; ++index) {
     auto* memory = allocate_slot(slot_bytes);
@@ -148,9 +156,18 @@ detail::ReserveStatus FramePool::reserve(detail::DirectReservation& reservation)
   if (stopped_) return detail::ReserveStatus::Stopped;
   if (free_.empty()) return detail::ReserveStatus::Busy;
   const auto slot = free_.back();
+  std::uint8_t* memory = nullptr;
+  if (storage_) {
+    // No storage from the consumer is the same as no free slot.
+    reserved_[slot] = storage_(static_cast<std::size_t>(slot_bytes_));
+    if (!reserved_[slot]) return detail::ReserveStatus::Busy;
+    memory = reserved_[slot].get();
+  } else {
+    memory = memory_[slot];
+  }
   free_.pop_back();
   states_[slot] = SlotState::Reserved;
-  reservation.destination = {memory_[slot], static_cast<std::size_t>(slot_bytes_)};
+  reservation.destination = {memory, static_cast<std::size_t>(slot_bytes_)};
   reservation.ticket = slot;
   reservation.owner = shared_from_this();
   return detail::ReserveStatus::Reserved;
@@ -160,15 +177,19 @@ void FramePool::publish(const detail::DirectReservation& reservation, const Fram
                         std::size_t used_bytes) {
   const auto slot = static_cast<std::uint32_t>(reservation.ticket);
   SharedFrameFn callback;
+  std::shared_ptr<std::uint8_t> storage;
+  std::uint8_t* memory = nullptr;
   {
     std::lock_guard lock(mutex_);
     if (slot >= slot_count_ || states_[slot] != SlotState::Reserved) return;
+    if (storage_) storage = std::move(reserved_[slot]);
     if (used_bytes > slot_bytes_) {
       // The writer never exceeds its destination; refuse instead of exposing a bad span.
       states_[slot] = SlotState::Free;
       free_.push_back(slot);
       return;
     }
+    memory = storage_ ? storage.get() : memory_[slot];
     states_[slot] = SlotState::Held;
     max_held_ = std::max(max_held_, ++held_);
     callback = on_frame_;
@@ -176,15 +197,17 @@ void FramePool::publish(const detail::DirectReservation& reservation, const Fram
   published_.fetch_add(1, std::memory_order_relaxed);
   // The lease owns the slot from here; dropping it without a callback frees the slot.
   auto lease = std::shared_ptr<const FrameLease>(new FrameLease(
-      shared_from_this(), slot, {memory_[slot], used_bytes}, metadata));
+      shared_from_this(), slot, {memory, used_bytes}, metadata, std::move(storage)));
   if (callback) callback(SharedFrame{std::move(lease)});
 }
 
 void FramePool::cancel(const detail::DirectReservation& reservation,
                        detail::CancelCause) noexcept {
   const auto slot = static_cast<std::uint32_t>(reservation.ticket);
+  std::shared_ptr<std::uint8_t> storage;
   std::lock_guard lock(mutex_);
   if (slot >= slot_count_ || states_[slot] != SlotState::Reserved) return;
+  if (storage_) storage = std::move(reserved_[slot]);
   states_[slot] = SlotState::Free;
   free_.push_back(slot);
 }

@@ -376,7 +376,7 @@ std::uint64_t Lease::payload_size() {
 }
 
 bool Lease::create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes,
-                              std::string& error) {
+                              std::string& error, FramePool::FrameStorage storage) {
   std::lock_guard lock(producer_->mutex);
   if (closed_.load()) {
     error = "Device lease is closed.";
@@ -386,7 +386,7 @@ bool Lease::create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes
     error = "A frame pool is already attached.";
     return false;
   }
-  auto pool = FramePool::create(slot_count, slot_bytes, error);
+  auto pool = FramePool::create(slot_count, slot_bytes, error, std::move(storage));
   if (!pool) return false;
   pool->set_error_callback([callbacks = callbacks_](std::string_view message) {
     ErrorFn callback;

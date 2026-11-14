@@ -117,6 +117,7 @@ OneGenSourceController* OneGenSourceController::cameraController(const std::stri
         [this, id](bool active, const QString&) { emit diagnosticAcquisitionChanged(active, QString::fromStdString(id)); },
         Qt::DirectConnection);
     child->forwarded_by_parent_ = true;
+    child->setFrameStorageProvider(frame_storage_);
     child->setFrameConsumer([this, index, childPtr = child.get()](SessionFrame&& frame, unsigned int) {
       FrameConsumer consumer;
       { std::lock_guard lock(mutex_); consumer = consumer_; }
@@ -257,6 +258,17 @@ void OneGenSourceController::bindLease()
   });
 }
 
+void OneGenSourceController::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
+{
+  std::vector<OneGenSourceController*> children;
+  {
+    std::lock_guard lock(mutex_);
+    frame_storage_ = provider;
+    for (const auto& child : children_) children.push_back(child.second.controller.get());
+  }
+  for (auto* child : children) child->setFrameStorageProvider(provider);
+}
+
 void OneGenSourceController::configureFramePool(
     onegen::producer::Lease& lease, const std::string& sourceName)
 {
@@ -288,7 +300,16 @@ void OneGenSourceController::configureFramePool(
       onegen::direct_pool::minimum_slots, onegen::direct_pool::preferred_slots,
       onegen::direct_pool::budget_bytes);
   if (!plan.refusal.empty()) throw std::runtime_error(plan.refusal);
-  if (!lease.create_frame_pool(plan.slot_count, plan.slot_bytes, error)) throw std::runtime_error(error);
+  onegen::producer::FramePool::FrameStorage storage;
+  {
+    std::lock_guard lock(mutex_);
+    if (frame_storage_) {
+      storage = [provider = frame_storage_](const std::size_t bytes) { return provider->acquire(bytes); };
+    }
+  }
+  if (!lease.create_frame_pool(plan.slot_count, plan.slot_bytes, error, std::move(storage))) {
+    throw std::runtime_error(error);
+  }
   lease.set_shared_frame_callback(
       [this, sourceName, token](const onegen::producer::SharedFrame& source) {
         GraphicsFrameCallbackGate::Lease callback(token);

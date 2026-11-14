@@ -87,7 +87,9 @@ public:
   /** @brief Bytes one frame slot must hold for the current stream configuration. */
   std::uint64_t payload_size();
   /** @brief Attaches a slot pool that the next live() uses. */
-  bool create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes, std::string& error);
+  /** @brief Attaches a frame pool; with `storage` its frames are written into consumer storage. */
+  bool create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes, std::string& error,
+                         FramePool::FrameStorage storage = {});
   /** @brief Detaches the pool; published leases stay valid until released. */
   void destroy_frame_pool();
   /** @brief The attached pool, if any; diagnostics read its counters without the producer lock. */

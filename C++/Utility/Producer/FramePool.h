@@ -37,8 +37,11 @@ public:
 private:
   friend class FramePool;
   FrameLease(std::shared_ptr<FramePool> pool, std::uint32_t slot,
-             std::span<const std::uint8_t> bytes, Frame metadata) noexcept;
+             std::span<const std::uint8_t> bytes, Frame metadata,
+             std::shared_ptr<std::uint8_t> storage) noexcept;
   std::shared_ptr<FramePool> pool_;
+  // Consumer-provided bytes behind bytes(); empty when the pool owns the slot memory.
+  std::shared_ptr<std::uint8_t> storage_;
   std::uint32_t slot_ = 0;
   std::span<const std::uint8_t> bytes_;
   Frame metadata_;
@@ -91,9 +94,22 @@ public:
   using SharedFrameFn = std::function<void(const SharedFrame&)>;
   using ErrorFn = std::function<void(std::string_view)>;
 
-  /** @brief Allocates and commits every slot up front; returns null with error on failure. */
+  /**
+   * @brief Storage for one frame: returns at least `bytes` writable bytes, or empty.
+   *
+   * Must not wait and is called on the acquisition thread. An empty result counts as a full
+   * pool: the GenTL buffer is requeued and the frame is dropped.
+   */
+  using FrameStorage = std::function<std::shared_ptr<std::uint8_t>(std::size_t bytes)>;
+
+  /**
+   * @brief Allocates and commits every slot up front; returns null with error on failure.
+   *
+   * With `storage` the pool allocates nothing: each reservation takes its bytes from the
+   * consumer, and the slot count only bounds how many frames are held at once.
+   */
   static std::shared_ptr<FramePool> create(std::uint32_t slots, std::uint64_t slot_bytes,
-                                           std::string& error);
+                                           std::string& error, FrameStorage storage = {});
   ~FramePool() override;
   FramePool(const FramePool&) = delete;
   FramePool& operator=(const FramePool&) = delete;
@@ -135,6 +151,9 @@ private:
   const std::uint32_t slot_count_;
   const std::uint64_t slot_bytes_;
   std::vector<std::uint8_t*> memory_;
+  FrameStorage storage_;
+  // Bytes of a reserved slot while the pool takes its storage from the consumer.
+  std::vector<std::shared_ptr<std::uint8_t>> reserved_;
   mutable std::mutex mutex_;
   std::vector<SlotState> states_;
   std::vector<std::uint32_t> free_;

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add consumer-provided frame storage to the direct frame pool (`FramePool::create(..., storage)`, `Lease::create_frame_pool(..., storage)`): the pool then allocates no slots and each frame is written into the consumer's bytes. The Playground source controller forwards host-provided storage (`IFrameStorageClient`) to its frame pools; the owned fallback path keeps storage of its own. Needs a Playground release that ships `FrameStorage.h`.
+
 ## v0.4.0 (2026-11-13)
 
 - Require Playground 0.6.6 or later; this package uses the device plugin interface introduced in that release.

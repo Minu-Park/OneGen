@@ -99,6 +99,56 @@ int main() {
   assert(!refused.refusal.empty() && refused.slot_count == 0);
   assert(!plan_frame_pool(0, 10, 12, budget).refusal.empty());
 
+  // Consumer-provided storage: the pool allocates nothing, each reservation writes into the
+  // bytes the consumer handed out, and a lease keeps exactly those bytes alive.
+  {
+    int outstanding = 0;
+    bool refuse = false;
+    std::vector<std::uint8_t*> handed;
+    auto storage = [&](std::size_t bytes) -> std::shared_ptr<std::uint8_t> {
+      if (refuse) return {};
+      ++outstanding;
+      auto* memory = new std::uint8_t[bytes];
+      handed.push_back(memory);
+      return std::shared_ptr<std::uint8_t>(memory, [&outstanding](std::uint8_t* released) {
+        --outstanding;
+        delete[] released;
+      });
+    };
+    std::string storage_error;
+    auto external = FramePool::create(2, 64, storage_error, storage);
+    assert(external && storage_error.empty());
+    assert(outstanding == 0);
+    std::vector<std::shared_ptr<const onegen::producer::FrameLease>> leases;
+    external->set_frame_callback([&](const SharedFrame& frame) { leases.push_back(frame.lease); });
+
+    auto first = reserve(*external);
+    assert(outstanding == 1 && first.destination.data() == handed.back());
+    std::memset(first.destination.data(), 0x5a, 16);
+    external->publish(first, metadata, 16);
+    assert(leases.size() == 1 && leases[0]->bytes().data() == handed.back());
+    assert(leases[0]->bytes()[0] == 0x5a && outstanding == 1);
+
+    // A cancelled reservation gives its bytes back at once.
+    auto cancelled = reserve(*external);
+    assert(outstanding == 2);
+    external->cancel(cancelled, d::CancelCause::Timeout);
+    assert(outstanding == 1);
+
+    // No storage from the consumer reads as a full pool and takes no slot.
+    refuse = true;
+    d::DirectReservation none;
+    assert(external->reserve(none) == d::ReserveStatus::Busy);
+    refuse = false;
+    external->cancel(reserve(*external), d::CancelCause::Timeout);
+
+    // The lease, not the pool, keeps the bytes alive.
+    external.reset();
+    assert(outstanding == 1 && leases[0]->bytes()[0] == 0x5a);
+    leases.clear();
+    assert(outstanding == 0);
+  }
+
   std::cout << "Frame pool accounting and slot plan passed.\n";
   return 0;
 }
