@@ -3,6 +3,7 @@
 /** @file OneGenGraphicsFrameAdapter.h @brief Converts owned OneGen frames to GraphicsFrame. */
 
 #include "engine/GraphicsFrame.h"
+#include "engine/GraphicsImageWriter.h"
 #include "OneGenTypes.h"
 
 #include <cstdint>
@@ -16,4 +17,5 @@
     const onegen::Frame& source, std::uint64_t sequence,
     std::string* rejection_reason = nullptr,
     std::span<const std::uint8_t> image_payload = {},
-    std::shared_ptr<const void> payload_owner = {});
+    std::shared_ptr<const void> payload_owner = {},
+    GraphicsImageStorage image_storage = {});

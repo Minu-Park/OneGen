@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add consumer-provided frame storage to the direct frame pool (`FramePool::create(..., storage)`, `Lease::create_frame_pool(..., storage)`): the pool then allocates no slots and each frame is written into the consumer's bytes. The Playground source controller forwards host-provided storage (`IFrameStorageClient`) to its frame pools; the owned fallback path keeps storage of its own. Needs a Playground release that ships `FrameStorage.h`.
+- Add consumer-provided frame storage to the direct frame pool (`FramePool::create(..., storage)`, `Lease::create_frame_pool(..., storage)`) and convert non-borrowed 2D images through the GraphicsEngine image writer: byte-order swaps and owned copies of uncompressed formats write once into the consumer's bytes, and the pool allocates no slots. The Playground source controller forwards host-provided storage (`IFrameStorageClient`) to its frame pools and image conversion. Needs a Playground release that ships `FrameStorage.h` and the image writer.
 
 ## v0.4.0 (2026-11-13)
 

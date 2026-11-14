@@ -303,9 +303,7 @@ void OneGenSourceController::configureFramePool(
   onegen::producer::FramePool::FrameStorage storage;
   {
     std::lock_guard lock(mutex_);
-    if (frame_storage_) {
-      storage = [provider = frame_storage_](const std::size_t bytes) { return provider->acquire(bytes); };
-    }
+    if (frame_storage_) storage = frameStorageFunction(frame_storage_);
   }
   if (!lease.create_frame_pool(plan.slot_count, plan.slot_bytes, error, std::move(storage))) {
     throw std::runtime_error(error);
@@ -543,8 +541,14 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     const bool frameTrace = onegen::frame_trace_enabled();
     const auto conversionStarted = frameTrace ? std::chrono::steady_clock::now()
                                               : std::chrono::steady_clock::time_point{};
+    GraphicsImageStorage imageStorage;
+    {
+      std::lock_guard lock(mutex_);
+      imageStorage = frameStorageFunction(frame_storage_);
+    }
     std::string rejectionReason;
-    auto payload = oneGenGraphicsFrame(source, sequence, &rejectionReason);
+    auto payload = oneGenGraphicsFrame(source, sequence, &rejectionReason, {}, {},
+        std::move(imageStorage));
     const auto converted = frameTrace ? std::chrono::steady_clock::now()
                                       : std::chrono::steady_clock::time_point{};
     if (!payload) {
@@ -632,9 +636,14 @@ void OneGenSourceController::deliverShared(
           .arg(static_cast<qulonglong>(source.frame_id))
           .arg(static_cast<qulonglong>(bytes.size()));
     }
+    GraphicsImageStorage imageStorage;
+    {
+      std::lock_guard lock(mutex_);
+      imageStorage = frameStorageFunction(frame_storage_);
+    }
     std::string rejectionReason;
     auto payload = oneGenGraphicsFrame(
-        source, sequence, &rejectionReason, bytes, shared.lease);
+        source, sequence, &rejectionReason, bytes, shared.lease, std::move(imageStorage));
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
       qWarning().noquote() << QStringLiteral(
