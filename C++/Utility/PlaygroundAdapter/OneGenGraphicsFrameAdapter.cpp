@@ -190,8 +190,8 @@ double readCoordinate(const onegen::Frame::Part& part, const onegen::CoordinateF
 }
 
 template <typename T>
-bool copyScalarPart(const onegen::Frame::Part& part, std::vector<float>& values,
-                    std::vector<std::uint16_t>* raw = nullptr, std::uint64_t endianness = 0)
+bool copyScalarPart(const onegen::Frame::Part& part, GraphicsSampleBuffer<float>& values,
+                    GraphicsSampleBuffer<std::uint16_t>* raw = nullptr, std::uint64_t endianness = 0)
 {
   if (!part.width || !part.height
       || part.width > (std::numeric_limits<std::size_t>::max)() / part.height
