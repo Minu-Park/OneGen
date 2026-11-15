@@ -52,24 +52,6 @@ struct SharedFrame {
   std::shared_ptr<const FrameLease> lease;
 };
 
-/** @brief Slot count and per-slot bytes chosen for one payload size. */
-struct FramePoolPlan {
-  std::uint32_t slot_count = 0;
-  std::uint64_t slot_bytes = 0;
-  /** Empty when the plan is usable; otherwise why the payload cannot be leased. */
-  std::string refusal;
-};
-
-/**
- * @brief Plans a pool that covers the host's worst-case concurrent leases.
- * @param payload_bytes Current producer payload size.
- * @param minimum_slots Fewest slots that still exceed the host lease bound.
- * @param preferred_slots Slots used when the byte budget allows.
- * @param budget_bytes Upper bound for all slots of one source.
- */
-FramePoolPlan plan_frame_pool(std::uint64_t payload_bytes, std::uint32_t minimum_slots,
-                              std::uint32_t preferred_slots, std::uint64_t budget_bytes) noexcept;
-
 /** @brief Counters for diagnostics; all values are cumulative for the pool. */
 struct FramePoolCounters {
   std::uint64_t published = 0;
@@ -81,7 +63,10 @@ struct FramePoolCounters {
 };
 
 /**
- * @brief Fixed slot pool that implements the pinned direct sink inside the consumer process.
+ * @brief In-flight lease bound behind the pinned direct sink.
+ *
+ * The pool owns no frame memory: every reservation takes its bytes from the consumer provider
+ * and an empty result is a full pool.
  *
  * reserve/publish/cancel run on the acquisition thread. A published slot is handed to the
  * frame callback as a FrameLease and returns to the free list when the last reference drops,
@@ -97,19 +82,19 @@ public:
   /**
    * @brief Storage for one frame: returns at least `bytes` writable bytes, or empty.
    *
-   * Must not wait and is called on the acquisition thread. An empty result counts as a full
-   * pool: the GenTL buffer is requeued and the frame is dropped.
+   * Called on the acquisition thread. A provider may wait for its Host pool on the first
+   * acquire of a size; an empty result counts as a full pool: the GenTL buffer is requeued and
+   * the frame is dropped.
    */
   using FrameStorage = std::function<std::shared_ptr<std::uint8_t>(std::size_t bytes)>;
 
   /**
-   * @brief Allocates and commits every slot up front; returns null with error on failure.
-   *
-   * With `storage` the pool allocates nothing: each reservation takes its bytes from the
-   * consumer, and the slot count only bounds how many frames are held at once.
+   * @brief Creates a bounded lease set over consumer storage; returns null with error when the
+   *        request is empty. The pool allocates no frame memory itself: the slot count only
+   *        bounds how many frames are held at once.
    */
   static std::shared_ptr<FramePool> create(std::uint32_t slots, std::uint64_t slot_bytes,
-                                           std::string& error, FrameStorage storage = {});
+                                           std::string& error, FrameStorage storage);
   ~FramePool() override;
   FramePool(const FramePool&) = delete;
   FramePool& operator=(const FramePool&) = delete;
@@ -150,7 +135,6 @@ private:
 
   const std::uint32_t slot_count_;
   const std::uint64_t slot_bytes_;
-  std::vector<std::uint8_t*> memory_;
   FrameStorage storage_;
   // Bytes of a reserved slot while the pool takes its storage from the consumer.
   std::vector<std::shared_ptr<std::uint8_t>> reserved_;

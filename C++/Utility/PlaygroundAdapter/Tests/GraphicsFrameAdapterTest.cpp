@@ -1,5 +1,4 @@
 #include "OneGenGraphicsFrameAdapter.h"
-#include "DirectPoolPolicy.h"
 #include <array>
 #include <algorithm>
 #include <bit>
@@ -35,15 +34,6 @@ struct RecordingStorage
 
 int main()
 {
-  using onegen::direct_pool::Action;
-  assert(onegen::direct_pool::decide(true, 128, 256).action == Action::Create);
-  assert(onegen::direct_pool::decide(true, 256, 256).action == Action::Reuse);
-  assert(onegen::direct_pool::decide(true, std::nullopt, 256).action == Action::Create);
-  assert(onegen::direct_pool::decide(true, 128, std::nullopt).action == Action::Disabled);
-  // A replaced lease has no attached pool even if the old slot optional was not cleared.
-  assert(onegen::direct_pool::decide(false, 128, 256).action == Action::Create);
-  assert(onegen::direct_pool::decide(false, 256, 256).action == Action::Create);
-
   onegen::Frame source;
   source.width = 2;
   source.height = 2;

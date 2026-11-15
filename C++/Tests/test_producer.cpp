@@ -109,11 +109,16 @@ int main(int argc, char** argv) {
   assert(lease->write_node_checked(3, "Width", "int", "1", observed, false).status
          == NodeWriteStatus::Unavailable);
 
-  // Pooled Live: the consumer holds up to four leases; the producer never waits for it.
+  // Pooled Live over consumer storage: the consumer holds up to four leases; the producer
+  // never waits for it and allocates no frame memory itself.
   std::string error;
   const auto payload = lease->payload_size();
-  assert(lease->create_frame_pool(6, payload, error) && error.empty());
-  assert(!lease->create_frame_pool(6, payload, error));
+  auto storage = [](std::size_t bytes) -> std::shared_ptr<std::uint8_t> {
+    return std::shared_ptr<std::uint8_t>(new std::uint8_t[bytes],
+        std::default_delete<std::uint8_t[]>());
+  };
+  assert(lease->create_frame_pool(6, payload, error, storage) && error.empty());
+  assert(!lease->create_frame_pool(6, payload, error, storage));
   std::mutex held_mutex;
   std::deque<std::shared_ptr<const onegen::producer::FrameLease>> held;
   std::atomic<std::uint64_t> shared_frames{0}, owned_frames{0}, last_id{0};

@@ -161,13 +161,16 @@ use requires retiring the first runtime completely; actual vendor handoff remain
 a hardware acceptance gate. Euresys,
 Heliotis, Blaze, GEV, U3V and StereoMini producers had no conflicts.
 
-## Live pool limits
+## Live storage limits
 
-Live requires a readable nonzero payload and at least 10 slots within the 2 GiB
-per-source budget, with 12 slots preferred. The maximum payload is 214,748,364
-bytes. An unavailable payload, an over-budget plan or an allocation failure
-refuses Live with an explicit error before acquisition starts. Exhausting an
-allocated pool drops and counts frames; it does not wait on the acquisition thread.
+Live frames are written only into the consumer's provided frame storage. The
+consumer sizes, allocates, pre-faults and bounds that pool; OneGen keeps no frame
+slot memory and no slot plan, and it does not report a producer pool size. The
+first acquire of a size may wait for the consumer's pool to be granted. When the
+consumer returns an empty lease, the frame is dropped and counted rather than
+copied into plugin memory. A readable nonzero stream payload is required for the
+direct pinned path; without one, every image takes the owned path and is still
+written into provided storage.
 
 ## Crash policy
 
@@ -252,46 +255,42 @@ The plugin owns one coordinator.
 
 ## Acquisition
 
-### Frame pool
+### Frame storage
 
-Live frames use one copy from the pinned GenTL buffer into a slot of a
-plugin-owned frame pool:
+Live frames are stored only in the consumer's provided frame storage, through
+`IFrameStorageClient`:
 
-- **Slot plan:** before each Live start the controller reads the stream payload
-  size (the producer-defined size, else `PayloadSize`) and plans 12 slots, the
-  host's worst-case concurrent leases (9 with Script on and the default six
-  presentation leases) plus headroom. When 12 slots exceed the 2 GiB per-source
-  budget, the plan uses fewer slots down to 10, the minimum that still exceeds
-  the host bound. A payload that cannot fit 10 slots is refused at Live start
-  with an explicit error. The pool is reused while the payload size is
-  unchanged. For `13376x9528` BayerRG8 the pool is
-  `12 * 127,446,528 = 1,529,358,336` bytes.
-- **Memory:** every slot is allocated and committed when the pool is created,
-  so allocation failure surfaces before acquisition starts.
-- **Publication:** the acquisition thread reserves a free slot, copies the image
-  while the GenTL buffer is pinned, requeues the buffer exactly once, and hands
-  a `FrameLease` to the controller. The lease is an immutable alias for the
-  `GraphicsFrame` image storage; the last reference returns the slot to the
-  pool from any thread. Leases keep the pool memory alive after the pool is
-  detached.
-- **Backpressure:** the slot pool is the bound. When no slot is free, the
-  acquisition loop dequeues and requeues one frame without a copy and counts it
-  as exhausted; it never waits for the consumer. Exhausted frames are added to
-  the source's `failed` count in `source.diagnostics`, logged on the first and
-  every hundredth drop, and included as `dropped` in the stop summary. The
-  controller reports the slot count through `producerCapabilities()` so the
-  host's producer-pool check can warn when the pool does not exceed its bound.
+- **Host pool:** the consumer owns the slots, their size, count and lifetime. The
+  controller reads the stream payload size (the producer-defined size, else
+  `PayloadSize`) only to tell the consumer how many bytes one frame needs. It
+  keeps no plugin slot memory, no slot count plan and no per-source byte budget,
+  and it reports no `producerCapabilities`/`poolSize`.
+- **Publication:** the acquisition thread reserves an in-flight lease from the
+  consumer provider, copies the image while the GenTL buffer is pinned, requeues
+  the buffer exactly once, and hands a `FrameLease` to the controller. The lease
+  is an immutable alias for the `GraphicsFrame` image storage; the last
+  reference returns the consumer slot from any thread. Leases keep the provided
+  storage alive after the lease is detached.
+- **First acquire:** the first acquire of a size may wait while the consumer
+  allocates, pre-faults and grants its whole pool, as it does in-process and in a
+  device worker. OneGen keeps no staging copy for that frame.
+- **Backpressure:** the consumer pool is the bound. When the provider returns an
+  empty lease, the acquisition loop dequeues and requeues one frame without a
+  copy and counts it as exhausted; it never waits for a consumer lease and never
+  falls back to plugin memory. Exhausted frames are added to the source's
+  `failed` count in `source.diagnostics`, logged on the first and every
+  hundredth drop, and included as `dropped` in the stop summary.
 - **Fallback:** JPEG, planar, multipart, chunk-bearing, non-image and
   unsupported layouts take the same-pin owned path and are delivered as owned
-  frames. Direct eligibility comes from one shared PFNC layout table, not a
-  format-name whitelist.
-- **Capacity:** an eligible image that does not fit its slot is not delivered;
-  its buffer is requeued and the failure is reported on the first and every
-  hundredth occurrence. Restart acquisition after a payload change so the pool
-  is planned again.
+  frames whose image storage is still the provided provider. Direct eligibility
+  comes from one shared PFNC layout table, not a format-name whitelist.
+- **Capacity:** an eligible image that does not fit its consumer slot is not
+  delivered; its buffer is requeued and the failure is reported on the first and
+  every hundredth occurrence. Restart acquisition after a payload change so the
+  consumer can size its storage again.
 
-`GrabOne` always uses the owned path. Without an attached pool, Live also uses
-the owned path.
+`GrabOne` always uses the owned path. Without a consumer storage provider, Live
+also uses the owned path and writes no frame into plugin-owned storage.
 
 ### Streams and buffers
 
@@ -326,9 +325,9 @@ takes effect without restarting it.
 - Debug only: the `fps` and `failed` statusbar bubbles, the five-second
   `[GenICam] diagnostics:` line, the per-run first-frame detail
   (`first frame received/chunk count/part/converted`, effective Scan3d), the
-  frame pool plan and the component node inventory taken when a lease is
-  bound. Counters and FPS sampling keep running while Debug is off, so values
-  are current when it is enabled.
+  Host frame-storage attachment and the component node inventory taken when a
+  lease is bound. Counters and FPS sampling keep running while Debug is off, so
+  values are current when it is enabled.
 - Always retained: the per-run `[GenICam] live diagnostics:` stop summary
   (received, delivered, failed, incomplete, dropped) and every warning or error,
   including incomplete-frame, rejected-frame and slot-exhaustion records.

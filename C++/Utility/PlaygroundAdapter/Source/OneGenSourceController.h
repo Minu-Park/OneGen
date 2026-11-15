@@ -34,7 +34,7 @@ class OneGenSourceController final : public AbstractSourceController, public IDe
   Q_OBJECT
   Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient)
 public:
-  /** @brief Applies to this controller and its camera controllers from their next frame pool. */
+  /** @brief Applies to this controller and its camera controllers from their next Live start. */
   void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
   using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
   explicit OneGenSourceController(QObject* parent = nullptr);
@@ -67,8 +67,6 @@ public:
   [[nodiscard]] SourceRuntimeDiagnostics runtimeDiagnostics(unsigned sourceIndex) const;
   /** @brief Copies the same per-camera counters sampled by the panel. */
   std::optional<SourceRuntimeDiagnostics> sourceRuntimeDiagnostics(unsigned sourceIndex) const override;
-  /** @brief Reports the attached frame pool's slot count so the host can check its lease bound. */
-  SourceProducerCapabilities producerCapabilities(unsigned sourceIndex) const override;
   /** @brief Configures existing module discovery and copied device inventory. */
   void configureControl(std::shared_ptr<onegen::producer::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices);
   /** @brief Replaces copied discovery results on the consumer thread. */
@@ -136,20 +134,19 @@ private:
   void bindLease();
   /** @brief Frames dropped for lack of a free slot since the last start. */
   std::uint64_t droppedFrames() const;
-  /** @brief Sizes and attaches the frame pool while the caller holds direct_pool_mutex_. */
-  void configureFramePool(onegen::producer::Lease& lease, const std::string& sourceName);
+  /** @brief Attaches the Host-storage lease bound while the caller holds direct_pool_mutex_. */
+  void configureFrameStorage(onegen::producer::Lease& lease, const std::string& sourceName);
   mutable std::mutex mutex_;
   std::shared_ptr<IFrameStorageProvider> frame_storage_;
-  /** @brief Serializes frame pool ownership with lease replacement without holding callbacks under mutex_. */
+  /** @brief Serializes frame-storage attachment with lease replacement without callbacks under mutex_. */
   std::mutex direct_pool_mutex_;
   struct Child { unsigned int index; std::string label; std::unique_ptr<OneGenSourceController> controller; };
   std::map<std::string, Child> children_;
   unsigned int next_source_index_ = 0;
   onegen::producer::Lease* lease_ = nullptr;
   std::unique_ptr<GraphicsFrameCallbackGate> callback_gate_;
-  /** Attached pool, read lock-free by diagnostics; the lease owns its lifetime. */
+  /** Attached lease bound, read lock-free by diagnostics; the lease owns its lifetime. */
   std::shared_ptr<const onegen::producer::FramePool> frame_pool_;
-  std::atomic<std::uint32_t> pool_slots_{0};
   /** Pool exhaustion count at the last start, so failed counts one run. */
   std::atomic<std::uint64_t> exhausted_baseline_{0};
   FrameConsumer consumer_;
