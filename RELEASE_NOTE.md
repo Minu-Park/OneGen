@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Store Live frames only in the consumer's provided frame storage. The plugin-owned frame pool, its 10/12-slot and 2 GiB planning, and the `producerCapabilities().poolSize` report are removed. An empty provided lease drops and counts the frame instead of copying it into plugin memory, and the direct pinned path waits for the consumer's first pool grant instead of relying on a plugin fallback slot.
+
 - Deliver GenTL 3D range parts through the GraphicsEngine range writer into Playground shared frame storage. Range, point-cloud and scalar channels are written once into provided storage, including big-endian sources; an empty result drops the range. The explicit point cloud is unchanged.
 
 ## v0.5.0 (2026-11-14)

@@ -3,7 +3,6 @@
 
 #include "ProducerCoordinator.h"
 #include "OneGenGraphicsFrameAdapter.h"
-#include "../DirectPoolPolicy.h"
 #include "SessionFrame.h"
 #include "Internal/FrameTrace.h"
 
@@ -24,6 +23,10 @@
 namespace {
 // Host Debug enables diagnostics.* debug output; per-run detail dumps stay behind it.
 Q_LOGGING_CATEGORY(onegenSourceDiagnosticLog, "diagnostics.OneGen", QtInfoMsg)
+
+// Upper bound on frames in flight per source. The Host pool is the real slot bound; this only
+// sizes the lease bookkeeping and never allocates frame memory.
+constexpr std::uint32_t kMaximumInFlightFrames = 64;
 
 std::optional<std::uint64_t> directSlotBytes(onegen::producer::Lease& lease, std::string& error)
 {
@@ -186,7 +189,6 @@ void OneGenSourceController::setLease(onegen::producer::Lease* lease)
     lease_->destroy_frame_pool();
   }
   frame_pool_.reset();
-  pool_slots_.store(0, std::memory_order_relaxed);
   lock.unlock();
   // Frame callbacks never acquire direct_pool_mutex_; holding it across the gate
   // drain prevents start from attaching a pool to the lease being replaced.
@@ -269,43 +271,55 @@ void OneGenSourceController::setFrameStorageProvider(std::shared_ptr<IFrameStora
   for (auto* child : children) child->setFrameStorageProvider(provider);
 }
 
-void OneGenSourceController::configureFramePool(
+void OneGenSourceController::configureFrameStorage(
     onegen::producer::Lease& lease, const std::string& sourceName)
 {
-  bool attached = false;
-  std::optional<std::uint64_t> attachedSlotBytes;
+  std::shared_ptr<IFrameStorageProvider> provider;
   GraphicsFrameCallbackGate::Token token;
   {
     std::lock_guard lock(mutex_);
-    attached = static_cast<bool>(frame_pool_);
-    if (frame_pool_) attachedSlotBytes = frame_pool_->slot_bytes();
+    provider = frame_storage_;
     if (callback_gate_) token = callback_gate_->token();
   }
   if (!token) throw std::runtime_error("Frame delivery is not bound to a consumer.");
 
+  // Without a consumer provider there is no frame storage to write into. The owned path still
+  // delivers every frame, but direct frames have no destination and must not allocate one.
+  if (!provider) {
+    lease.destroy_frame_pool();
+    std::lock_guard lock(mutex_);
+    frame_pool_.reset();
+    return;
+  }
   std::string error;
   const auto payload = directSlotBytes(lease, error);
-  const auto decision = onegen::direct_pool::decide(attached, attachedSlotBytes, payload);
-  if (decision.action == onegen::direct_pool::Action::Reuse) return;
-  if (decision.action == onegen::direct_pool::Action::Disabled)
-    throw std::runtime_error(error.empty() ? decision.reason : error);
+  if (!payload || *payload == 0) {
+    // The direct path cannot copy into the Host pool without a known slot size; the owned path
+    // still writes every image through the same provider.
+    lease.destroy_frame_pool();
+    std::lock_guard lock(mutex_);
+    frame_pool_.reset();
+    qWarning().noquote() << QStringLiteral(
+        "[GenICam] direct frame path unavailable: camera=%1 reason=%2")
+        .arg(QString::fromStdString(sourceName), QString::fromStdString(error));
+    return;
+  }
+  std::shared_ptr<const onegen::producer::FramePool> attached;
+  {
+    std::lock_guard lock(mutex_);
+    attached = frame_pool_;
+  }
+  if (attached && attached->slot_bytes() == *payload) return;
 
   lease.destroy_frame_pool();
   {
     std::lock_guard lock(mutex_);
     frame_pool_.reset();
-    pool_slots_.store(0, std::memory_order_relaxed);
   }
-  const auto plan = onegen::producer::plan_frame_pool(decision.slot_bytes,
-      onegen::direct_pool::minimum_slots, onegen::direct_pool::preferred_slots,
-      onegen::direct_pool::budget_bytes);
-  if (!plan.refusal.empty()) throw std::runtime_error(plan.refusal);
-  onegen::producer::FramePool::FrameStorage storage;
-  {
-    std::lock_guard lock(mutex_);
-    if (frame_storage_) storage = frameStorageFunction(frame_storage_);
-  }
-  if (!lease.create_frame_pool(plan.slot_count, plan.slot_bytes, error, std::move(storage))) {
+  // The pool owns no memory: each reservation takes its slot from the Host provider. Its slot
+  // count only bounds how many frames may be in flight.
+  if (!lease.create_frame_pool(kMaximumInFlightFrames, *payload, error,
+          frameStorageFunction(provider))) {
     throw std::runtime_error(error);
   }
   lease.set_shared_frame_callback(
@@ -316,11 +330,10 @@ void OneGenSourceController::configureFramePool(
   {
     std::lock_guard lock(mutex_);
     frame_pool_ = lease.frame_pool();
-    pool_slots_.store(plan.slot_count, std::memory_order_relaxed);
   }
   qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral(
-      "[GenICam] frame pool attached: camera=%1 slots=%2 slotBytes=%3")
-      .arg(QString::fromStdString(sourceName)).arg(plan.slot_count).arg(plan.slot_bytes);
+      "[GenICam] Host frame storage attached: camera=%1 slots=%2 slotBytes=%3")
+      .arg(QString::fromStdString(sourceName)).arg(kMaximumInFlightFrames).arg(*payload);
 }
 
 void OneGenSourceController::start()
@@ -339,7 +352,7 @@ void OneGenSourceController::start()
     if (!lease) return;
     const auto& info = lease->info();
     const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
-    configureFramePool(*lease, sourceName);
+    configureFrameStorage(*lease, sourceName);
   }
   received_frames_.store(0, std::memory_order_relaxed);
   converted_frames_.store(0, std::memory_order_relaxed);
@@ -448,20 +461,6 @@ std::uint64_t OneGenSourceController::droppedFrames() const
   const auto exhausted = pool->exhausted();
   const auto baseline = exhausted_baseline_.load(std::memory_order_relaxed);
   return exhausted > baseline ? exhausted - baseline : 0;
-}
-
-SourceProducerCapabilities OneGenSourceController::producerCapabilities(unsigned sourceIndex) const
-{
-  {
-    std::lock_guard lock(mutex_);
-    if (!children_.empty()) {
-      for (const auto& [id, child] : children_)
-        if (child.index == sourceIndex) return child.controller->producerCapabilities(0U);
-      return {};
-    }
-  }
-  if (sourceIndex != 0U) return {};
-  return {pool_slots_.load(std::memory_order_relaxed)};
 }
 
 void OneGenSourceController::grabOne(const QString& diagnosticDirectory)

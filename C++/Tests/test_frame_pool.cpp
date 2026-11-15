@@ -1,5 +1,5 @@
-// Slot pool: exact reserve/publish/cancel/release accounting, leases outliving the pool owner,
-// exhaustion without waiting, and the slot plan for the host lease bound.
+// Lease bound: exact reserve/publish/cancel/release accounting, leases outliving the pool
+// owner, exhaustion without waiting, and consumer-provided storage with no pool allocation.
 #include "FramePool.h"
 
 #include <cassert>
@@ -24,11 +24,17 @@ d::DirectReservation reserve(FramePool& pool) {
 }  // namespace
 
 int main() {
+  const auto storage = [](std::size_t bytes) -> std::shared_ptr<std::uint8_t> {
+    return std::shared_ptr<std::uint8_t>(new std::uint8_t[bytes],
+        std::default_delete<std::uint8_t[]>());
+  };
   std::string error;
-  assert(!FramePool::create(0, 64, error) && !error.empty());
+  assert(!FramePool::create(0, 64, error, storage) && !error.empty());
+  error.clear();
+  assert(!FramePool::create(3, 64, error, {}) && !error.empty());
 
   error.clear();
-  auto pool = FramePool::create(3, 64, error);
+  auto pool = FramePool::create(3, 64, error, storage);
   assert(pool && error.empty());
   std::vector<std::shared_ptr<const onegen::producer::FrameLease>> held;
   pool->set_frame_callback([&](const SharedFrame& frame) { held.push_back(frame.lease); });
@@ -88,17 +94,6 @@ int main() {
   held.clear();
   assert(weak.expired());
 
-  // Slot plan: the preferred count when affordable, fewer down to the minimum, else refusal.
-  using onegen::producer::plan_frame_pool;
-  constexpr std::uint64_t budget = 2ULL << 30;
-  const auto megapixel127 = plan_frame_pool(127'446'528, 10, 12, budget);
-  assert(megapixel127.refusal.empty() && megapixel127.slot_count == 12);
-  const auto tight = plan_frame_pool(180'000'000, 10, 12, budget);
-  assert(tight.refusal.empty() && tight.slot_count == 11);
-  const auto refused = plan_frame_pool(250'000'000, 10, 12, budget);
-  assert(!refused.refusal.empty() && refused.slot_count == 0);
-  assert(!plan_frame_pool(0, 10, 12, budget).refusal.empty());
-
   // Consumer-provided storage: the pool allocates nothing, each reservation writes into the
   // bytes the consumer handed out, and a lease keeps exactly those bytes alive.
   {
@@ -149,6 +144,6 @@ int main() {
     assert(outstanding == 0);
   }
 
-  std::cout << "Frame pool accounting and slot plan passed.\n";
+  std::cout << "Frame lease accounting and consumer storage passed.\n";
   return 0;
 }
