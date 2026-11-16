@@ -420,20 +420,53 @@ private:
     if (!coordinator_) {
       coordinator_ = std::make_shared<onegen::producer::Coordinator>(
           std::filesystem::path{}, std::chrono::milliseconds{10000},
-          [this](const onegen::InterfaceInfo& info) { return claimInterface(info); });
+          [this](const onegen::InterfaceInfo& info) { return claimInterface(info); },
+          [this](const onegen::InterfaceInfo& info, const onegen::DeviceInfo& device) {
+            return claimCamera(info, device);
+          });
     }
     return coordinator_;
   }
 
+  /** @brief Claims one exclusive Interface; network and USB Interfaces are claimed per camera. */
   std::shared_ptr<void> claimInterface(const onegen::InterfaceInfo& info)
   {
-    const QString key = playgroundSisoBoardResourceKeyFromInterfaceId(QString::fromStdString(info.id));
-    if (key.isEmpty()) return {};
+    const auto scope = onegen::interfaceClaimScope(info.tl_type);
+    if (scope == onegen::InterfaceClaimScope::Camera) return {};
     auto* claims = claims_.load(std::memory_order_acquire);
-    if (!claims) throw std::runtime_error("The host did not provide hardware resource claims.");
+    QString key = playgroundSisoBoardResourceKeyFromInterfaceId(QString::fromStdString(info.id));
+    // A board without a Siso serial still needs one claim per Interface, including an unknown type.
+    if (key.isEmpty() && claims)
+      key = QStringLiteral("onegen-interface:") + QString::fromStdString(info.cti_path)
+          + QLatin1Char('|') + QString::fromStdString(info.id);
+    if (key.isEmpty()) return {};
+    if (!claims) throw onegen::DeviceClaimRefused("The host did not provide hardware resource claims.");
     QString error;
     auto claim = claims->claimResource(key, &error);
-    if (!claim) throw std::runtime_error(error.toStdString());
+    if (!claim) throw onegen::DeviceClaimRefused(error.toStdString());
+    return claim;
+  }
+
+  /** @brief Claims one camera on a network or USB Interface before its Device opens. */
+  std::shared_ptr<void> claimCamera(const onegen::InterfaceInfo& info,
+      const onegen::DeviceInfo& device)
+  {
+    if (onegen::interfaceClaimScope(info.tl_type) != onegen::InterfaceClaimScope::Camera)
+      return {};
+    const auto key = playgroundCameraResourceKey(QString::fromStdString(device.serial));
+    if (key.isEmpty()) {
+      // One camera claims its serial exactly once. Without a serial the device cannot be
+      // identified by the shared key rule, so it stays unclaimed and the reason is recorded.
+      qWarning().noquote() << QStringLiteral(
+          "[GenICam] camera=%1 interface=%2 is unclaimed: the producer reported no serial.")
+          .arg(QString::fromStdString(device.id), QString::fromStdString(info.id));
+      return {};
+    }
+    auto* claims = claims_.load(std::memory_order_acquire);
+    if (!claims) throw onegen::DeviceClaimRefused("The host did not provide hardware resource claims.");
+    QString error;
+    auto claim = claims->claimResource(key, &error);
+    if (!claim) throw onegen::DeviceClaimRefused(error.toStdString());
     return claim;
   }
 

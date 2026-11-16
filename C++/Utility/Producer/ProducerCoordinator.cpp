@@ -468,9 +468,9 @@ void Lease::load_features(int module, std::string_view contents) {
 // Coordinator
 
 Coordinator::Coordinator(std::filesystem::path cti_root, std::chrono::milliseconds probe_timeout,
-                         OneGen::InterfaceClaimFn claim)
+                         OneGen::InterfaceClaimFn claim, OneGen::DeviceClaimFn camera_claim)
     : cti_root_(std::move(cti_root)), probe_timeout_(probe_timeout), claim_(std::move(claim)),
-      registry_(std::make_shared<Registry>()) {}
+      camera_claim_(std::move(camera_claim)), registry_(std::make_shared<Registry>()) {}
 
 Coordinator::~Coordinator() { shutdown(); }
 
@@ -497,6 +497,7 @@ std::shared_ptr<Producer> Coordinator::producer(const std::string& cti, bool rel
     try {
       auto system = std::make_unique<OneGen>();
       if (claim_) system->set_interface_claim_callback(claim_);
+      if (camera_claim_) system->set_device_claim_callback(camera_claim_);
       system->loadCti(key);
       result->system = std::move(system);
     } catch (const std::exception& error) {
@@ -810,6 +811,11 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device) {
                           failure.what());
       }
       return lease;
+    } catch (const DeviceClaimRefused&) {
+      // A claim refusal happens before the Device opens and the caller may retry it.
+      std::lock_guard lock(registry_->mutex);
+      registry_->leased.erase(key);
+      throw;
     } catch (const std::exception& exception) {
       error = exception.what();
       std::lock_guard lock(registry_->mutex);

@@ -32,6 +32,9 @@ public:
   using InterfaceClaimFn = std::function<std::shared_ptr<void>(const InterfaceInfo&)>;
   /** Installs a consumer-owned resource claim before any interface is opened. */
   void set_interface_claim_callback(InterfaceClaimFn claim);
+  using DeviceClaimFn = std::function<std::shared_ptr<void>(const InterfaceInfo&, const DeviceInfo&)>;
+  /** Installs the per-camera claim used by network and USB Interfaces. */
+  void set_device_claim_callback(DeviceClaimFn claim);
   /** Lists producer interfaces without opening their hardware. */
   std::vector<InterfaceInfo> interfaces() const;
   /** Loads an interface node map without a device; the reference expires on interface release. */
