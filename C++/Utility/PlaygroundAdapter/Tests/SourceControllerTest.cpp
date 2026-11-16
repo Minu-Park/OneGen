@@ -8,7 +8,7 @@
  */
 #include "OneGenSourceController.h"
 #include "ProducerCoordinator.h"
-#include "HardwareResourceKey.h"
+#include "DeviceRuntime/Contract/HardwareResourceKey.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>

@@ -1,6 +1,7 @@
-#include "DevicePlugin/AbstractSourceController.h"
-#include "DevicePlugin/DeviceConnectionControl.h"
-#include "DevicePlugin/DevicePlugin.h"
+#include "DeviceRuntime/Contract/AbstractSourceController.h"
+#include "DeviceRuntime/Contract/DeviceConnectionControl.h"
+#include "DeviceRuntime/Contract/DeviceRuntime.h"
+#include "DevicePluginSession.h"
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QFile>
@@ -108,7 +109,7 @@ private slots:
       loader.setFileName(QString::fromUtf8(ONEGEN_TEST_PLUGIN));
       auto* object = loader.instance();
       QVERIFY2(object, qPrintable(loader.errorString()));
-      auto* plugin = qobject_cast<IDevicePlugin*>(object);
+      auto* plugin = qobject_cast<IDeviceRuntime*>(object);
       auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
       QVERIFY(plugin && producers);
       QString error;
@@ -139,7 +140,7 @@ private slots:
     QPluginLoader loader(QString::fromUtf8(ONEGEN_TEST_PLUGIN));
     auto* object = loader.instance();
     QVERIFY2(object, qPrintable(loader.errorString()));
-    auto* plugin = qobject_cast<IDevicePlugin*>(object);
+    auto* plugin = qobject_cast<IDeviceRuntime*>(object);
     auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
     auto* observer = qobject_cast<IDevicePluginGenTLDiscoveryStatus*>(object);
     QVERIFY(plugin && producers && observer);
@@ -190,7 +191,7 @@ private slots:
     QPluginLoader loader(QString::fromUtf8(ONEGEN_TEST_PLUGIN));
     auto* object = loader.instance();
     QVERIFY2(object, qPrintable(loader.errorString()));
-    auto* plugin = qobject_cast<IDevicePlugin*>(object);
+    auto* plugin = qobject_cast<IDeviceRuntime*>(object);
     auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
     auto* receiver = dynamic_cast<IDevicePluginResourceClaimsReceiver*>(object);
     QVERIFY(plugin && producers && receiver);
@@ -270,7 +271,7 @@ private slots:
     QPluginLoader loader(QString::fromUtf8(ONEGEN_TEST_PLUGIN));
     auto* object = loader.instance();
     QVERIFY2(object, qPrintable(loader.errorString()));
-    auto* plugin = qobject_cast<IDevicePlugin*>(object);
+    auto* plugin = qobject_cast<IDeviceRuntime*>(object);
     auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
     auto* observer = qobject_cast<IDevicePluginGenTLDiscoveryStatus*>(object);
     QVERIFY(plugin && producers && observer);
