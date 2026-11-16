@@ -273,11 +273,11 @@ if(ONEGEN_BUILD_QT_WIDGET)
   if(ONEGEN_BUILD_TESTS AND TARGET Qt6::Test AND ONEGEN_BUILD_PLAYGROUND_ADAPTER)
     enable_testing()
     qt_add_executable(OneGenFeatureTreeTests
-      "${PlaygroundPluginSDK_PREFIX}/include/Playground/DeviceRuntime/Contract/AbstractSourceController.h"
       Utility/Qt/OneGenFeatureTreeTests.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
       Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
+    playground_sdk_add_runtime_contract(OneGenFeatureTreeTests)
     set_target_properties(OneGenFeatureTreeTests PROPERTIES AUTOMOC ON)
     target_include_directories(OneGenFeatureTreeTests PRIVATE "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
     target_link_libraries(OneGenFeatureTreeTests PRIVATE OneGen::QtWidget OneGen::PlaygroundAdapter Qt6::Test)
@@ -330,11 +330,11 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
   endif()
   find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
   add_library(OneGenPlugin MODULE
-      "${PlaygroundPluginSDK_PREFIX}/include/Playground/DeviceRuntime/Contract/AbstractSourceController.h"
     Utility/PlaygroundAdapter/Plugin/OneGenPlugin.cpp
     Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
     Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
     Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
+  playground_sdk_add_runtime_contract(OneGenPlugin)
   set_target_properties(OneGenPlugin PROPERTIES
     PREFIX "" OUTPUT_NAME OneGenPlugin AUTOMOC ON
     PLAYGROUND_PLUGIN_PACKAGE
@@ -385,11 +385,11 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
     qt_add_executable(onegen_source_controller_test
-      "${PlaygroundPluginSDK_PREFIX}/include/Playground/DeviceRuntime/Contract/AbstractSourceController.h"
       Utility/PlaygroundAdapter/Tests/SourceControllerTest.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
       Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
+    playground_sdk_add_runtime_contract(onegen_source_controller_test)
     set_target_properties(onegen_source_controller_test PROPERTIES AUTOMOC ON)
     target_link_libraries(onegen_source_controller_test PRIVATE
       OneGen::QtWidget OneGen::PlaygroundAdapter Qt6::Test)
