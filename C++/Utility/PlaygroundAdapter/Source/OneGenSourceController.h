@@ -61,10 +61,14 @@ public:
   void stop() override;
   /** @brief Stops acquisition with acknowledged success or an explicit backend failure. */
   void stopLive();
+  /** @brief Stops only this controller's own lease, without its children. */
+  void stopOwnAcquisition();
   /** @brief Captures one frame, optionally retaining raw bytes in a consumer diagnostic directory. */
   void grabOne(const QString& diagnosticDirectory = {});
   void trigger();
   bool isGrabbing() const override;
+  /** @brief Copies the cameras that failed the most recent all-camera start or stop. */
+  std::vector<SourceOperationFailure> sourceOperationFailures() const override;
   void setFrameConsumer(FrameConsumer consumer) override;
   bool supports3D() const override { return true; }
   /**
@@ -88,7 +92,7 @@ public:
   /** @brief Reports external work to GUI command admission. */
   bool externalBusy() const { return external_busy_.load(); }
   /** @brief Drains accepted API work before consumer panels are removed. */
-  void drainControl() { tool_work_.waitForFinished(); }
+  void drainControl();
   /** @brief Opens an exact device through the existing Coordinator and owns its lease. */
   std::shared_ptr<onegen::producer::Lease> openDevice(std::shared_ptr<onegen::producer::Coordinator> coordinator, const onegen::DeviceInfo& device);
   /** @brief Stops and closes the owning device channel, preserving failed-close state. */
@@ -102,13 +106,15 @@ public:
   DeviceConnectionCapabilities connectionCapabilities() const override;
   /** @brief Copies the cached producer/interface/device targets without refreshing them. */
   DeviceConnectionResult requestConnectionTargets(TargetsCompletion completion) override;
-  /** @brief Observes the module-owned connection and converted-frame count. */
+  /** @brief Observes the primary connection and converted-frame count. */
   DeviceConnectionResult requestConnectionState(IDeviceConnectionControl::Completion completion) override;
-  /** @brief Runs isolated producer discovery while disconnected and idle. */
+  /** @brief Observes the Interface and every camera connection with per-connection state. */
+  DeviceConnectionResult requestConnectionStates(IDeviceConnectionControl::StatesCompletion completion) override;
+  /** @brief Runs producer discovery; while connected it only annotates lost cameras. */
   DeviceConnectionResult requestDiscover(TargetsCompletion completion) override;
-  /** @brief Opens an exact declared Device; implicit switching and Interface mode are refused. */
+  /** @brief Opens an Interface explicitly, or a camera and its Interface implicitly. */
   DeviceConnectionResult requestConnect(std::string targetId, IDeviceConnectionControl::Completion completion) override;
-  /** @brief Closes the exact connection. */
+  /** @brief Closes a camera, or an explicit Interface with its cameras. */
   DeviceConnectionResult requestDisconnect(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
   /** @brief Waits for native single acquisition and conversion on the exact connection. */
   DeviceConnectionResult requestSingle(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
@@ -172,14 +178,65 @@ private:
   std::shared_ptr<onegen::producer::Coordinator> coordinator_;
   std::vector<onegen::DeviceInfo> devices_;
   QString connection_id_;
+  /** @brief Parent Interface connection id for one API-connected camera. */
+  QString parent_connection_id_;
   std::atomic<bool> gui_busy_{false}, external_busy_{false};
+  /** @brief Accepted lifecycle or parameter work not yet completed; cleared before its callback. */
+  std::atomic<int> active_work_{0};
+  /** @brief Accepted structural work; per-connection work must wait for it. */
+  std::atomic<int> structural_work_{0};
   bool control_blocked_ = false;
   QFuture<void> tool_work_;
+  /** @brief Serializes admitted work bookkeeping across the GUI thread and completions. */
+  mutable std::mutex work_mutex_;
+  std::vector<QFuture<void>> admitted_work_;
+  /** @brief Disconnected children destroyed after their own admitted work finished. */
+  std::vector<std::unique_ptr<OneGenSourceController>> retired_;
   std::vector<std::pair<std::string, onegen::FeatureNode>> control_features_;
   std::vector<onegen::DataStreamInfo> control_streams_;
   void refreshControlSnapshot();
-  /** @brief Copies the connection of this controller or of its one connected child. */
+  /** @brief The one Interface this session opened, explicitly or through a camera. */
+  struct InterfaceConnection {
+    onegen::InterfaceInfo info;
+    QString connectionId;
+    bool implicit = false;
+    int refCount = 0;
+    std::string error;
+  };
+  std::optional<InterfaceConnection> interface_;
+  struct ErrorState {
+    std::mutex mutex;
+    std::string message;
+  };
+  std::shared_ptr<ErrorState> error_state_ = std::make_shared<ErrorState>();
+  std::string discovery_error_;
+  std::vector<SourceOperationFailure> operation_failures_;
+  void handleLeaseError(std::string message);
+  void setDiscoveryError(std::string message);
+  /** @brief Copies the primary connection: the Interface, else the first camera by index. */
   DeviceConnectionState connectionState() const;
+  /** @brief Copies one connection by id, including its per-connection capabilities. */
+  DeviceConnectionState stateForConnection(const std::string& connectionId) const;
+  /** @brief Copies every open connection, Interface first and cameras by source index. */
+  std::vector<DeviceConnectionState> connectionStates() const;
+  DeviceConnectionState interfaceStateLocked() const;
+  DeviceConnectionState cameraStateLocked(const std::string& key, const Child& child) const;
+  DeviceConnectionAvailabilitySet interfaceAvailability() const;
+  /** @brief Resolves one published target id to its Interface or camera facts. */
+  struct ResolvedTarget {
+    bool isInterface = false;
+    onegen::DeviceInfo device;
+    onegen::InterfaceInfo interfaceInfo;
+  };
+  std::optional<ResolvedTarget> resolveTarget(const std::string& targetId) const;
+  onegen::InterfaceInfo interfaceInfoFor(const onegen::DeviceInfo& device) const;
+  /** @brief Opens the camera's Interface implicitly when the session owns none yet. */
+  onegen::InterfaceInfo ensureCameraInterface(const onegen::DeviceInfo& device);
+  /** @brief Closes an implicit Interface after its last camera connection left. */
+  void closeIdleInterface();
+  void annotateDiscovery(const std::vector<onegen::DeviceInfo>& discovered, bool interfacePresent);
+  /** @brief Whether one exact controller has active accepted work or GUI work. */
+  static bool controllerBusy(const OneGenSourceController& controller);
   /** @brief One applied AcquisitionMode transition for the owning acquisition action. */
   struct AcquisitionModeChange {
     bool changed = false;
@@ -193,6 +250,10 @@ private:
   void reportAcquisitionMode(const AcquisitionModeChange& change, const char* action) const;
   /** @brief Derives Single availability from the cached Remote Device node map. */
   DeviceConnectionAvailability singleAvailability() const;
+  /** @brief Derives the availability of one AcquisitionMode value from the cached node map. */
+  static DeviceConnectionAvailability modeAvailability(
+      const std::vector<std::pair<std::string, onegen::FeatureNode>>& features,
+      const char* mode, const char* label);
   /** @brief Finds one copied feature by name in a feature tree. */
   static const onegen::FeatureNode* findFeature(const onegen::FeatureNode& root, std::string_view name);
   enum class Lifecycle { Discover, Connect, Disconnect, Single, LiveStart, LiveStop };

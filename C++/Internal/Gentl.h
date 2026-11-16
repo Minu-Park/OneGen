@@ -74,6 +74,9 @@ struct Gentl {
   GenTL::PDSGetBufferChunkData DSGetBufferChunkData = nullptr;
   GenTL::PEventGetInfo EventGetInfo = nullptr;
   GenTL::PEventGetDataInfo EventGetDataInfo = nullptr;
+  /** @brief Optional GenTL 1.6 Interface port export; the bundled header predates it. */
+  using IfGetPortFn = GenTL::GC_ERROR (GC_CALLTYPE*)(GenTL::IF_HANDLE, GenTL::PORT_HANDLE*);
+  IfGetPortFn IFGetPort = nullptr;
 
   void load(const std::filesystem::path& cti);
   void close_tl();
