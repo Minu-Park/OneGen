@@ -25,6 +25,8 @@ struct Producer {
   std::map<std::string, std::shared_ptr<void>> claims;
   std::map<std::string, std::shared_ptr<void>> camera_claims;
   std::map<std::string, std::unique_ptr<NodeMap>> interface_maps;
+  /** Producer-scoped System/TL node map shared by every interface of this CTI. */
+  std::unique_ptr<NodeMap> system_map;
 };
 
 void close_interfaces(Producer& producer);

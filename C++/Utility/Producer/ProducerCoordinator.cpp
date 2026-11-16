@@ -233,6 +233,11 @@ std::vector<std::pair<std::string, FeatureNode>> Lease::describe_features() cons
   return modules;
 }
 
+FeatureNode Lease::module_features(int module) const {
+  std::lock_guard lock(producer_->mutex);
+  return snapshot(camera().features(moduleFromIndex(module)).root());
+}
+
 FeatureNode Lease::read_node(int module, std::string_view name) const {
   std::lock_guard lock(producer_->mutex);
   return snapshot(camera().features(moduleFromIndex(module)).find(name));
@@ -267,9 +272,11 @@ NodeWriteResult Lease::write_node_checked(int module, std::string_view name,
     std::lock_guard lock(producer_->mutex);
     auto& opened = camera();
     const auto target = moduleFromIndex(module);
-    if (sharedModule(module)) {
+    // Module 3 belongs to the Interface endpoint. System/TL (module 4) is producer-global
+    // and writable through any camera; the GenTL access mode decides whether it is writable.
+    if (module == 3) {
       result.status = NodeWriteStatus::Unavailable;
-      result.message = "Shared maps are not device parameter targets.";
+      result.message = "Interface features are written through the Interface connection.";
       return result;
     }
     auto node = opened.features(target).find(name);
@@ -603,6 +610,59 @@ FeatureNode Coordinator::write_interface(const InterfaceInfo& info, std::string_
   auto node = map.find(name);
   apply_feature(node, operation, value);
   return snapshot(map.root());
+}
+
+FeatureNode Coordinator::system_features(const InterfaceInfo& info) {
+  auto found = loaded(info);
+  std::lock_guard lock(found->mutex);
+  return snapshot(found->system->system_features(InterfaceInfo{info.id, found->key}).root());
+}
+
+FeatureNode Coordinator::read_system(const InterfaceInfo& info, std::string_view name) {
+  auto found = loaded(info);
+  std::lock_guard lock(found->mutex);
+  return snapshot(found->system->system_features(InterfaceInfo{info.id, found->key}).find(name));
+}
+
+FeatureNode Coordinator::write_system(const InterfaceInfo& info, std::string_view name,
+                                      std::string_view operation, std::string_view value) {
+  auto found = loaded(info);
+  std::lock_guard lock(found->mutex);
+  auto& map = found->system->system_features(InterfaceInfo{info.id, found->key});
+  auto node = map.find(name);
+  apply_feature(node, operation, value);
+  return snapshot(map.root());
+}
+
+std::string Coordinator::save_interface_features(const InterfaceInfo& info) {
+  auto found = loaded(info);
+  std::lock_guard lock(found->mutex);
+  return found->system->interface_features(InterfaceInfo{info.id, found->key}).save_features();
+}
+
+void Coordinator::load_interface_features(const InterfaceInfo& info, std::string_view contents) {
+  const auto resource = interfaceKey(producerKey(info.cti_path), info.id);
+  {
+    std::lock_guard lock(registry_->mutex);
+    for (const auto& [device, iface] : registry_->leased)
+      if (iface == resource)
+        throw std::runtime_error("Disconnect all cameras on this interface before reconfiguration.");
+  }
+  auto found = loaded(info);
+  std::lock_guard lock(found->mutex);
+  found->system->interface_features(InterfaceInfo{info.id, found->key}).load_features(contents);
+}
+
+std::string Coordinator::save_system_features(const InterfaceInfo& info) {
+  auto found = loaded(info);
+  std::lock_guard lock(found->mutex);
+  return found->system->system_features(InterfaceInfo{info.id, found->key}).save_features();
+}
+
+void Coordinator::load_system_features(const InterfaceInfo& info, std::string_view contents) {
+  auto found = loaded(info);
+  std::lock_guard lock(found->mutex);
+  found->system->system_features(InterfaceInfo{info.id, found->key}).load_features(contents);
 }
 
 DiscoveryResult Coordinator::discover(ProgressFn progress) {

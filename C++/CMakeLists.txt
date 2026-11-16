@@ -276,6 +276,7 @@ if(ONEGEN_BUILD_QT_WIDGET)
       Utility/Qt/OneGenFeatureTreeTests.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
       Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
+      Utility/PlaygroundAdapter/Source/OneGenTools.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
     playground_sdk_add_runtime_contract(OneGenFeatureTreeTests)
     set_target_properties(OneGenFeatureTreeTests PROPERTIES AUTOMOC ON)
@@ -333,6 +334,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     Utility/PlaygroundAdapter/Plugin/OneGenPlugin.cpp
     Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
     Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
+    Utility/PlaygroundAdapter/Source/OneGenTools.cpp
     Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
   playground_sdk_add_runtime_contract(OneGenPlugin)
   set_target_properties(OneGenPlugin PROPERTIES
@@ -389,6 +391,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
       Utility/PlaygroundAdapter/Tests/SourceControllerTest.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
       Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
+      Utility/PlaygroundAdapter/Source/OneGenTools.cpp
       Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
     playground_sdk_add_runtime_contract(onegen_source_controller_test)
     set_target_properties(onegen_source_controller_test PROPERTIES AUTOMOC ON)

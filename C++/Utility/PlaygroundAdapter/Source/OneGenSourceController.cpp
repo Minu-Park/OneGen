@@ -51,6 +51,7 @@ OneGenSourceController::OneGenSourceController(QObject* parent)
 
 OneGenSourceController::~OneGenSourceController()
 {
+  stopParameterWatches();
   drainControl();
   std::vector<OneGenSourceController*> children;
   {
@@ -1276,7 +1277,8 @@ DeviceConnectionResult OneGenSourceController::requestLiveStop(std::string conne
 
 bool OneGenSourceController::controllerBusy(const OneGenSourceController& controller) {
   return controller.external_busy_.load() || controller.gui_busy_.load()
-      || controller.control_blocked_ || controller.active_work_.load() > 0;
+      || controller.control_blocked_ || controller.active_work_.load() > 0
+      || controller.parameter_work_.load() > 0;
 }
 
 DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operation, std::string argument,

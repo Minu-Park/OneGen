@@ -442,6 +442,18 @@ NodeMap& OneGen::interface_features(const InterfaceInfo& info) {
   return *map;
 }
 
+NodeMap& OneGen::system_features(const InterfaceInfo& info) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  auto& producer = producer_for(impl_->producers, info);
+  auto& map = producer.system_map;
+  if (!map) {
+    auto loaded = std::make_unique<NodeMap>();
+    load_remote_nodemap(*loaded, producer.api, producer.api.tl, "System/TL");
+    map = std::move(loaded);
+  }
+  return *map;
+}
+
 void OneGen::release_interfaces() {
   std::lock_guard<std::recursive_mutex> lk(impl_->mu);
   if (!impl_->open_keys.empty()) throw Error("Disconnect all cameras before interface reconfiguration.");

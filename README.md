@@ -123,24 +123,38 @@ authorities.
 The source controller also implements the consumer's optional
 `IDeviceParameterControl` contract. Existing `Lease::describe_features`,
 `observe_node` and `write_node_checked` provide typed inventory, reads, writes and
-commands for `RemoteDevice`, `DataStream` and `Device` scopes. DataStream targets
+commands for `RemoteDevice`, `DataStream` and `Device` scopes on a camera
+connection. The Interface connection adds the `Interface` scope through
+`Coordinator::interface_features`/`write_interface` and the producer-global
+`System/TL` scope through `Coordinator::system_features`/`write_system`; every
+System/TL descriptor is marked `producerShared` because a write affects all
+interfaces and sessions of the CTI. A camera connection refuses Interface and
+System/TL targets, and an Interface write is refused while any camera of that
+Interface is leased. DataStream targets
 use `DataStream:<index>:<generation>`; changing away and back invalidates old
 targets. Connection UUIDs, current
 transitive selector values and query-observed revisions qualify targets. Integer
 values remain signed 64-bit; SDK readback may differ from a requested value.
-The checked write revalidates access, constraints and complete selector
-context under the producer lock through the SDK setter. After setter
+Descriptors carry bounded category paths, visibility, representation and
+selector relations for the consumer tree. The checked write revalidates access,
+constraints and complete selector context under the producer lock through the SDK
+setter. After setter
 preparation completes, the lease observes actual state. Failed observation retains an applied effect
 and explicitly unavailable readback.
 Unreadable values are absent and incomplete selector observations refuse writes.
-GUI operations and external requests share control admission; raw-register modal
+`requestParameterChanges` serves one snapshot and revision-stamped deltas per
+connection through a bounded queue; overflow replaces pending deltas with an
+explicit resync snapshot. GUI operations and external requests share control
+admission; raw-register modal
 inspection also holds that admission. Writes never select a context or stop Live
 implicitly. TriggerSoftware retains the existing trigger/receive path.
 Revisions count observed changes; stream generations additionally fence selection
 ABA. The producer lock serializes consumer SDK access, but does not make an
-autonomously changing physical device transactional. Interface/System
-parameters, raw-register API writes and cancellation of pending Single remain
-outside this contract.
+autonomously changing physical device transactional. The module also declares
+`onegen.stream-select` (enum data-stream prompt), `onegen.copy-module-settings`
+and `onegen.restore-module-settings` with semantic `ToolPresentation` metadata.
+Raw-register API writes and cancellation of pending Single remain outside this
+contract.
 
 GenTL 1.5 multipart buffers are retained without a vendor SDK. The Playground
 adapter assembles standard PFNC `Coord3D_ABC32f` and `Coord3D_C16` range data
