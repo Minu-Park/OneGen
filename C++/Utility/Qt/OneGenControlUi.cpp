@@ -116,7 +116,7 @@ void OneGenControlUi::create(QWidget* owner, const QString& settingsFile, const 
 
   fps_ = new QLabel;
   fps_->setObjectName(QStringLiteral("OneGenStatusFps"));
-  fps_->setProperty("statusRole", QStringLiteral("deviceFps"));
+  fps_->setProperty("statusRole", QStringLiteral("deviceCounter"));
   fps_->setAlignment(Qt::AlignCenter);
   fps_->hide();
   status_bar->addPermanentWidget(fps_);
