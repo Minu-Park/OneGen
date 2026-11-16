@@ -1316,6 +1316,9 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
         std::lock_guard lock(mutex_);
         if (children_.count(deviceKey(selected)))
           return refused(DeviceConnectionError::Conflict, "The camera is already connected.");
+        if (interface_ && (interface_->info.cti_path != resolved->interfaceInfo.cti_path
+                || interface_->info.id != resolved->interfaceInfo.id))
+          return refused(DeviceConnectionError::Conflict, "The session already owns another Interface.");
       }
       emit presentDevice(QString::fromStdString("Device|" + deviceKey(selected)));
       target = cameraController(deviceKey(selected), selected.display_name.empty() ? selected.id : selected.display_name);
@@ -1404,10 +1407,10 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
             QUuid::createUuid().toString(QUuid::WithoutBraces), false, 0, {}};
         connectionId = interface_->connectionId.toStdString();
       } else if (operation == Lifecycle::Connect) {
-        ensureCameraInterface(selected);
         OneGenSourceController* camera = cameraController(deviceKey(selected),
             selected.display_name.empty() ? selected.id : selected.display_name);
         try {
+          ensureCameraInterface(selected);
           camera->openDevice(coordinator_, selected);
         } catch (...) {
           {
@@ -1527,6 +1530,10 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
       else if (result.error == DeviceConnectionError::None && operation != Lifecycle::Discover
           && operation != Lifecycle::Disconnect)
         result.state = finishState();
+    } catch (const onegen::DeviceClaimRefused& error) {
+      // The claim is taken before the Device opens, so the refusal has no effect.
+      result = {DeviceConnectionError::Conflict, error.what(), DeviceConnectionEffect::None,
+          finishState()};
     } catch (const OneGenAcquisitionModeRefused& error) {
       // The mode write is the action's first effect; refusal leaves acquisition untouched.
       result = {DeviceConnectionError::Unavailable, error.what(), DeviceConnectionEffect::None,

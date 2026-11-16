@@ -172,6 +172,8 @@ private slots:
     void explicitInterfaceStaysOpenUntilDisconnect();
     void discoveryAnnotatesLossWithoutTeardown();
     void claimsFollowInterfaceType();
+    void claimDenialRetiresTheCameraConnection();
+    void interfaceFeaturesFallBackWithoutIfGetPort();
     void partialStartReportsFailures();
     void perConnectionAdmissionIsolation();
     void cleanupTestCase();
@@ -598,6 +600,51 @@ void OneGenSourceControllerTests::claimsFollowInterfaceType()
         // The shared key rule produces no key, so the module records an unclaimed camera.
         QVERIFY(playgroundCameraResourceKey(QString::fromStdString(cameraClaims.front())).isEmpty());
     }
+}
+
+void OneGenSourceControllerTests::claimDenialRetiresTheCameraConnection()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+    EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "1");
+    EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "GEV");
+    bool deny = true;
+    Fixture fixture({}, [&](const onegen::InterfaceInfo&, const onegen::DeviceInfo& device) {
+        if (deny) throw onegen::DeviceClaimRefused("camera:synth-0001 is in use by another session.");
+        return std::shared_ptr<void>(new int(1), [](void* value) { delete static_cast<int*>(value); });
+    });
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto* camera = targetOfKind(targets, DeviceConnectionTargetKind::Device, 0);
+    QVERIFY(camera);
+    const auto refused = fixture.connect(camera->targetId);
+    QCOMPARE(refused.error, DeviceConnectionError::Conflict);
+    QVERIFY(refused.message.find("in use") != std::string::npos);
+    QVERIFY(refused.state == std::nullopt || !refused.state->connected);
+    // The failed attempt retires its child and implicit Interface, so the same camera can retry.
+    QVERIFY(fixture.states().empty());
+    deny = false;
+    const auto connected = fixture.connect(camera->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    QCOMPARE(fixture.states().size(), std::size_t(2));
+}
+
+void OneGenSourceControllerTests::interfaceFeaturesFallBackWithoutIfGetPort()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+    EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "1");
+    EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "CXP");
+    EnvironmentVariable noPort("ONEGEN_SYNTHETIC_NO_IF_GET_PORT", "1");
+    Fixture fixture;
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto interfaces = fixture._coordinator->interfaces();
+    QVERIFY(!interfaces.empty());
+    fixture._coordinator->open_interface(interfaces.front());
+    const auto features = fixture._coordinator->interface_features(interfaces.front());
+    QVERIFY(!features.children.empty());
+    fixture._coordinator->close_interface(interfaces.front());
 }
 
 void OneGenSourceControllerTests::partialStartReportsFailures()

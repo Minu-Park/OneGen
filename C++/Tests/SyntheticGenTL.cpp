@@ -1290,6 +1290,8 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE IFOpenDevice(IF_HANDLE iface, const char* id,
 TEST_EXPORT GC_ERROR GC_CALLTYPE IFGetPort(IF_HANDLE iface, PORT_HANDLE* port) {
   std::lock_guard lock(g_mutex);
   if (!iface || !port) return GC_ERR_INVALID_PARAMETER;
+  const char* disabled = std::getenv("ONEGEN_SYNTHETIC_NO_IF_GET_PORT");
+  if (disabled && *disabled && std::string_view(disabled) != "0") return GC_ERR_NOT_IMPLEMENTED;
   *port = new PortHandle{static_cast<IfHandle*>(iface)->id, "Interface"};
   return GC_ERR_SUCCESS;
 }

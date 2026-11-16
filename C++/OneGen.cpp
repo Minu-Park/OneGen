@@ -430,9 +430,12 @@ NodeMap& OneGen::interface_features(const InterfaceInfo& info) {
   auto& map = producer.interface_maps[info.id];
   if (!map) {
     auto loaded = std::make_unique<NodeMap>();
-    if (!producer.api.IFGetPort) throw Error("The producer does not export IFGetPort.");
-    GenTL::PORT_HANDLE port = nullptr;
-    producer.api.check(producer.api.IFGetPort(handle->second, &port), "IFGetPort");
+    GenTL::PORT_HANDLE port = handle->second;
+    GenTL::PORT_HANDLE interfacePort = nullptr;
+    if (producer.api.IFGetPort
+        && producer.api.IFGetPort(handle->second, &interfacePort) == GenTL::GC_ERR_SUCCESS
+        && interfacePort)
+      port = interfacePort;
     load_remote_nodemap(*loaded, producer.api, port, "Interface");
     map = std::move(loaded);
   }

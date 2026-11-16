@@ -440,10 +440,10 @@ private:
       key = QStringLiteral("onegen-interface:") + QString::fromStdString(info.cti_path)
           + QLatin1Char('|') + QString::fromStdString(info.id);
     if (key.isEmpty()) return {};
-    if (!claims) throw std::runtime_error("The host did not provide hardware resource claims.");
+    if (!claims) throw onegen::DeviceClaimRefused("The host did not provide hardware resource claims.");
     QString error;
     auto claim = claims->claimResource(key, &error);
-    if (!claim) throw std::runtime_error(error.toStdString());
+    if (!claim) throw onegen::DeviceClaimRefused(error.toStdString());
     return claim;
   }
 
@@ -463,10 +463,10 @@ private:
       return {};
     }
     auto* claims = claims_.load(std::memory_order_acquire);
-    if (!claims) throw std::runtime_error("The host did not provide hardware resource claims.");
+    if (!claims) throw onegen::DeviceClaimRefused("The host did not provide hardware resource claims.");
     QString error;
     auto claim = claims->claimResource(key, &error);
-    if (!claim) throw std::runtime_error(error.toStdString());
+    if (!claim) throw onegen::DeviceClaimRefused(error.toStdString());
     return claim;
   }
 

@@ -811,6 +811,11 @@ std::unique_ptr<Lease> Coordinator::open(const DeviceInfo& device) {
                           failure.what());
       }
       return lease;
+    } catch (const DeviceClaimRefused&) {
+      // A claim refusal happens before the Device opens and the caller may retry it.
+      std::lock_guard lock(registry_->mutex);
+      registry_->leased.erase(key);
+      throw;
     } catch (const std::exception& exception) {
       error = exception.what();
       std::lock_guard lock(registry_->mutex);

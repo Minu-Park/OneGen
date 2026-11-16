@@ -5,11 +5,18 @@
 #include <array>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace onegen {
+
+/** @brief A pre-effect claim refusal; the caller may retry after the owner releases it. */
+class DeviceClaimRefused final : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
 
 struct DeviceInfo {
   std::string id;

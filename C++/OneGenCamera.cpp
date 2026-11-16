@@ -504,9 +504,10 @@ void Camera::open_impl(std::string_view query, std::string_view producer, std::s
     timing.mark("System/TL-XML");
     try {
       GenTL::PORT_HANDLE interface_port = nullptr;
-      if (!g.IFGetPort) throw Error("The producer does not export IFGetPort.");
-      g.check(g.IFGetPort(hif, &interface_port), "IFGetPort");
-      impl_->load_module(impl_->interface_features, g, interface_port, "Interface");
+      const auto port = g.IFGetPort && g.IFGetPort(hif, &interface_port) == GenTL::GC_ERR_SUCCESS
+              && interface_port
+          ? interface_port : hif;
+      impl_->load_module(impl_->interface_features, g, port, "Interface");
     } catch (...) {}
     timing.mark("Interface-XML");
     try { impl_->load_module(impl_->device_features, g, hdev, "Device"); } catch (...) {}
