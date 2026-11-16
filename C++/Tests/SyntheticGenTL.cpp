@@ -7,8 +7,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -182,6 +186,7 @@ struct EventData {
   EVENTSRC_HANDLE source = nullptr;
   EVENT_TYPE type = EVENT_NEW_BUFFER;
   bool killed = false;
+  std::string device;
 };
 
 struct StreamData {
@@ -203,30 +208,44 @@ struct StreamData {
 struct DeviceData {
   bool open = false;
   StreamData stream;
+  std::uint32_t component_selector = 0;
+  std::uint32_t acquisition_mode = 0;
 };
 
-struct TlHandle {
+/** @brief Every GenTL handle is also a port so module XML can load without IFGetPort. */
+struct HandleBase {
   int tag = 0;
+  std::string id;
+  std::string module = "Device";
 };
-struct IfHandle {
-  int tag = 0;
+struct TlHandle : HandleBase {
+  TlHandle() { tag = 0; }
 };
-struct DevHandle {
-  int tag = 0;
+struct IfHandle : HandleBase {
+  explicit IfHandle(std::string interface_id)
+  { tag = 1; id = std::move(interface_id); module = "Interface"; }
 };
-struct DsHandle {
-  int tag = 0;
+struct DevHandle : HandleBase {
+  explicit DevHandle(std::string device)
+  { tag = 2; id = std::move(device); module = "Device"; }
 };
-struct PortHandle {
-  int tag = 0;
+struct DsHandle : HandleBase {
+  explicit DsHandle(std::string device)
+  { tag = 3; id = std::move(device); module = "Device"; }
+};
+struct PortHandle : HandleBase {
+  PortHandle(std::string device, std::string port_module)
+  { tag = 4; id = std::move(device); module = std::move(port_module); }
 };
 
 std::mutex g_mutex;
 std::condition_variable g_condition;
-DeviceData g_device;
+std::map<std::string, DeviceData> g_devices;
 std::string g_xml;
-std::uint32_t g_component_selector = 0;
-std::uint32_t g_acquisition_mode = 0;
+std::string g_interface_xml;
+const std::string g_interface_id = "SyntheticBoard";
+std::string g_interface_type;
+int g_device_count = 1;
 std::vector<EventData*> g_events;
 GC_ERROR g_last_error = GC_ERR_SUCCESS;
 std::string g_last_error_text;
@@ -242,6 +261,76 @@ bool valid(void* handle) {
 
 bool8_t b8(bool value) {
   return value ? bool8_t{1} : bool8_t{0};
+}
+
+std::string deviceId(const std::uint32_t index) {
+  return "SyntheticCam" + std::to_string(index);
+}
+
+std::uint32_t deviceIndex(const std::string& id) {
+  if (id.rfind("SyntheticCam", 0) != 0) return std::numeric_limits<std::uint32_t>::max();
+  const auto number = id.substr(12);
+  char* end = nullptr;
+  const auto index = std::strtoul(number.c_str(), &end, 10);
+  return end == number.c_str() || *end ? std::numeric_limits<std::uint32_t>::max()
+                                       : static_cast<std::uint32_t>(index);
+}
+
+/** Dynamic loss knobs are read per call so one test can change them mid-session. */
+std::set<std::uint32_t> hiddenDevices() {
+  std::set<std::uint32_t> hidden;
+  const char* value = std::getenv("ONEGEN_SYNTHETIC_HIDDEN_DEVICES");
+  if (!value) return hidden;
+  std::string_view text(value);
+  while (!text.empty()) {
+    const auto comma = text.find(',');
+    const auto token = text.substr(0, comma);
+    hidden.insert(static_cast<std::uint32_t>(parseUnsigned(std::string(token).c_str(),
+        std::numeric_limits<std::uint32_t>::max())));
+    if (comma == std::string_view::npos) break;
+    text.remove_prefix(comma + 1);
+  }
+  return hidden;
+}
+
+bool deviceAvailable(const std::uint32_t index) {
+  return index < static_cast<std::uint32_t>(g_device_count)
+      && !hiddenDevices().count(index);
+}
+
+bool interfaceHidden() {
+  const char* value = std::getenv("ONEGEN_SYNTHETIC_HIDDEN_INTERFACE");
+  return value && *value && std::string_view(value) != "0";
+}
+
+bool startFailure(const std::string& id) {
+  const char* value = std::getenv("ONEGEN_SYNTHETIC_START_FAILURE");
+  if (!value) return false;
+  return std::to_string(deviceIndex(id)) == value;
+}
+
+bool acquisitionFailure(const std::string& id) {
+  const char* value = std::getenv("ONEGEN_SYNTHETIC_ACQUISITION_FAILURE");
+  if (!value) return false;
+  return std::string_view(value) == "all" || std::to_string(deviceIndex(id)) == value;
+}
+
+DeviceData& deviceData(const std::string& id) {
+  return g_devices[id];
+}
+
+void resetDevices() {
+  g_devices.clear();
+  for (int index = 0; index < g_device_count; ++index) g_devices[deviceId(index)] = DeviceData{};
+}
+
+std::optional<std::uint32_t> visibleDeviceAt(const std::uint32_t position) {
+  std::uint32_t seen = 0;
+  for (int index = 0; index < g_device_count; ++index) {
+    if (!deviceAvailable(static_cast<std::uint32_t>(index))) continue;
+    if (seen++ == position) return static_cast<std::uint32_t>(index);
+  }
+  return std::nullopt;
 }
 
 template <class T>
@@ -441,6 +530,57 @@ std::string makeXml() {
   return out.str();
 }
 
+std::string makeInterfaceXml() {
+  std::ostringstream out;
+  out << R"XML(<?xml version="1.0" encoding="utf-8"?>
+<RegisterDescription
+    ModelName="SyntheticInterface"
+    VendorName="OneGen"
+    StandardNameSpace="None"
+    SchemaMajorVersion="1"
+    SchemaMinorVersion="1"
+    SchemaSubMinorVersion="0"
+    MajorVersion="1"
+    MinorVersion="0"
+    SubMinorVersion="0"
+    ProductGuid="8D7E8A44-2B3C-4C2E-8F6A-9D5E2A4B7C31"
+    VersionGuid="4F5C1C2D-6E7A-4B8C-9D01-2E3F4A5B6C7D"
+    xmlns="http://www.genicam.org/GenApi/Version_1_1">
+  <Category Name="Root">
+    <pFeature>InterfaceSpeed</pFeature>
+    <pFeature>InterfaceType</pFeature>
+  </Category>
+  <IntReg Name="InterfaceSpeedReg">
+    <Address>8192</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>Interface</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="InterfaceSpeed">
+    <pValue>InterfaceSpeedReg</pValue>
+    <Min>0</Min>
+    <Max>100000</Max>
+    <Inc>1</Inc>
+  </Integer>
+  <IntReg Name="InterfaceTypeReg">
+    <Address>8196</Address>
+    <Length>4</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>Interface</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="InterfaceType">
+    <pValue>InterfaceTypeReg</pValue>
+  </Integer>
+  <Port Name="Interface"/>
+</RegisterDescription>
+)XML";
+  return out.str();
+}
+
 void resetFrame(BufferData& buffer) {
   buffer.size_filled = 0;
   buffer.data_size = 0;
@@ -612,8 +752,12 @@ GC_ERROR takeBuffer(std::unique_lock<std::mutex>& lock, EventData* event,
     return GC_ERR_TIMEOUT;
   }
   if (event->killed) return GC_ERR_ABORT;
+  if (acquisitionFailure(event->device)) {
+    if (size) *size = 0;
+    return GC_ERR_ABORT;
+  }
 
-  auto& stream = g_device.stream;
+  auto& stream = deviceData(event->device).stream;
   const auto ready = [&] { return event->killed || acquireReady(stream); };
   const auto deadline = timeout == GENTL_INFINITE
       ? std::chrono::steady_clock::time_point::max()
@@ -657,7 +801,76 @@ GC_ERROR takeBuffer(std::unique_lock<std::mutex>& lock, EventData* event,
   return give(nullptr, data, size, INFO_DATATYPE_UNKNOWN, event_data);
 }
 
-GC_ERROR readRegister(std::uint64_t address, void* buffer, std::size_t* size) {
+GC_ERROR readRegister(const std::string& device, std::uint64_t address, void* buffer,
+                      std::size_t* size) {
+  if (!size) return GC_ERR_INVALID_PARAMETER;
+  if (!buffer) {
+    *size = 4;
+    return GC_ERR_BUFFER_TOO_SMALL;
+  }
+  if (*size < 4) {
+    *size = 4;
+    return GC_ERR_BUFFER_TOO_SMALL;
+  }
+  auto& state = deviceData(device);
+  std::uint32_t value = 0;
+  switch (address) {
+    case width_register: value = 64; break;
+    case height_register: value = 4; break;
+    case pixel_format_register: value = static_cast<std::uint32_t>(mono8); break;
+    case component_selector_register: value = state.component_selector; break;
+    case component_id_register:
+      value = state.component_selector == 0 ? 7 : (state.component_selector == 1 ? 9 : 11);
+      break;
+    case payload_size_register: value = 64 * 4; break;
+    case trigger_register:
+    case acquisition_start_register:
+    case acquisition_stop_register:
+      value = 0;
+      break;
+    case acquisition_mode_register:
+      value = state.acquisition_mode;
+      break;
+    default:
+      return GC_ERR_INVALID_ADDRESS;
+  }
+  std::memcpy(buffer, &value, sizeof(value));
+  *size = sizeof(value);
+  return GC_ERR_SUCCESS;
+}
+
+GC_ERROR writeRegister(const std::string& device, std::uint64_t address, const void* buffer,
+                       std::size_t* size) {
+  if (!buffer || !size || *size != 4) return GC_ERR_INVALID_PARAMETER;
+  std::uint32_t value = 0;
+  std::memcpy(&value, buffer, sizeof(value));
+  auto& state = deviceData(device);
+  switch (address) {
+    case component_selector_register:
+      state.component_selector = value;
+      return GC_ERR_SUCCESS;
+    case trigger_register:
+      if (state.stream.grabbing && !state.stream.finite) {
+        ++state.stream.trigger_pending;
+        g_condition.notify_all();
+      }
+      return GC_ERR_SUCCESS;
+    case acquisition_start_register:
+    case acquisition_stop_register:
+      return GC_ERR_SUCCESS;
+    case acquisition_mode_register:
+      state.acquisition_mode = value;
+      return GC_ERR_SUCCESS;
+    case width_register:
+    case height_register:
+    case pixel_format_register:
+      return GC_ERR_SUCCESS;
+    default:
+      return GC_ERR_INVALID_ADDRESS;
+  }
+}
+
+GC_ERROR readInterfaceRegister(std::uint64_t address, void* buffer, std::size_t* size) {
   if (!size) return GC_ERR_INVALID_PARAMETER;
   if (!buffer) {
     *size = 4;
@@ -669,61 +882,18 @@ GC_ERROR readRegister(std::uint64_t address, void* buffer, std::size_t* size) {
   }
   std::uint32_t value = 0;
   switch (address) {
-    case width_register: value = 64; break;
-    case height_register: value = 4; break;
-    case pixel_format_register: value = static_cast<std::uint32_t>(mono8); break;
-    case component_selector_register: value = g_component_selector; break;
-    case component_id_register:
-      value = g_component_selector == 0 ? 7 : (g_component_selector == 1 ? 9 : 11);
-      break;
-    case payload_size_register: value = 64 * 4; break;
-    case trigger_register:
-    case acquisition_start_register:
-    case acquisition_stop_register:
-      value = 0;
-      break;
-    case acquisition_mode_register:
-      value = g_acquisition_mode;
-      break;
-    default:
-      return GC_ERR_INVALID_ADDRESS;
+    case 8192: value = 1000; break;
+    case 8196: value = 1; break;
+    default: return GC_ERR_INVALID_ADDRESS;
   }
   std::memcpy(buffer, &value, sizeof(value));
   *size = sizeof(value);
   return GC_ERR_SUCCESS;
 }
 
-GC_ERROR writeRegister(std::uint64_t address, const void* buffer, std::size_t* size) {
-  if (!buffer || !size || *size != 4) return GC_ERR_INVALID_PARAMETER;
-  std::uint32_t value = 0;
-  std::memcpy(&value, buffer, sizeof(value));
-  switch (address) {
-    case component_selector_register:
-      g_component_selector = value;
-      return GC_ERR_SUCCESS;
-    case trigger_register:
-      if (g_device.stream.grabbing && !g_device.stream.finite) {
-        ++g_device.stream.trigger_pending;
-        g_condition.notify_all();
-      }
-      return GC_ERR_SUCCESS;
-    case acquisition_start_register:
-    case acquisition_stop_register:
-      return GC_ERR_SUCCESS;
-    case acquisition_mode_register:
-      g_acquisition_mode = value;
-      return GC_ERR_SUCCESS;
-    case width_register:
-    case height_register:
-    case pixel_format_register:
-      return GC_ERR_SUCCESS;
-    default:
-      return GC_ERR_INVALID_ADDRESS;
-  }
-}
-
-std::string portUrl() {
-  return "local:synthetic.xml;0;" + hex(g_xml.size());
+std::string portUrl(const std::string& module) {
+  const auto size = module == "Interface" ? g_interface_xml.size() : g_xml.size();
+  return "local:synthetic.xml;0;" + hex(size);
 }
 
 }  // namespace
@@ -760,7 +930,12 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCInitLib(void) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 #endif
   std::lock_guard lock(g_mutex);
+  g_device_count = static_cast<int>(parseUnsigned(std::getenv("ONEGEN_SYNTHETIC_DEVICES"), 1));
+  const char* type = std::getenv("ONEGEN_SYNTHETIC_INTERFACE_TYPE");
+  g_interface_type = type && *type ? type : "CXP";
   g_xml = makeXml();
+  g_interface_xml = makeInterfaceXml();
+  resetDevices();
   g_last_error = GC_ERR_SUCCESS;
   g_last_error_text.clear();
   return GC_ERR_SUCCESS;
@@ -770,8 +945,9 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCCloseLib(void) {
   std::lock_guard lock(g_mutex);
   for (auto* event : g_events) delete event;
   g_events.clear();
-  g_device = DeviceData{};
+  g_devices.clear();
   g_xml.clear();
+  g_interface_xml.clear();
   return GC_ERR_SUCCESS;
 }
 
@@ -779,29 +955,38 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCReadPort(PORT_HANDLE port, std::uint64_t addr
                                              void* buffer, std::size_t* size) {
   std::lock_guard lock(g_mutex);
   if (!valid(port)) return GC_ERR_INVALID_HANDLE;
+  auto& handle = *static_cast<HandleBase*>(port);
   if (address == 0) {
+    const auto& xml = handle.module == "Interface" ? g_interface_xml : g_xml;
+    if (xml.empty()) return GC_ERR_INVALID_HANDLE;
     if (!size) return GC_ERR_INVALID_PARAMETER;
-    const auto copied = std::min(*size, g_xml.size());
+    const auto copied = std::min(*size, xml.size());
     if (!buffer) {
-      *size = g_xml.size();
+      *size = xml.size();
       return GC_ERR_BUFFER_TOO_SMALL;
     }
-    if (*size < g_xml.size()) {
-      *size = g_xml.size();
+    if (*size < xml.size()) {
+      *size = xml.size();
       return GC_ERR_BUFFER_TOO_SMALL;
     }
-    std::memcpy(buffer, g_xml.data(), copied);
+    std::memcpy(buffer, xml.data(), copied);
     *size = copied;
     return GC_ERR_SUCCESS;
   }
-  return readRegister(address, buffer, size);
+  if (handle.module == "Interface") return readInterfaceRegister(address, buffer, size);
+  return readRegister(handle.id, address, buffer, size);
 }
 
 TEST_EXPORT GC_ERROR GC_CALLTYPE GCWritePort(PORT_HANDLE port, std::uint64_t address,
                                               const void* buffer, std::size_t* size) {
   std::lock_guard lock(g_mutex);
   if (!valid(port)) return GC_ERR_INVALID_HANDLE;
-  return writeRegister(address, buffer, size);
+  auto& handle = *static_cast<HandleBase*>(port);
+  if (handle.module == "Interface") {
+    if (!buffer || !size || *size != 4) return GC_ERR_INVALID_PARAMETER;
+    return GC_ERR_SUCCESS;
+  }
+  return writeRegister(handle.id, address, buffer, size);
 }
 
 TEST_EXPORT GC_ERROR GC_CALLTYPE GCGetPortInfo(PORT_HANDLE port, PORT_INFO_CMD command,
@@ -809,13 +994,15 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCGetPortInfo(PORT_HANDLE port, PORT_INFO_CMD c
                                                 std::size_t* size) {
   std::lock_guard lock(g_mutex);
   if (!valid(port)) return GC_ERR_INVALID_HANDLE;
+  const auto& handle = *static_cast<HandleBase*>(port);
   switch (command) {
-    case PORT_INFO_ID: return giveString(type, buffer, size, "SyntheticPort");
+    case PORT_INFO_ID: return giveString(type, buffer, size,
+        handle.module == "Interface" ? g_interface_id : handle.id);
     case PORT_INFO_VENDOR: return giveString(type, buffer, size, "OneGen");
     case PORT_INFO_MODEL: return giveString(type, buffer, size, "Synthetic");
     case PORT_INFO_TLTYPE: return giveString(type, buffer, size, "Synthetic");
-    case PORT_INFO_MODULE: return giveString(type, buffer, size, "Device");
-    case PORT_INFO_PORTNAME: return giveString(type, buffer, size, "Device");
+    case PORT_INFO_MODULE: return giveString(type, buffer, size, handle.module);
+    case PORT_INFO_PORTNAME: return giveString(type, buffer, size, handle.module);
     case PORT_INFO_LITTLE_ENDIAN: return give(type, buffer, size, INFO_DATATYPE_BOOL8, bool8_t{1});
     case PORT_INFO_BIG_ENDIAN: return give(type, buffer, size, INFO_DATATYPE_BOOL8, bool8_t{0});
     case PORT_INFO_ACCESS_READ: return give(type, buffer, size, INFO_DATATYPE_BOOL8, bool8_t{1});
@@ -839,9 +1026,10 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCGetPortURLInfo(PORT_HANDLE port, std::uint32_
                                                    void* buffer, std::size_t* size) {
   std::lock_guard lock(g_mutex);
   if (!valid(port)) return GC_ERR_INVALID_HANDLE;
+  const auto& handle = *static_cast<HandleBase*>(port);
   if (index != 0) return GC_ERR_INVALID_INDEX;
   if (command != URL_INFO_URL) return GC_ERR_INVALID_PARAMETER;
-  return giveString(type, buffer, size, portUrl());
+  return giveString(type, buffer, size, portUrl(handle.module));
 }
 
 TEST_EXPORT GC_ERROR GC_CALLTYPE GCRegisterEvent(EVENTSRC_HANDLE source, EVENT_TYPE type,
@@ -854,14 +1042,16 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCRegisterEvent(EVENTSRC_HANDLE source, EVENT_T
   auto* created = new EventData;
   created->source = source;
   created->type = type;
+  if (type == EVENT_NEW_BUFFER) created->device = static_cast<DsHandle*>(source)->id;
   g_events.push_back(created);
   if (type == EVENT_NEW_BUFFER) {
-    if (g_device.stream.new_buffer_event) {
+    auto& stream = deviceData(created->device).stream;
+    if (stream.new_buffer_event) {
       g_events.pop_back();
       delete created;
       return GC_ERR_RESOURCE_IN_USE;
     }
-    g_device.stream.new_buffer_event = created;
+    stream.new_buffer_event = created;
   }
   *event = created;
   return GC_ERR_SUCCESS;
@@ -872,8 +1062,9 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCUnregisterEvent(EVENTSRC_HANDLE source, EVENT
   if (!valid(source)) return GC_ERR_INVALID_HANDLE;
   for (auto it = g_events.begin(); it != g_events.end(); ++it) {
     if ((*it)->source != source || (*it)->type != type) continue;
-    if (g_device.stream.new_buffer_event == *it)
-      g_device.stream.new_buffer_event = nullptr;
+    if ((*it)->type == EVENT_NEW_BUFFER
+        && deviceData((*it)->device).stream.new_buffer_event == *it)
+      deviceData((*it)->device).stream.new_buffer_event = nullptr;
     delete *it;
     g_events.erase(it);
     g_condition.notify_all();
@@ -932,7 +1123,7 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE TLOpen(TL_HANDLE* tl) {
   std::lock_guard lock(g_mutex);
   if (!tl) return GC_ERR_INVALID_PARAMETER;
   *tl = new TlHandle;
-  g_device = DeviceData{};
+  resetDevices();
   return GC_ERR_SUCCESS;
 }
 
@@ -964,7 +1155,7 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE TLUpdateInterfaceList(TL_HANDLE tl, bool8_t* ch
 TEST_EXPORT GC_ERROR GC_CALLTYPE TLGetNumInterfaces(TL_HANDLE tl, std::uint32_t* count) {
   std::lock_guard lock(g_mutex);
   if (!tl || !count) return GC_ERR_INVALID_PARAMETER;
-  *count = 1;
+  *count = interfaceHidden() ? 0 : 1;
   return GC_ERR_SUCCESS;
 }
 
@@ -972,8 +1163,8 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE TLGetInterfaceID(TL_HANDLE tl, std::uint32_t in
                                                    char* id, std::size_t* size) {
   std::lock_guard lock(g_mutex);
   if (!tl) return GC_ERR_INVALID_HANDLE;
-  if (index != 0) return GC_ERR_INVALID_INDEX;
-  return giveString(nullptr, id, size, "SyntheticBoard");
+  if (interfaceHidden() || index != 0) return GC_ERR_INVALID_INDEX;
+  return giveString(nullptr, id, size, g_interface_id);
 }
 
 TEST_EXPORT GC_ERROR GC_CALLTYPE TLGetInterfaceInfo(TL_HANDLE tl, const char* id,
@@ -982,11 +1173,12 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE TLGetInterfaceInfo(TL_HANDLE tl, const char* id
                                                      std::size_t* size) {
   std::lock_guard lock(g_mutex);
   if (!tl) return GC_ERR_INVALID_HANDLE;
-  if (!id || std::string_view(id) != "SyntheticBoard") return GC_ERR_INVALID_ID;
+  if (!id || std::string_view(id) != g_interface_id || interfaceHidden())
+    return GC_ERR_INVALID_ID;
   switch (command) {
-    case INTERFACE_INFO_ID: return giveString(type, buffer, size, "SyntheticBoard");
+    case INTERFACE_INFO_ID: return giveString(type, buffer, size, g_interface_id);
     case INTERFACE_INFO_DISPLAYNAME: return giveString(type, buffer, size, "Synthetic Board");
-    case INTERFACE_INFO_TLTYPE: return giveString(type, buffer, size, "Synthetic");
+    case INTERFACE_INFO_TLTYPE: return giveString(type, buffer, size, g_interface_type);
     default: return GC_ERR_INVALID_PARAMETER;
   }
 }
@@ -995,8 +1187,9 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE TLOpenInterface(TL_HANDLE tl, const char* id,
                                                   IF_HANDLE* iface) {
   std::lock_guard lock(g_mutex);
   if (!tl || !iface) return GC_ERR_INVALID_PARAMETER;
-  if (!id || std::string_view(id) != "SyntheticBoard") return GC_ERR_INVALID_ID;
-  *iface = new IfHandle;
+  if (!id || std::string_view(id) != g_interface_id || interfaceHidden())
+    return GC_ERR_INVALID_ID;
+  *iface = new IfHandle{g_interface_id};
   return GC_ERR_SUCCESS;
 }
 
@@ -1013,9 +1206,9 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE IFGetInfo(IF_HANDLE iface, INTERFACE_INFO_CMD c
   std::lock_guard lock(g_mutex);
   if (!iface) return GC_ERR_INVALID_HANDLE;
   switch (command) {
-    case INTERFACE_INFO_ID: return giveString(type, buffer, size, "SyntheticBoard");
+    case INTERFACE_INFO_ID: return giveString(type, buffer, size, g_interface_id);
     case INTERFACE_INFO_DISPLAYNAME: return giveString(type, buffer, size, "Synthetic Board");
-    case INTERFACE_INFO_TLTYPE: return giveString(type, buffer, size, "Synthetic");
+    case INTERFACE_INFO_TLTYPE: return giveString(type, buffer, size, g_interface_type);
     default: return GC_ERR_INVALID_PARAMETER;
   }
 }
@@ -1031,7 +1224,10 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE IFUpdateDeviceList(IF_HANDLE iface, bool8_t* ch
 TEST_EXPORT GC_ERROR GC_CALLTYPE IFGetNumDevices(IF_HANDLE iface, std::uint32_t* count) {
   std::lock_guard lock(g_mutex);
   if (!iface || !count) return GC_ERR_INVALID_PARAMETER;
-  *count = 1;
+  std::uint32_t present = 0;
+  for (int index = 0; index < g_device_count; ++index)
+    if (deviceAvailable(static_cast<std::uint32_t>(index))) ++present;
+  *count = interfaceHidden() ? 0 : present;
   return GC_ERR_SUCCESS;
 }
 
@@ -1039,8 +1235,10 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE IFGetDeviceID(IF_HANDLE iface, std::uint32_t in
                                                 char* id, std::size_t* size) {
   std::lock_guard lock(g_mutex);
   if (!iface) return GC_ERR_INVALID_HANDLE;
-  if (index != 0) return GC_ERR_INVALID_INDEX;
-  return giveString(nullptr, id, size, "SyntheticCam0");
+  if (interfaceHidden()) return GC_ERR_INVALID_INDEX;
+  const auto device = visibleDeviceAt(index);
+  if (!device) return GC_ERR_INVALID_INDEX;
+  return giveString(nullptr, id, size, deviceId(*device));
 }
 
 TEST_EXPORT GC_ERROR GC_CALLTYPE IFGetDeviceInfo(IF_HANDLE iface, const char* id,
@@ -1049,15 +1247,20 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE IFGetDeviceInfo(IF_HANDLE iface, const char* id
                                                   std::size_t* size) {
   std::lock_guard lock(g_mutex);
   if (!iface) return GC_ERR_INVALID_HANDLE;
-  if (!id || std::string_view(id) != "SyntheticCam0") return GC_ERR_INVALID_ID;
+  if (!id) return GC_ERR_INVALID_ID;
+  const auto deviceIdValue = std::string_view(id);
+  const auto index = deviceIndex(std::string(deviceIdValue));
+  if (!deviceAvailable(index) || deviceId(index) != deviceIdValue) return GC_ERR_INVALID_ID;
   switch (command) {
-    case DEVICE_INFO_ID: return giveString(type, buffer, size, "SyntheticCam0");
+    case DEVICE_INFO_ID: return giveString(type, buffer, size, deviceId(index));
     case DEVICE_INFO_VENDOR: return giveString(type, buffer, size, "OneGen");
     case DEVICE_INFO_MODEL: return giveString(type, buffer, size, "Synthetic Camera");
-    case DEVICE_INFO_TLTYPE: return giveString(type, buffer, size, "Synthetic");
-    case DEVICE_INFO_DISPLAYNAME: return giveString(type, buffer, size, "Synthetic Camera (SyntheticCam0)");
+    case DEVICE_INFO_TLTYPE: return giveString(type, buffer, size, g_interface_type);
+    case DEVICE_INFO_DISPLAYNAME: return giveString(type, buffer, size,
+        "Synthetic Camera (" + deviceId(index) + ")");
     case DEVICE_INFO_USER_DEFINED_NAME: return giveString(type, buffer, size, "");
-    case DEVICE_INFO_SERIAL_NUMBER: return giveString(type, buffer, size, "SYNTH-0001");
+    case DEVICE_INFO_SERIAL_NUMBER: return giveString(type, buffer, size,
+        "SYNTH-" + std::string(index + 1 < 10 ? "000" : "00") + std::to_string(index + 1));
     case DEVICE_INFO_VERSION: return giveString(type, buffer, size, "1.0.0");
     case DEVICE_INFO_TIMESTAMP_FREQUENCY: return give(type, buffer, size, INFO_DATATYPE_UINT64, std::uint64_t{1000000000});
     default: return GC_ERR_INVALID_PARAMETER;
@@ -1069,17 +1272,27 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE IFOpenDevice(IF_HANDLE iface, const char* id,
                                                DEV_HANDLE* device) {
   std::lock_guard lock(g_mutex);
   if (!iface || !device) return GC_ERR_INVALID_PARAMETER;
-  if (!id || std::string_view(id) != "SyntheticCam0") return GC_ERR_INVALID_ID;
-  if (g_device.open) return GC_ERR_RESOURCE_IN_USE;
-  g_device.open = true;
-  *device = new DevHandle;
+  if (!id) return GC_ERR_INVALID_ID;
+  const auto index = deviceIndex(id);
+  if (!deviceAvailable(index) || deviceId(index) != id) return GC_ERR_INVALID_ID;
+  auto& state = deviceData(deviceId(index));
+  if (state.open) return GC_ERR_RESOURCE_IN_USE;
+  state.open = true;
+  *device = new DevHandle{deviceId(index)};
+  return GC_ERR_SUCCESS;
+}
+
+TEST_EXPORT GC_ERROR GC_CALLTYPE IFGetPort(IF_HANDLE iface, PORT_HANDLE* port) {
+  std::lock_guard lock(g_mutex);
+  if (!iface || !port) return GC_ERR_INVALID_PARAMETER;
+  *port = new PortHandle{static_cast<IfHandle*>(iface)->id, "Interface"};
   return GC_ERR_SUCCESS;
 }
 
 TEST_EXPORT GC_ERROR GC_CALLTYPE DevGetPort(DEV_HANDLE device, PORT_HANDLE* port) {
   std::lock_guard lock(g_mutex);
   if (!device || !port) return GC_ERR_INVALID_PARAMETER;
-  *port = new PortHandle;
+  *port = new PortHandle{static_cast<DevHandle*>(device)->id, "Device"};
   return GC_ERR_SUCCESS;
 }
 
@@ -1103,8 +1316,9 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DevOpenDataStream(DEV_HANDLE device, const char
   std::lock_guard lock(g_mutex);
   if (!device || !stream) return GC_ERR_INVALID_PARAMETER;
   if (!id || std::string_view(id) != "stream0") return GC_ERR_INVALID_ID;
-  g_device.stream = StreamData{};
-  *stream = new DsHandle;
+  const auto deviceIdValue = static_cast<DevHandle*>(device)->id;
+  deviceData(deviceIdValue).stream = StreamData{};
+  *stream = new DsHandle{deviceIdValue};
   return GC_ERR_SUCCESS;
 }
 
@@ -1117,9 +1331,11 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DevGetInfo(DEV_HANDLE device, DEVICE_INFO_CMD,
 TEST_EXPORT GC_ERROR GC_CALLTYPE DevClose(DEV_HANDLE device) {
   std::lock_guard lock(g_mutex);
   if (!device) return GC_ERR_INVALID_HANDLE;
+  const auto deviceIdValue = static_cast<DevHandle*>(device)->id;
   delete static_cast<DevHandle*>(device);
-  g_device.open = false;
-  g_device.stream = StreamData{};
+  auto& state = deviceData(deviceIdValue);
+  state.open = false;
+  state.stream = StreamData{};
   return GC_ERR_SUCCESS;
 }
 
@@ -1127,14 +1343,15 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSAllocAndAnnounceBuffer(DS_HANDLE stream, std:
                                                            void* user, BUFFER_HANDLE* buffer) {
   std::lock_guard lock(g_mutex);
   if (!stream || !buffer) return GC_ERR_INVALID_PARAMETER;
-  if (!g_device.open) return GC_ERR_INVALID_HANDLE;
+  auto& state = deviceData(static_cast<DsHandle*>(stream)->id);
+  if (!state.open) return GC_ERR_INVALID_HANDLE;
   auto value = std::make_unique<BufferData>();
   value->storage.assign(size, 0);
   value->capacity = size;
   value->user = user;
   auto* handle = value.get();
-  g_device.stream.buffers.push_back(std::move(value));
-  ++g_device.stream.announced;
+  state.stream.buffers.push_back(std::move(value));
+  ++state.stream.announced;
   *buffer = handle;
   return GC_ERR_SUCCESS;
 }
@@ -1149,7 +1366,7 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSQueueBuffer(DS_HANDLE stream, BUFFER_HANDLE b
   value->ready = false;
   value->size_filled = 0;
   value->data_size = 0;
-  g_device.stream.input.push_back(value);
+  deviceData(static_cast<DsHandle*>(stream)->id).stream.input.push_back(value);
   g_condition.notify_all();
   return GC_ERR_SUCCESS;
 }
@@ -1157,27 +1374,27 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSQueueBuffer(DS_HANDLE stream, BUFFER_HANDLE b
 TEST_EXPORT GC_ERROR GC_CALLTYPE DSFlushQueue(DS_HANDLE stream, ACQ_QUEUE_TYPE operation) {
   std::lock_guard lock(g_mutex);
   if (!stream) return GC_ERR_INVALID_HANDLE;
+  auto& state = deviceData(static_cast<DsHandle*>(stream)->id).stream;
   if (operation == ACQ_QUEUE_ALL_TO_INPUT || operation == ACQ_QUEUE_UNQUEUED_TO_INPUT) {
-    for (auto& buffer : g_device.stream.buffers) {
+    for (auto& buffer : state.buffers) {
       if (buffer->revoked) continue;
       buffer->ready = false;
       buffer->queued = true;
-      if (std::find(g_device.stream.input.begin(), g_device.stream.input.end(), buffer.get())
-          == g_device.stream.input.end())
-        g_device.stream.input.push_back(buffer.get());
+      if (std::find(state.input.begin(), state.input.end(), buffer.get()) == state.input.end())
+        state.input.push_back(buffer.get());
     }
   } else if (operation == ACQ_QUEUE_ALL_DISCARD || operation == ACQ_QUEUE_OUTPUT_DISCARD) {
-    g_device.stream.input.clear();
-    for (auto& buffer : g_device.stream.buffers) {
+    state.input.clear();
+    for (auto& buffer : state.buffers) {
       buffer->queued = false;
       buffer->ready = false;
     }
   } else if (operation == ACQ_QUEUE_INPUT_TO_OUTPUT) {
-    for (auto& buffer : g_device.stream.buffers) {
+    for (auto& buffer : state.buffers) {
       buffer->queued = false;
       buffer->ready = true;
     }
-    g_device.stream.input.clear();
+    state.input.clear();
   } else {
     return GC_ERR_INVALID_PARAMETER;
   }
@@ -1189,7 +1406,11 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSStartAcquisition(DS_HANDLE stream, ACQ_START_
                                                      std::uint64_t count) {
   std::lock_guard lock(g_mutex);
   if (!stream) return GC_ERR_INVALID_HANDLE;
-  auto& state = g_device.stream;
+  const auto device = static_cast<DsHandle*>(stream)->id;
+  if (startFailure(device)) return GC_ERR_ERROR;
+  const auto delay = parseUnsigned(std::getenv("ONEGEN_SYNTHETIC_ACQUISITION_DELAY_MS"), 0);
+  if (delay) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+  auto& state = deviceData(device).stream;
   state.grabbing = true;
   state.finite = count != GENTL_INFINITE;
   state.remaining = state.finite ? count : 0;
@@ -1205,10 +1426,11 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSStartAcquisition(DS_HANDLE stream, ACQ_START_
 TEST_EXPORT GC_ERROR GC_CALLTYPE DSStopAcquisition(DS_HANDLE stream, ACQ_STOP_FLAGS) {
   std::lock_guard lock(g_mutex);
   if (!stream) return GC_ERR_INVALID_HANDLE;
-  g_device.stream.grabbing = false;
-  g_device.stream.finite = false;
-  g_device.stream.remaining = 0;
-  g_device.stream.trigger_pending = 0;
+  auto& state = deviceData(static_cast<DsHandle*>(stream)->id).stream;
+  state.grabbing = false;
+  state.finite = false;
+  state.remaining = 0;
+  state.trigger_pending = 0;
   g_condition.notify_all();
   return GC_ERR_SUCCESS;
 }
@@ -1218,7 +1440,7 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSGetInfo(DS_HANDLE stream, STREAM_INFO_CMD com
                                             std::size_t* size) {
   std::lock_guard lock(g_mutex);
   if (!stream) return GC_ERR_INVALID_HANDLE;
-  const auto& state = g_device.stream;
+  const auto& state = deviceData(static_cast<DsHandle*>(stream)->id).stream;
   switch (command) {
     case STREAM_INFO_ID: return giveString(type, buffer, size, state.id);
     case STREAM_INFO_NUM_DELIVERED: return give(type, buffer, size, INFO_DATATYPE_UINT64, state.delivered);
@@ -1245,7 +1467,8 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSGetBufferID(DS_HANDLE stream, std::uint32_t i
   std::lock_guard lock(g_mutex);
   if (!stream || !buffer) return GC_ERR_INVALID_PARAMETER;
   std::uint32_t position = 0;
-  for (auto& candidate : g_device.stream.buffers) {
+  auto& state = deviceData(static_cast<DsHandle*>(stream)->id).stream;
+  for (auto& candidate : state.buffers) {
     if (candidate->revoked) continue;
     if (position++ == index) {
       *buffer = candidate.get();
@@ -1258,8 +1481,9 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSGetBufferID(DS_HANDLE stream, std::uint32_t i
 TEST_EXPORT GC_ERROR GC_CALLTYPE DSClose(DS_HANDLE stream) {
   std::lock_guard lock(g_mutex);
   if (!stream) return GC_ERR_INVALID_HANDLE;
+  auto& state = deviceData(static_cast<DsHandle*>(stream)->id);
   delete static_cast<DsHandle*>(stream);
-  g_device.stream = StreamData{};
+  state.stream = StreamData{};
   g_condition.notify_all();
   return GC_ERR_SUCCESS;
 }
@@ -1268,19 +1492,18 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSRevokeBuffer(DS_HANDLE stream, BUFFER_HANDLE 
                                                  void** base, void** user) {
   std::lock_guard lock(g_mutex);
   if (!stream || !buffer) return GC_ERR_INVALID_PARAMETER;
+  auto& state = deviceData(static_cast<DsHandle*>(stream)->id).stream;
   auto* value = static_cast<BufferData*>(buffer);
   if (base) *base = value->storage.data();
   if (user) *user = value->user;
   value->revoked = true;
   value->queued = false;
   value->ready = false;
-  g_device.stream.input.erase(
-      std::remove(g_device.stream.input.begin(), g_device.stream.input.end(), value),
-      g_device.stream.input.end());
-  g_device.stream.buffers.erase(
-      std::remove_if(g_device.stream.buffers.begin(), g_device.stream.buffers.end(),
+  state.input.erase(std::remove(state.input.begin(), state.input.end(), value), state.input.end());
+  state.buffers.erase(
+      std::remove_if(state.buffers.begin(), state.buffers.end(),
                      [value](const auto& item) { return item.get() == value; }),
-      g_device.stream.buffers.end());
+      state.buffers.end());
   g_condition.notify_all();
   return GC_ERR_SUCCESS;
 }

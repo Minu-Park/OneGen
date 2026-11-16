@@ -474,6 +474,11 @@ void Camera::open_impl(std::string_view query, std::string_view producer, std::s
 
   auto& g = hit->producer->api;
   GenTL::IF_HANDLE hif = ensure_interface(*hit->producer, hit->if_id);
+  // Network and USB Interfaces claim per camera before the Device opens.
+  std::shared_ptr<void> camera_claim;
+  const auto interfaceFacts = interface_info(*hit->producer, hit->if_id);
+  if (interfaceClaimScope(interfaceFacts.tl_type) == InterfaceClaimScope::Camera && og->device_claim)
+    camera_claim = og->device_claim(interfaceFacts, hit->info);
 
   GenTL::DEVICE_ACCESS_FLAGS modes[] = {GenTL::DEVICE_ACCESS_EXCLUSIVE,
                                         GenTL::DEVICE_ACCESS_CONTROL};
@@ -497,7 +502,12 @@ void Camera::open_impl(std::string_view query, std::string_view producer, std::s
   try {
     try { impl_->load_module(impl_->system_features, g, g.tl, "System/TL"); } catch (...) {}
     timing.mark("System/TL-XML");
-    try { impl_->load_module(impl_->interface_features, g, hif, "Interface"); } catch (...) {}
+    try {
+      GenTL::PORT_HANDLE interface_port = nullptr;
+      if (!g.IFGetPort) throw Error("The producer does not export IFGetPort.");
+      g.check(g.IFGetPort(hif, &interface_port), "IFGetPort");
+      impl_->load_module(impl_->interface_features, g, interface_port, "Interface");
+    } catch (...) {}
     timing.mark("Interface-XML");
     try { impl_->load_module(impl_->device_features, g, hdev, "Device"); } catch (...) {}
     timing.mark("Device-XML");
@@ -529,6 +539,7 @@ void Camera::open_impl(std::string_view query, std::string_view producer, std::s
   impl_->open_key = key;
   impl_->opened = true;
   og->open_keys.insert(key);
+  if (camera_claim) hit->producer->camera_claims[key] = std::move(camera_claim);
   ++hit->producer->active_devices[hit->if_id];
   stage_log_debug(
       "device lifecycle: event=DeviceOpen device=%s interface=%s cti=%s interfaceDevices=%u",
@@ -649,6 +660,7 @@ void Camera::close() {
   if (impl_->g && impl_->hdev) impl_->g->DevClose(impl_->hdev);
   og->open_keys.erase(impl_->open_key);
   for (auto& producer : og->producers) if (producer->path.string() == impl_->info.cti_path) {
+    producer->camera_claims.erase(impl_->open_key);
     auto& count = producer->active_devices[impl_->info.interface_id];
     if (count) --count;
     stage_log_debug(

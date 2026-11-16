@@ -21,7 +21,9 @@ struct Producer {
   std::set<std::string> pinned;
   std::map<std::string, unsigned int> active_devices;
   OneGen::InterfaceClaimFn claim;
+  OneGen::DeviceClaimFn device_claim;
   std::map<std::string, std::shared_ptr<void>> claims;
+  std::map<std::string, std::shared_ptr<void>> camera_claims;
   std::map<std::string, std::unique_ptr<NodeMap>> interface_maps;
 };
 
@@ -49,6 +51,7 @@ std::string gentl_string(Gentl& g, GenTL::IF_HANDLE hif, const char* devid,
 
 struct OneGen::Impl {
   OneGen::InterfaceClaimFn claim;
+  OneGen::DeviceClaimFn device_claim;
   std::recursive_mutex mu;
   std::vector<std::unique_ptr<Producer>> producers;
   std::vector<std::unique_ptr<Camera>> cameras;

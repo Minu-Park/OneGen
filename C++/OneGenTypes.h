@@ -6,6 +6,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace onegen {
@@ -36,6 +37,52 @@ struct InterfaceInfo {
   std::string vendor;
   std::string tl_type;
 };
+
+/** @brief Declares how one GenTL Interface is claimed across sessions. */
+enum class InterfaceClaimScope {
+  /** A frame grabber board: one exclusive claim per Interface, inherited by its cameras. */
+  Interface,
+  /** A network or USB Interface: one claim per camera; the Interface itself is shared. */
+  Camera,
+  /** An unlabelled Interface: treated as exclusive and reported with its reason. */
+  Unknown,
+};
+
+/** @brief Derives the claim scope from the producer's InterfaceType label.
+ *  @note Frame grabbers (CoaXPress, CameraLink) are exclusive boards; GigE Vision and
+ *        USB3 Vision claim per camera when one is opened. Any other label is unknown and
+ *        therefore exclusive.
+ */
+inline InterfaceClaimScope interfaceClaimScope(std::string_view type) {
+  std::string label;
+  label.reserve(type.size());
+  for (const char value : type) {
+    if (value >= 'a' && value <= 'z') label.push_back(static_cast<char>(value - 'a' + 'A'));
+    else if ((value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9'))
+      label.push_back(value);
+  }
+  const auto contains = [&label](std::string_view token) {
+    return label.find(token) != std::string::npos;
+  };
+  if (contains("COAXPRESS") || contains("CXP") || label == "CL" || contains("CAMERALINK"))
+    return InterfaceClaimScope::Interface;
+  if (contains("GIGE") || contains("GEV") || contains("USB3") || contains("U3V"))
+    return InterfaceClaimScope::Camera;
+  return InterfaceClaimScope::Unknown;
+}
+
+/** @brief Reports one short reason for the claim scope decision. */
+inline std::string interfaceClaimReason(InterfaceClaimScope scope, std::string_view type) {
+  switch (scope) {
+    case InterfaceClaimScope::Interface:
+      return "The frame grabber Interface is one exclusive board; its cameras inherit the claim.";
+    case InterfaceClaimScope::Camera:
+      return "Network and USB Interfaces claim per camera; the Interface itself is shared.";
+    case InterfaceClaimScope::Unknown:
+      return "The Interface type is unknown (" + std::string(type) + "); it is treated as exclusive.";
+  }
+  return {};
+}
 
 struct DataStreamInfo {
   std::uint32_t index = 0;

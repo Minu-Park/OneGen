@@ -130,11 +130,13 @@ public:
   /**
    * @param cti_root Producer search root; empty uses the GenTL environment path.
    * @param probe_timeout Initial-discovery budget per producer, scanned in one-second slices.
-   * @param claim Consumer-owned resource claim taken before any interface is opened.
+   * @param claim Consumer-owned resource claim taken before an exclusive Interface is opened.
+   * @param camera_claim Consumer-owned claim taken before one camera on a per-camera Interface opens.
    */
   explicit Coordinator(std::filesystem::path cti_root = {},
                        std::chrono::milliseconds probe_timeout = std::chrono::milliseconds{10000},
-                       OneGen::InterfaceClaimFn claim = {});
+                       OneGen::InterfaceClaimFn claim = {},
+                       OneGen::DeviceClaimFn camera_claim = {});
   ~Coordinator();
   Coordinator(const Coordinator&) = delete;
   Coordinator& operator=(const Coordinator&) = delete;
@@ -173,6 +175,7 @@ private:
   std::filesystem::path cti_root_;
   std::chrono::milliseconds probe_timeout_;
   OneGen::InterfaceClaimFn claim_;
+  OneGen::DeviceClaimFn camera_claim_;
   std::optional<std::vector<std::filesystem::path>> producer_files_;
   std::shared_ptr<Registry> registry_;
   std::mutex discovery_mutex_;

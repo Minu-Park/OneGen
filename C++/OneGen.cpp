@@ -126,6 +126,7 @@ void close_interfaces(Producer& producer) {
         producer.path.string().c_str(), producer.interfaces.size());
   producer.interfaces.clear();
   producer.claims.clear();
+  producer.camera_claims.clear();
   producer.pinned.clear();
 }
 
@@ -171,7 +172,10 @@ InterfaceInfo interface_info(Producer& producer, const std::string& id) {
 
 GenTL::IF_HANDLE ensure_interface(Producer& producer, const std::string& id) {
   if (const auto found = producer.interfaces.find(id); found != producer.interfaces.end()) return found->second;
-  auto claim = producer.claim ? producer.claim(interface_info(producer, id)) : std::shared_ptr<void>{};
+  const auto info = interface_info(producer, id);
+  // Network and USB Interfaces claim per camera, so opening the shared Interface takes no board claim.
+  auto claim = producer.claim && interfaceClaimScope(info.tl_type) != InterfaceClaimScope::Camera
+      ? producer.claim(info) : std::shared_ptr<void>{};
   GenTL::IF_HANDLE handle = nullptr;
   try { producer.api.check(producer.api.TLOpenInterface(producer.api.tl, id.c_str(), &handle), "TLOpenInterface"); }
   catch (const std::exception& error) {
@@ -291,6 +295,7 @@ void OneGen::loadCti(const std::filesystem::path& cti) {
   prod->path = canon;
   prod->api.load(canon);
   prod->claim = impl_->claim;
+  prod->device_claim = impl_->device_claim;
   impl_->producers.push_back(std::move(prod));
 }
 
@@ -301,6 +306,16 @@ void OneGen::set_interface_claim_callback(InterfaceClaimFn claim) {
   impl_->claim = claim;
   for (auto& producer : impl_->producers) {
     producer->claim = claim;
+  }
+}
+
+void OneGen::set_device_claim_callback(DeviceClaimFn claim) {
+  std::lock_guard<std::recursive_mutex> lk(impl_->mu);
+  for (const auto& producer : impl_->producers)
+    if (!producer->interfaces.empty()) throw Error("Set resource claims before interface discovery.");
+  impl_->device_claim = claim;
+  for (auto& producer : impl_->producers) {
+    producer->device_claim = claim;
   }
 }
 
@@ -415,7 +430,10 @@ NodeMap& OneGen::interface_features(const InterfaceInfo& info) {
   auto& map = producer.interface_maps[info.id];
   if (!map) {
     auto loaded = std::make_unique<NodeMap>();
-    load_remote_nodemap(*loaded, producer.api, handle->second, "Interface");
+    if (!producer.api.IFGetPort) throw Error("The producer does not export IFGetPort.");
+    GenTL::PORT_HANDLE port = nullptr;
+    producer.api.check(producer.api.IFGetPort(handle->second, &port), "IFGetPort");
+    load_remote_nodemap(*loaded, producer.api, port, "Interface");
     map = std::move(loaded);
   }
   return *map;

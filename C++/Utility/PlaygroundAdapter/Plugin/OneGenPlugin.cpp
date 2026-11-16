@@ -167,11 +167,16 @@ public:
   OneGenPluginSession(std::shared_ptr<onegen::producer::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
                       std::shared_ptr<onegen::producer::StartupDiscovery> startup, QString settingsFile,
-                      std::function<void(QOneGenDeviceWidget*)> registerWidget, RetainScan retain)
+                      std::function<void(QOneGenDeviceWidget*)> registerWidget, RetainScan retain,
+                      OneGenSourceController::ResourceClaimFn cameraClaim = {})
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
         startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
         controller_(std::make_unique<OneGenSourceController>()), register_widget_(std::move(registerWidget)),
-        retain_scan_(std::move(retain)) { controller_->configureControl(coordinator_, devices_); }
+        retain_scan_(std::move(retain))
+  {
+    controller_->configureControl(coordinator_, devices_);
+    if (cameraClaim) controller_->setResourceClaim(std::move(cameraClaim));
+  }
 
   ~OneGenPluginSession() override
   {
@@ -328,10 +333,21 @@ public:
       if (!producer_coordinator) return {};
       std::shared_ptr<onegen::producer::StartupDiscovery> startup;
       { std::lock_guard lock(mutex_); startup = startup_; }
+      auto* claims = claims_.load(std::memory_order_acquire);
       return std::make_unique<OneGenPluginSession>(
           producer_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
           std::move(startup), settings_file_, [this](auto* widget) { widgets_.push_back(widget); },
-          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); });
+          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); },
+          [claims](const std::string& key, std::string& claimError) -> std::shared_ptr<void> {
+            if (!claims) {
+              claimError = "The host did not provide hardware resource claims.";
+              return {};
+            }
+            QString error;
+            auto claim = claims->claimResource(QString::fromStdString(key), &error);
+            if (!claim) claimError = error.toStdString();
+            return claim;
+          });
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
       return {};
@@ -420,17 +436,44 @@ private:
     if (!coordinator_) {
       coordinator_ = std::make_shared<onegen::producer::Coordinator>(
           std::filesystem::path{}, std::chrono::milliseconds{10000},
-          [this](const onegen::InterfaceInfo& info) { return claimInterface(info); });
+          [this](const onegen::InterfaceInfo& info) { return claimInterface(info); },
+          [this](const onegen::InterfaceInfo& info, const onegen::DeviceInfo& device) {
+            return claimCamera(info, device);
+          });
     }
     return coordinator_;
   }
 
+  /** @brief Claims one exclusive Interface; network and USB Interfaces are claimed per camera. */
   std::shared_ptr<void> claimInterface(const onegen::InterfaceInfo& info)
   {
-    const QString key = playgroundSisoBoardResourceKeyFromInterfaceId(QString::fromStdString(info.id));
-    if (key.isEmpty()) return {};
+    const auto scope = onegen::interfaceClaimScope(info.tl_type);
+    if (scope == onegen::InterfaceClaimScope::Camera) return {};
     auto* claims = claims_.load(std::memory_order_acquire);
+    QString key = playgroundSisoBoardResourceKeyFromInterfaceId(QString::fromStdString(info.id));
+    // A board without a Siso serial still needs one claim per Interface, including an unknown type.
+    if (key.isEmpty() && claims)
+      key = QStringLiteral("onegen-interface:") + QString::fromStdString(info.cti_path)
+          + QLatin1Char('|') + QString::fromStdString(info.id);
+    if (key.isEmpty()) return {};
     if (!claims) throw std::runtime_error("The host did not provide hardware resource claims.");
+    QString error;
+    auto claim = claims->claimResource(key, &error);
+    if (!claim) throw std::runtime_error(error.toStdString());
+    return claim;
+  }
+
+  /** @brief Claims one camera on a network or USB Interface before its Device opens. */
+  std::shared_ptr<void> claimCamera(const onegen::InterfaceInfo& info,
+      const onegen::DeviceInfo& device)
+  {
+    if (onegen::interfaceClaimScope(info.tl_type) != onegen::InterfaceClaimScope::Camera)
+      return {};
+    auto* claims = claims_.load(std::memory_order_acquire);
+    if (!claims) return {};
+    const QString key = QStringLiteral("onegen-camera:") + QString::fromStdString(info.cti_path)
+        + QLatin1Char('|') + QString::fromStdString(info.id) + QLatin1Char('|')
+        + QString::fromStdString(device.id);
     QString error;
     auto claim = claims->claimResource(key, &error);
     if (!claim) throw std::runtime_error(error.toStdString());

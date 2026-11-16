@@ -51,13 +51,40 @@ OneGenSourceController::OneGenSourceController(QObject* parent)
 
 OneGenSourceController::~OneGenSourceController()
 {
-  tool_work_.waitForFinished();
+  drainControl();
+  std::vector<OneGenSourceController*> children;
+  {
+    std::lock_guard lock(mutex_);
+    for (const auto& [id, child] : children_) children.push_back(child.controller.get());
+  }
+  for (auto* child : children) child->drainControl();
   try { closeDevice(); } catch (...) {}
   try { stop(); } catch (...) {}
   setLease(nullptr);
   for (auto& [id, child] : children_) child.controller->setLease(nullptr);
   children_.clear();
   owned_lease_.reset();
+  // An explicit Interface is pinned in the producer; release it with this session.
+  try {
+    if (interface_ && coordinator_) coordinator_->close_interface(interface_->info);
+  } catch (...) {}
+}
+
+void OneGenSourceController::drainControl()
+{
+  std::vector<QFuture<void>> futures;
+  {
+    std::lock_guard lock(work_mutex_);
+    futures.swap(admitted_work_);
+  }
+  for (auto& future : futures) future.waitForFinished();
+  tool_work_.waitForFinished();
+}
+
+void OneGenSourceController::setResourceClaim(ResourceClaimFn claim)
+{
+  std::lock_guard lock(mutex_);
+  resource_claim_fn_ = std::move(claim);
 }
 
 void OneGenSourceController::configureControl(std::shared_ptr<onegen::producer::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices) {
@@ -99,6 +126,22 @@ const onegen::FeatureNode* OneGenSourceController::findFeature(const onegen::Fea
   return nullptr;
 }
 
+DeviceConnectionAvailability OneGenSourceController::modeAvailability(
+    const std::vector<std::pair<std::string, onegen::FeatureNode>>& features,
+    const char* mode, const char* label) {
+  const onegen::FeatureNode* node = nullptr;
+  for (const auto& [module, tree] : features)
+    if (module == "Remote Device") node = findFeature(tree, "AcquisitionMode");
+  if (!node) return {false, "The device has no AcquisitionMode feature."};
+  if (!node->writable)
+    return {false, "AcquisitionMode is not writable in the device's current state."};
+  if (node->kind != onegen::NodeKind::Enumeration)
+    return {false, "AcquisitionMode is not an enumeration."};
+  if (std::find(node->enum_entries.begin(), node->enum_entries.end(), mode) == node->enum_entries.end())
+    return {false, std::string("AcquisitionMode does not offer ") + label + "."};
+  return {true, {}};
+}
+
 DeviceConnectionAvailability OneGenSourceController::singleAvailability() const {
   std::vector<const OneGenSourceController*> candidates;
   {
@@ -109,17 +152,7 @@ DeviceConnectionAvailability OneGenSourceController::singleAvailability() const 
   for (const auto* candidate : candidates) {
     std::lock_guard lock(candidate->mutex_);
     if (candidate->control_features_.empty()) continue;
-    const onegen::FeatureNode* mode = nullptr;
-    for (const auto& [module, tree] : candidate->control_features_)
-      if (module == "Remote Device") mode = findFeature(tree, "AcquisitionMode");
-    if (!mode) return {false, "The device has no AcquisitionMode feature."};    if (!mode->writable)
-      return {false, "AcquisitionMode is not writable in the device's current state."};
-    if (mode->kind != onegen::NodeKind::Enumeration)
-      return {false, "AcquisitionMode is not an enumeration."};
-    if (std::find(mode->enum_entries.begin(), mode->enum_entries.end(), "SingleFrame")
-        == mode->enum_entries.end())
-      return {false, "AcquisitionMode does not offer SingleFrame."};
-    return {true, {}};
+    return modeAvailability(candidate->control_features_, "SingleFrame", "SingleFrame");
   }
   return {false, "Connect the device to observe AcquisitionMode."};
 }
@@ -198,7 +231,18 @@ void OneGenSourceController::closeDevice() {
   stopLive();
   lease->close();
   setLease(nullptr);
-  { std::lock_guard lock(mutex_); owned_lease_.reset(); connection_id_.clear(); control_features_.clear(); control_streams_.clear(); }
+  {
+    std::lock_guard lock(mutex_);
+    owned_lease_.reset();
+    connection_id_.clear();
+    parent_connection_id_.clear();
+    resource_claim_.reset();
+    discovery_error_.clear();
+    control_features_.clear();
+    control_streams_.clear();
+    std::lock_guard errors(error_state_->mutex);
+    error_state_->message.clear();
+  }
   emit controlChanged();
 }
 
@@ -346,11 +390,16 @@ void OneGenSourceController::bindLease()
         GraphicsFrameCallbackGate::Lease callback(token);
         if (callback) deliver(source, sourceName);
       });
-  lease_->set_error_callback([model = info.model, serial = info.serial](const std::string_view error) {
+  lease_->set_error_callback([this, errors = error_state_, model = info.model, serial = info.serial](
+                                 const std::string_view error) {
+    const auto message = QString::fromLocal8Bit(error.data(), static_cast<qsizetype>(error.size()));
     qWarning().noquote()
         << QStringLiteral("[GenICam] camera=%1 serial=%2; cause=%3")
-               .arg(QString::fromStdString(model), QString::fromStdString(serial),
-                    QString::fromLocal8Bit(error.data(), static_cast<qsizetype>(error.size())));
+               .arg(QString::fromStdString(model), QString::fromStdString(serial), message);
+    {
+      std::lock_guard lock(errors->mutex);
+      errors->message = message.toStdString();
+    }
   });
 }
 
@@ -433,9 +482,31 @@ void OneGenSourceController::configureFrameStorage(
 void OneGenSourceController::start()
 {
   if (QThread::currentThread() == thread() && external_busy_.load()) throw std::runtime_error("Device control is busy.");
-  std::vector<OneGenSourceController*> children;
-  { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
-  for (auto* child : children) child->start();
+  {
+    std::lock_guard lock(mutex_);
+    operation_failures_.clear();
+  }
+  std::vector<std::pair<std::string, OneGenSourceController*>> children;
+  {
+    std::lock_guard lock(mutex_);
+    for (const auto& [id, child] : children_) children.emplace_back(id, child.controller.get());
+  }
+  for (const auto& [id, child] : children) {
+    unsigned int index = 0;
+    {
+      std::lock_guard lock(mutex_);
+      if (const auto found = children_.find(id); found != children_.end()) index = found->second.index;
+    }
+    try {
+      child->start();
+    } catch (const std::exception& error) {
+      std::lock_guard lock(mutex_);
+      operation_failures_.push_back({id, index, error.what()});
+    } catch (...) {
+      std::lock_guard lock(mutex_);
+      operation_failures_.push_back({id, index, "The camera did not start."});
+    }
+  }
   onegen::producer::Lease* lease = nullptr;
   {
     std::unique_lock poolLock(direct_pool_mutex_);
@@ -471,7 +542,32 @@ void OneGenSourceController::start()
 
 void OneGenSourceController::stop()
 {
-  try { stopLive(); }
+  {
+    std::lock_guard lock(mutex_);
+    operation_failures_.clear();
+  }
+  std::vector<std::pair<std::string, OneGenSourceController*>> children;
+  {
+    std::lock_guard lock(mutex_);
+    for (const auto& [id, child] : children_) children.emplace_back(id, child.controller.get());
+  }
+  for (const auto& [id, child] : children) {
+    unsigned int index = 0;
+    {
+      std::lock_guard lock(mutex_);
+      if (const auto found = children_.find(id); found != children_.end()) index = found->second.index;
+    }
+    try {
+      child->stopLive();
+    } catch (const std::exception& error) {
+      std::lock_guard lock(mutex_);
+      operation_failures_.push_back({id, index, error.what()});
+    } catch (...) {
+      std::lock_guard lock(mutex_);
+      operation_failures_.push_back({id, index, "The camera did not stop."});
+    }
+  }
+  try { stopOwnAcquisition(); }
   catch (const std::exception& error) { qWarning() << "[GenICam] stop unavailable:" << error.what(); }
   catch (...) { qWarning() << "[GenICam] stop failed."; }
 }
@@ -481,7 +577,22 @@ void OneGenSourceController::stopLive()
   if (QThread::currentThread() == thread() && external_busy_.load()) throw std::runtime_error("Device control is busy.");
   std::vector<OneGenSourceController*> children;
   { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
-  for (auto* child : children) child->stopLive();
+  std::exception_ptr first;
+  for (auto* child : children) try {
+    child->stopLive();
+  } catch (...) {
+    if (!first) first = std::current_exception();
+  }
+  try {
+    stopOwnAcquisition();
+  } catch (...) {
+    if (!first) first = std::current_exception();
+  }
+  if (first) std::rethrow_exception(first);
+}
+
+void OneGenSourceController::stopOwnAcquisition()
+{
   onegen::producer::Lease* lease = nullptr;
   {
     std::lock_guard lock(mutex_);
@@ -519,6 +630,12 @@ bool OneGenSourceController::isGrabbing() const {
   std::lock_guard lock(mutex_);
   for (const auto& [id, child] : children_) if (child.controller->isGrabbing()) return true;
   return grabbing_;
+}
+
+std::vector<SourceOperationFailure> OneGenSourceController::sourceOperationFailures() const
+{
+  std::lock_guard lock(mutex_);
+  return operation_failures_;
 }
 
 std::optional<SourceRuntimeDiagnostics> OneGenSourceController::sourceRuntimeDiagnostics(unsigned sourceIndex) const {
@@ -787,14 +904,64 @@ namespace {
 std::string deviceKey(const onegen::DeviceInfo& device) {
   return device.cti_path + '\0' + device.interface_id + '\0' + device.id;
 }
+std::string interfaceKey(const onegen::DeviceInfo& device) {
+  return device.cti_path + '\0' + device.interface_id;
+}
+std::string interfaceKey(const onegen::InterfaceInfo& info) {
+  return info.cti_path + '\0' + info.id;
+}
 QString targetId(const std::string& key) {
   return QString::fromLatin1(QByteArray(key.data(), qsizetype(key.size())).toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
 }
-DeviceConnectionTargets copiedTargets(const std::vector<onegen::DeviceInfo>& inventory) {
+std::optional<std::vector<std::string>> decodeTargetId(const std::string& value) {
+  const auto decoded = QByteArray::fromBase64(QByteArray::fromStdString(value),
+      QByteArray::Base64UrlEncoding);
+  if (decoded.isEmpty()) return std::nullopt;
+  std::vector<std::string> parts;
+  const std::string text = decoded.toStdString();
+  std::size_t begin = 0;
+  while (true) {
+    const auto end = text.find('\0', begin);
+    parts.push_back(text.substr(begin, end == std::string::npos ? std::string::npos : end - begin));
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+  if (parts.size() != 2 && parts.size() != 3) return std::nullopt;
+  if (std::any_of(parts.begin(), parts.end(), [](const auto& part) { return part.empty(); }))
+    return std::nullopt;
+  return parts;
+}
+DeviceConnectionInterfaceInfo publishedInterfaceInfo(const onegen::InterfaceInfo& info) {
+  const auto scope = onegen::interfaceClaimScope(info.tl_type);
+  return {info.tl_type, scope != onegen::InterfaceClaimScope::Camera,
+      onegen::interfaceClaimReason(scope, info.tl_type)};
+}
+onegen::InterfaceInfo fallbackInterfaceInfo(const onegen::DeviceInfo& device) {
+  return {device.interface_id, device.cti_path, device.interface_id, {}, device.tl_type};
+}
+DeviceConnectionTargets copiedTargets(const std::vector<onegen::DeviceInfo>& inventory,
+    const std::vector<onegen::InterfaceInfo>& interfaces) {
+  std::map<std::string, onegen::InterfaceInfo> infoByKey;
+  for (const auto& info : interfaces) infoByKey[interfaceKey(info)] = info;
+  std::vector<onegen::DeviceInfo> sorted = inventory;
+  std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) {
+    return std::tie(left.cti_path, left.interface_id, left.id)
+        < std::tie(right.cti_path, right.interface_id, right.id);
+  });
+  for (const auto& device : sorted) infoByKey.try_emplace(interfaceKey(device), fallbackInterfaceInfo(device));
   DeviceConnectionTargets result;
-  for (const auto& d : inventory) result.targets.push_back({targetId(deviceKey(d)).toStdString(),
-      d.display_name.empty() ? d.id : d.display_name,
-      {{"deviceId", d.id}, {"producer", d.cti_path}, {"interfaceId", d.interface_id}}});
+  for (const auto& device : sorted) {
+    result.targets.push_back({targetId(deviceKey(device)).toStdString(),
+        device.display_name.empty() ? device.id : device.display_name,
+        {{"deviceId", device.id}, {"producer", device.cti_path}, {"interfaceId", device.interface_id}},
+        DeviceConnectionTargetKind::Device, targetId(interfaceKey(device)).toStdString(), std::nullopt});
+  }
+  for (const auto& [key, info] : infoByKey) {
+    result.targets.push_back({targetId(key).toStdString(),
+        info.display_name.empty() ? info.id : info.display_name,
+        {{"producer", info.cti_path}, {"interfaceId", info.id}},
+        DeviceConnectionTargetKind::Interface, {}, publishedInterfaceInfo(info)});
+  }
   return result;
 }
 DeviceConnectionResult refused(DeviceConnectionError error, const char* message) { return {error, message}; }
@@ -802,27 +969,155 @@ DeviceConnectionResult refused(DeviceConnectionError error, const char* message)
 
 DeviceConnectionState OneGenSourceController::connectionState() const {
   std::lock_guard lock(mutex_);
+  if (interface_) return interfaceStateLocked();
   if (owned_lease_) {
     const auto& info = owned_lease_->info();
     const bool connected = owned_lease_->alive();
-    return {connected, connected && grabbing_.load(), connected ? connection_id_.toStdString() : std::string(),
-        connected ? targetId(deviceKey(info)).toStdString() : std::string(),
-        connected ? (info.display_name.empty() ? info.id : info.display_name) : std::string(), delivered_frames_.load()};
+    DeviceConnectionState state;
+    state.connected = connected;
+    state.live = connected && grabbing_.load();
+    state.connectionId = connected ? connection_id_.toStdString() : std::string();
+    state.targetId = connected ? targetId(deviceKey(info)).toStdString() : std::string();
+    state.displayName = connected ? (info.display_name.empty() ? info.id : info.display_name) : std::string();
+    state.deliveredFrames = delivered_frames_.load();
+    DeviceConnectionAvailabilitySet capabilities;
+    const DeviceConnectionAvailability availability = coordinator_ ? DeviceConnectionAvailability{true, {}}
+        : DeviceConnectionAvailability{false, "Device control has no coordinator."};
+    capabilities.targets = capabilities.discover = capabilities.connect = capabilities.disconnect = availability;
+    capabilities.single = modeAvailability(control_features_, "SingleFrame", "SingleFrame");
+    capabilities.live = modeAvailability(control_features_, "Continuous", "Continuous");
+    state.capabilities = capabilities;
+    return state;
   }
-  for (const auto& [id, child] : children_) {
-    const auto state = child.controller->connectionState();
+  std::vector<const Child*> cameras;
+  for (const auto& [id, child] : children_) cameras.push_back(&child);
+  std::sort(cameras.begin(), cameras.end(),
+      [](const Child* left, const Child* right) { return left->index < right->index; });
+  for (const auto* child : cameras) {
+    const auto iterator = std::find_if(children_.begin(), children_.end(),
+        [child](const auto& entry) { return &entry.second == child; });
+    if (iterator == children_.end()) continue;
+    auto state = cameraStateLocked(iterator->first, *child);
     if (state.connected) return state;
   }
   return {false, false, {}, {}, {}, delivered_frames_.load()};
 }
 
+DeviceConnectionState OneGenSourceController::interfaceStateLocked() const {
+  DeviceConnectionState state;
+  if (!interface_) return state;
+  state.connected = true;
+  state.connectionId = interface_->connectionId.toStdString();
+  state.targetId = targetId(interfaceKey(interface_->info)).toStdString();
+  state.displayName = interface_->info.display_name.empty() ? interface_->info.id
+                                                           : interface_->info.display_name;
+  state.kind = DeviceConnectionTargetKind::Interface;
+  state.error = interface_->error;
+  state.capabilities = interfaceAvailability();
+  state.implicitlyOpened = interface_->implicit;
+  state.interfaceInfo = publishedInterfaceInfo(interface_->info);
+  return state;
+}
+
+DeviceConnectionState OneGenSourceController::cameraStateLocked(
+    const std::string& key, const Child& child) const {
+  DeviceConnectionState state;
+  const auto& controller = *child.controller;
+  std::lock_guard lock(controller.mutex_);
+  if (!controller.owned_lease_ || !controller.owned_lease_->alive()) return state;
+  const auto& info = controller.owned_lease_->info();
+  state.connected = true;
+  state.live = controller.grabbing_.load();
+  state.connectionId = controller.connection_id_.toStdString();
+  state.targetId = targetId(deviceKey(info)).toStdString();
+  state.displayName = info.display_name.empty() ? info.id : info.display_name;
+  state.deliveredFrames = controller.delivered_frames_.load();
+  state.kind = DeviceConnectionTargetKind::Device;
+  state.parentConnectionId = interface_ ? interface_->connectionId.toStdString() : std::string();
+  state.sources.push_back({key, child.index});
+  {
+    std::lock_guard errors(controller.error_state_->mutex);
+    state.error = controller.error_state_->message;
+  }
+  if (!controller.discovery_error_.empty()) {
+    if (!state.error.empty()) state.error += "; ";
+    state.error += controller.discovery_error_;
+  }
+  DeviceConnectionAvailabilitySet capabilities;
+  const DeviceConnectionAvailability availability = coordinator_ ? DeviceConnectionAvailability{true, {}}
+      : DeviceConnectionAvailability{false, "Device control has no coordinator."};
+  capabilities.targets = capabilities.discover = capabilities.connect = capabilities.disconnect = availability;
+  capabilities.single = modeAvailability(controller.control_features_, "SingleFrame", "SingleFrame");
+  capabilities.live = modeAvailability(controller.control_features_, "Continuous", "Continuous");
+  state.capabilities = capabilities;
+  return state;
+}
+
+DeviceConnectionAvailabilitySet OneGenSourceController::interfaceAvailability() const {
+  DeviceConnectionAvailabilitySet capabilities;
+  const DeviceConnectionAvailability availability = coordinator_ ? DeviceConnectionAvailability{true, {}}
+      : DeviceConnectionAvailability{false, "Device control has no coordinator."};
+  capabilities.targets = capabilities.discover = capabilities.connect = capabilities.disconnect = availability;
+  capabilities.single = {false, "An Interface has no data stream; acquire on a connected camera."};
+  capabilities.live = capabilities.single;
+  return capabilities;
+}
+
+std::vector<DeviceConnectionState> OneGenSourceController::connectionStates() const {
+  std::lock_guard lock(mutex_);
+  std::vector<DeviceConnectionState> result;
+  if (interface_) result.push_back(interfaceStateLocked());
+  std::vector<const Child*> cameras;
+  for (const auto& [id, child] : children_) cameras.push_back(&child);
+  std::sort(cameras.begin(), cameras.end(),
+      [](const Child* left, const Child* right) { return left->index < right->index; });
+  for (const auto* child : cameras) {
+    const auto iterator = std::find_if(children_.begin(), children_.end(),
+        [child](const auto& entry) { return &entry.second == child; });
+    if (iterator == children_.end()) continue;
+    auto state = cameraStateLocked(iterator->first, *child);
+    if (state.connected) result.push_back(std::move(state));
+  }
+  return result;
+}
+
+DeviceConnectionState OneGenSourceController::stateForConnection(const std::string& connectionId) const {
+  std::lock_guard lock(mutex_);
+  if (interface_ && interface_->connectionId.toStdString() == connectionId)
+    return interfaceStateLocked();
+  for (const auto& [key, child] : children_) {
+    auto state = cameraStateLocked(key, child);
+    if (state.connectionId == connectionId) return state;
+  }
+  return {};
+}
+
+onegen::InterfaceInfo OneGenSourceController::interfaceInfoFor(const onegen::DeviceInfo& device) const {
+  if (coordinator_) try {
+    const auto interfaces = coordinator_->interfaces();
+    const auto found = std::find_if(interfaces.begin(), interfaces.end(), [&](const auto& info) {
+      return info.cti_path == device.cti_path && info.id == device.interface_id;
+    });
+    if (found != interfaces.end()) return *found;
+  } catch (...) {
+  }
+  return fallbackInterfaceInfo(device);
+}
+
+std::string OneGenSourceController::cameraClaimKey(
+    const onegen::InterfaceInfo& info, const onegen::DeviceInfo& device) const {
+  return "onegen-camera:" + info.cti_path + '|' + info.id + '|' + device.id;
+}
+
 DeviceConnectionCapabilities OneGenSourceController::connectionCapabilities() const {
   const DeviceConnectionAvailability availability = coordinator_ ? DeviceConnectionAvailability{true, {}}
       : DeviceConnectionAvailability{false, "Device control has no coordinator."};
-  return {availability, availability, availability, availability,
+  DeviceConnectionCapabilities capabilities{availability, availability, availability, availability,
       coordinator_ ? singleAvailability()
                    : DeviceConnectionAvailability{false, "Device control has no coordinator."},
       availability};
+  capabilities.connectionModel = DeviceConnectionModel::Hierarchical;
+  return capabilities;
 }
 
 DeviceConnectionResult OneGenSourceController::requestConnectionTargets(TargetsCompletion completion) {
@@ -830,7 +1125,13 @@ DeviceConnectionResult OneGenSourceController::requestConnectionTargets(TargetsC
   if (!completion) return refused(DeviceConnectionError::InvalidArgument, "Completion is required.");
   if (!coordinator_) return refused(DeviceConnectionError::Unavailable, "Device control has no coordinator.");
   DeviceConnectionTargets value;
-  { std::lock_guard lock(mutex_); value = copiedTargets(devices_); }
+  {
+    std::vector<onegen::DeviceInfo> devices;
+    { std::lock_guard lock(mutex_); devices = devices_; }
+    std::vector<onegen::InterfaceInfo> interfaces;
+    try { interfaces = coordinator_->interfaces(); } catch (...) {}
+    value = copiedTargets(devices, interfaces);
+  }
   try { completion(std::move(value)); } catch (...) { qWarning() << "[GenICam] lifecycle consumer callback threw."; }
   return {};
 }
@@ -841,6 +1142,123 @@ DeviceConnectionResult OneGenSourceController::requestConnectionState(IDeviceCon
   if (!coordinator_) return refused(DeviceConnectionError::Unavailable, "Device control has no coordinator.");
   try { completion({{}, {}, {}, connectionState()}); } catch (...) { qWarning() << "[GenICam] lifecycle consumer callback threw."; }
   return {};
+}
+
+DeviceConnectionResult OneGenSourceController::requestConnectionStates(StatesCompletion completion) {
+  Q_ASSERT(QThread::currentThread() == thread());
+  if (!completion) return refused(DeviceConnectionError::InvalidArgument, "Completion is required.");
+  if (!coordinator_) return refused(DeviceConnectionError::Unavailable, "Device control has no coordinator.");
+  DeviceConnectionStates value;
+  value.connections = connectionStates();
+  try { completion(std::move(value)); } catch (...) { qWarning() << "[GenICam] lifecycle consumer callback threw."; }
+  return {};
+}
+
+std::optional<OneGenSourceController::ResolvedTarget> OneGenSourceController::resolveTarget(
+    const std::string& target) const {
+  const auto parts = decodeTargetId(target);
+  if (!parts) return std::nullopt;
+  if (parts->size() == 2) {
+    ResolvedTarget result;
+    result.isInterface = true;
+    result.interfaceInfo = {(*parts)[1], (*parts)[0], (*parts)[1], {}, {}};
+    if (coordinator_) try {
+      for (const auto& info : coordinator_->interfaces())
+        if (info.cti_path == (*parts)[0] && info.id == (*parts)[1]) {
+          result.interfaceInfo = info;
+          break;
+        }
+    } catch (...) {
+    }
+    if (result.interfaceInfo.tl_type.empty()) {
+      std::lock_guard lock(mutex_);
+      for (const auto& device : devices_)
+        if (device.cti_path == (*parts)[0] && device.interface_id == (*parts)[1]) {
+          result.interfaceInfo = interfaceInfoFor(device);
+          break;
+        }
+    }
+    return result;
+  }
+  const std::string key = (*parts)[0] + '\0' + (*parts)[1] + '\0' + (*parts)[2];
+  std::lock_guard lock(mutex_);
+  for (const auto& device : devices_) {
+    if (deviceKey(device) != key) continue;
+    return ResolvedTarget{false, device, interfaceInfoFor(device)};
+  }
+  return std::nullopt;
+}
+
+onegen::InterfaceInfo OneGenSourceController::ensureCameraInterface(const onegen::DeviceInfo& device) {
+  const auto info = interfaceInfoFor(device);
+  {
+    std::lock_guard lock(mutex_);
+    if (interface_) {
+      if (interface_->info.cti_path != info.cti_path || interface_->info.id != info.id)
+        throw std::runtime_error("The session already owns another Interface.");
+      return interface_->info;
+    }
+  }
+  try {
+    coordinator_->open_interface(info);
+  } catch (const std::exception& error) {
+    // A GUI-opened Interface is already pinned; adopt it instead of failing the camera connect.
+    if (std::string(error.what()).find("already connected") == std::string::npos) throw;
+  }
+  std::lock_guard lock(mutex_);
+  if (!interface_) interface_ = InterfaceConnection{info, QUuid::createUuid().toString(QUuid::WithoutBraces),
+      true, 0, {}};
+  return interface_->info;
+}
+
+void OneGenSourceController::closeIdleInterface() {
+  onegen::InterfaceInfo info;
+  QString connectionId;
+  {
+    std::lock_guard lock(mutex_);
+    if (!interface_ || !interface_->implicit || interface_->refCount > 0) return;
+    info = interface_->info;
+    connectionId = interface_->connectionId;
+  }
+  try {
+    if (coordinator_) coordinator_->close_interface(info);
+  } catch (const std::exception& error) {
+    std::lock_guard lock(mutex_);
+    if (interface_ && interface_->connectionId == connectionId) interface_->error = error.what();
+    return;
+  }
+  std::lock_guard lock(mutex_);
+  if (interface_ && interface_->connectionId == connectionId) interface_.reset();
+}
+
+void OneGenSourceController::setDiscoveryError(std::string message) {
+  std::lock_guard lock(mutex_);
+  discovery_error_ = std::move(message);
+}
+
+void OneGenSourceController::annotateDiscovery(
+    const std::vector<onegen::DeviceInfo>& discovered, bool interfacePresent) {
+  const std::string interfaceMarker = "The Interface was not discovered.";
+  const std::string cameraMarker = "The camera was not discovered.";
+  std::lock_guard lock(mutex_);
+  if (interface_) {
+    if (!interfacePresent) {
+      if (interface_->error.empty()) interface_->error = interfaceMarker;
+    } else if (interface_->error == interfaceMarker) {
+      interface_->error.clear();
+    }
+  }
+  for (const auto& [key, child] : children_) {
+    const bool found = std::any_of(discovered.begin(), discovered.end(),
+        [&](const auto& device) { return deviceKey(device) == key; });
+    auto& controller = *child.controller;
+    std::lock_guard childLock(controller.mutex_);
+    if (!found) {
+      if (controller.discovery_error_.empty()) controller.discovery_error_ = cameraMarker;
+    } else if (controller.discovery_error_ == cameraMarker) {
+      controller.discovery_error_.clear();
+    }
+  }
 }
 
 DeviceConnectionResult OneGenSourceController::requestDiscover(TargetsCompletion completion) {
@@ -868,77 +1286,291 @@ DeviceConnectionResult OneGenSourceController::requestLiveStop(std::string conne
   return admitLifecycle(Lifecycle::LiveStop, std::move(connectionId), std::move(completion), {});
 }
 
+bool OneGenSourceController::controllerBusy(const OneGenSourceController& controller) {
+  return controller.external_busy_.load() || controller.gui_busy_.load()
+      || controller.control_blocked_ || controller.active_work_.load() > 0;
+}
+
 DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operation, std::string argument,
     IDeviceConnectionControl::Completion completion, TargetsCompletion targetsCompletion) {
   Q_ASSERT(QThread::currentThread() == thread());
   if (!coordinator_) return refused(DeviceConnectionError::Unavailable, "Device control has no coordinator.");
-  if (external_busy_.load() || (tool_work_.isStarted() && !tool_work_.isFinished()) || control_blocked_ || gui_busy_.load())
-    return refused(DeviceConnectionError::Busy, "Discovery, Interface or control work is active.");
-  std::vector<OneGenSourceController*> children;
-  { std::lock_guard lock(mutex_); for (const auto& [id, child] : children_) children.push_back(child.controller.get()); }
-  for (auto* child : children) if (child->gui_busy_.load() || child->external_busy_.load())
-    return refused(DeviceConnectionError::Busy, "A GUI control operation is active.");
-  const auto state = connectionState();
+  const bool structural = operation == Lifecycle::Discover || operation == Lifecycle::Connect
+      || operation == Lifecycle::Disconnect;
+  if (structural) {
+    if (controllerBusy(*this)) return refused(DeviceConnectionError::Busy, "Discovery, Interface or control work is active.");
+    std::lock_guard lock(mutex_);
+    for (const auto& [id, child] : children_)
+      if (controllerBusy(*child.controller))
+        return refused(DeviceConnectionError::Busy, "A per-camera control operation is active.");
+  }
+  // Removed cameras are destroyed only on a later admission, never from their own work future.
+  retired_.clear();
   OneGenSourceController* target = nullptr;
   onegen::DeviceInfo selected;
+  std::optional<ResolvedTarget> resolved;
+  bool interfaceOperation = false;
   if (operation == Lifecycle::Discover) {
-    if (state.connected) return refused(DeviceConnectionError::Busy, "Disconnect before discovery.");
     target = this;
   } else if (operation == Lifecycle::Connect) {
-    if (state.connected) return refused(DeviceConnectionError::Conflict, "Disconnect before connecting another device.");
-    { std::lock_guard lock(mutex_);
-      for (const auto& device : devices_) if (targetId(deviceKey(device)).toStdString() == argument) selected = device; }
-    if (selected.id.empty()) return refused(DeviceConnectionError::NotFound, "Exact declared target was not found.");
-    // Presentation observers may select/create their view; they do not execute the command.
-    emit presentDevice(QString::fromStdString("Device|" + deviceKey(selected)));
-    target = cameraController(deviceKey(selected), selected.display_name.empty() ? selected.id : selected.display_name);
+    resolved = resolveTarget(argument);
+    if (!resolved) return refused(DeviceConnectionError::NotFound, "Exact declared target was not found.");
+    if (resolved->isInterface) {
+      const auto state = connectionState();
+      if (state.connected && state.kind == DeviceConnectionTargetKind::Interface)
+        return refused(DeviceConnectionError::Conflict, "The Interface is already connected.");
+      if (state.connected) return refused(DeviceConnectionError::Conflict, "The session already owns another Interface.");
+      target = this;
+      interfaceOperation = true;
+    } else {
+      selected = resolved->device;
+      {
+        std::lock_guard lock(mutex_);
+        if (children_.count(deviceKey(selected)))
+          return refused(DeviceConnectionError::Conflict, "The camera is already connected.");
+      }
+      emit presentDevice(QString::fromStdString("Device|" + deviceKey(selected)));
+      target = cameraController(deviceKey(selected), selected.display_name.empty() ? selected.id : selected.display_name);
+    }
   } else {
-    if (!state.connected) return refused(DeviceConnectionError::Disconnected, "Device is disconnected.");
-    if (state.connectionId != argument) return refused(DeviceConnectionError::Conflict, "The connection changed; observe it again.");
-    for (auto* child : children) if (child->connectionState().connectionId == state.connectionId) target = child;
-    if (!target) return refused(DeviceConnectionError::NotFound, "Connection controller ended.");
-    if (operation == Lifecycle::Single && state.live)
+    {
+      std::lock_guard lock(mutex_);
+      if (interface_ && interface_->connectionId.toStdString() == argument) {
+        interfaceOperation = true;
+        target = this;
+      } else {
+        for (const auto& [key, child] : children_) {
+          auto state = cameraStateLocked(key, child);
+          if (state.connectionId != argument) continue;
+          target = child.controller.get();
+          break;
+        }
+      }
+      if (operation == Lifecycle::Disconnect && interfaceOperation && interface_->implicit)
+        return refused(DeviceConnectionError::Conflict,
+            "The Interface was opened implicitly by its cameras and closes with the last camera.");
+    }
+    if (!target) return refused(DeviceConnectionError::Disconnected, "The connection is not open.");
+    if (operation == Lifecycle::Single && target != this && target->isGrabbing())
       return refused(DeviceConnectionError::Busy, "Stop Live explicitly before single acquisition.");
+  }
+  if (!structural) {
+    if (structural_work_.load() > 0 || control_blocked_)
+      return refused(DeviceConnectionError::Busy, "Structural device work is active.");
+    if (target == this && (gui_busy_.load() || active_work_.load() > 0))
+      return refused(DeviceConnectionError::Busy, "A control operation is active on this connection.");
+    if (target != this && (target->external_busy_.load() || target->gui_busy_.load()
+        || target->active_work_.load() > 0))
+      return refused(DeviceConnectionError::Busy, "A control operation is active on this connection.");
   }
   external_busy_.store(true);
   target->external_busy_.store(true);
+  active_work_.fetch_add(1);
+  target->active_work_.fetch_add(1);
+  if (structural) structural_work_.fetch_add(1);
   emit target->controlChanged();
-  tool_work_ = QtConcurrent::run([this, target, selected, operation, completion, targetsCompletion] {
+  auto work = QtConcurrent::run([this, target, selected, operation, completion, targetsCompletion,
+                                    reason = std::move(argument), resolved, interfaceOperation, structural] {
     DeviceConnectionResult result{DeviceConnectionError::BackendFailure, "Device operation did not complete.", DeviceConnectionEffect::Unknown};
     DeviceConnectionTargets discovered;
+    std::string connectionId = reason;
+    const auto finishState = [this, &connectionId] {
+      return connectionId.empty() ? DeviceConnectionState{} : stateForConnection(connectionId);
+    };
     try {
       if (operation == Lifecycle::Discover) {
         const auto inventory = coordinator_->discover();
         if (!inventory.completed) throw std::runtime_error("Discovery did not complete; previous inventory is preserved.");
         { std::lock_guard lock(mutex_); devices_ = inventory.devices; }
-        discovered = copiedTargets(inventory.devices);
+        std::optional<onegen::InterfaceInfo> tracked;
+        {
+          std::lock_guard lock(mutex_);
+          if (interface_) tracked = interface_->info;
+        }
+        bool interfacePresent = true;
+        if (tracked) {
+          interfacePresent = false;
+          try {
+            for (const auto& info : coordinator_->interfaces()) {
+              if (info.cti_path == tracked->cti_path && info.id == tracked->id) {
+                interfacePresent = true;
+                break;
+              }
+            }
+          } catch (...) {
+          }
+        }
+        annotateDiscovery(inventory.devices, interfacePresent);
+        std::vector<onegen::InterfaceInfo> interfaces;
+        try { interfaces = coordinator_->interfaces(); } catch (...) {}
+        discovered = copiedTargets(inventory.devices, interfaces);
         emit inventoryChanged();
-      } else if (operation == Lifecycle::Connect) target->openDevice(coordinator_, selected);
-      else if (operation == Lifecycle::Disconnect) target->closeDevice();
-      else if (operation == Lifecycle::Single) {
+      } else if (operation == Lifecycle::Connect && resolved && resolved->isInterface) {
+        try {
+          coordinator_->open_interface(resolved->interfaceInfo);
+        } catch (const std::exception& error) {
+          if (std::string(error.what()).find("already connected") == std::string::npos) throw;
+        }
+        std::lock_guard lock(mutex_);
+        if (!interface_) interface_ = InterfaceConnection{resolved->interfaceInfo,
+            QUuid::createUuid().toString(QUuid::WithoutBraces), false, 0, {}};
+        connectionId = interface_->connectionId.toStdString();
+      } else if (operation == Lifecycle::Connect) {
+        const auto info = ensureCameraInterface(selected);
+        std::shared_ptr<void> claim;
+        ResourceClaimFn claimFn;
+        { std::lock_guard lock(mutex_); claimFn = resource_claim_fn_; }
+        if (onegen::interfaceClaimScope(info.tl_type) == onegen::InterfaceClaimScope::Camera && claimFn) {
+          std::string claimError;
+          claim = claimFn(cameraClaimKey(info, selected), claimError);
+          if (!claim) throw std::runtime_error(claimError.empty()
+              ? "Another session holds this camera." : claimError);
+        }
+        OneGenSourceController* camera = cameraController(deviceKey(selected),
+            selected.display_name.empty() ? selected.id : selected.display_name);
+        {
+          std::lock_guard lock(camera->mutex_);
+          camera->resource_claim_ = claim;
+        }
+        try {
+          camera->openDevice(coordinator_, selected);
+        } catch (...) {
+          {
+            std::lock_guard lock(mutex_);
+            const auto found = children_.find(deviceKey(selected));
+            if (found != children_.end()) {
+              retired_.push_back(std::move(found->second.controller));
+              children_.erase(found);
+            }
+            if (children_.empty()) next_source_index_ = 0;
+          }
+          publishSourceDescriptors();
+          closeIdleInterface();
+          throw;
+        }
+        {
+          std::lock_guard lock(mutex_);
+          QString parent;
+          if (interface_) {
+            ++interface_->refCount;
+            parent = interface_->connectionId;
+          }
+          std::lock_guard cameraLock(camera->mutex_);
+          camera->parent_connection_id_ = parent;
+          connectionId = camera->connection_id_.toStdString();
+        }
+      } else if (operation == Lifecycle::Disconnect && interfaceOperation) {
+        {
+          std::lock_guard lock(mutex_);
+          if (!interface_ || interface_->connectionId.toStdString() != connectionId)
+            throw std::runtime_error("The Interface connection changed; observe it again.");
+        }
+        std::vector<std::pair<std::string, OneGenSourceController*>> cameras;
+        {
+          std::lock_guard lock(mutex_);
+          for (const auto& [key, child] : children_) cameras.emplace_back(key, child.controller.get());
+        }
+        std::exception_ptr failure;
+        std::vector<std::string> removed;
+        for (const auto& [key, camera] : cameras) try {
+          camera->closeDevice();
+          removed.push_back(key);
+        } catch (...) {
+          if (!failure) failure = std::current_exception();
+        }
+        {
+          std::lock_guard lock(mutex_);
+          for (const auto& key : removed) {
+            const auto found = children_.find(key);
+            if (found == children_.end()) continue;
+            retired_.push_back(std::move(found->second.controller));
+            children_.erase(found);
+          }
+          if (children_.empty()) next_source_index_ = 0;
+          if (interface_) {
+            if (failure) interface_->error = "A camera did not disconnect; the Interface stays open.";
+            else interface_->refCount = 0;
+          }
+        }
+        if (failure) {
+          result = {DeviceConnectionError::BackendFailure,
+              "A camera did not disconnect; the Interface stays open.", DeviceConnectionEffect::Unknown,
+              stateForConnection(connectionId)};
+          std::rethrow_exception(failure);
+        }
+        onegen::InterfaceInfo closed;
+        {
+          std::lock_guard lock(mutex_);
+          if (!interface_) throw std::runtime_error("The Interface connection changed; observe it again.");
+          closed = interface_->info;
+        }
+        coordinator_->close_interface(closed);
+        {
+          std::lock_guard lock(mutex_);
+          if (interface_ && interface_->connectionId.toStdString() == connectionId) interface_.reset();
+        }
+        publishSourceDescriptors();
+        connectionId.clear();
+        result = {{}, {}, DeviceConnectionEffect::Applied, DeviceConnectionState{}};
+      } else if (operation == Lifecycle::Disconnect) {
+        target->closeDevice();
+        std::string key;
+        {
+          std::lock_guard lock(mutex_);
+          for (const auto& [candidate, child] : children_)
+            if (child.controller.get() == target) { key = candidate; break; }
+          if (!key.empty()) {
+            const auto found = children_.find(key);
+            if (found != children_.end()) {
+              retired_.push_back(std::move(found->second.controller));
+              children_.erase(found);
+            }
+            if (children_.empty()) next_source_index_ = 0;
+            if (interface_ && interface_->refCount > 0) --interface_->refCount;
+          }
+        }
+        closeIdleInterface();
+        publishSourceDescriptors();
+        connectionId.clear();
+        result = {{}, {}, DeviceConnectionEffect::Applied, DeviceConnectionState{}};
+      } else if (operation == Lifecycle::Single) {
         const auto before = target->converted_frames_.load();
         target->grabOne();
         if (target->converted_frames_.load() != before + 1) throw std::runtime_error("Acquired frame was not converted to a supported resource.");
-      } else if (operation == Lifecycle::LiveStart) target->start();
-      else target->stopLive();
+        result = {{}, {}, DeviceConnectionEffect::Applied, finishState()};
+      } else if (operation == Lifecycle::LiveStart) {
+        target->start();
+        result = {{}, {}, DeviceConnectionEffect::Applied, finishState()};
+      } else {
+        target->stopLive();
+        result = {{}, {}, DeviceConnectionEffect::Applied, finishState()};
+      }
       if (operation != Lifecycle::Disconnect && operation != Lifecycle::Discover && operation != Lifecycle::Connect)
         try { target->refreshControlSnapshot(); } catch (const std::exception& error) { qWarning() << "[GenICam] feature refresh failed:" << error.what(); }
-      result = {{}, {}, DeviceConnectionEffect::Applied, connectionState()};
+      if (operation == Lifecycle::Connect)
+        result = {{}, {}, DeviceConnectionEffect::Applied, finishState()};
+      else if (result.error == DeviceConnectionError::None && operation != Lifecycle::Discover
+          && operation != Lifecycle::Disconnect)
+        result.state = finishState();
     } catch (const OneGenAcquisitionModeRefused& error) {
       // The mode write is the action's first effect; refusal leaves acquisition untouched.
       result = {DeviceConnectionError::Unavailable, error.what(), DeviceConnectionEffect::None,
-          connectionState()};
+          finishState()};
     } catch (const std::exception& error) {
       // Discovery keeps the previous inventory, so only device commands leave an uncertain effect.
       result = {DeviceConnectionError::BackendFailure, error.what(),
-          operation == Lifecycle::Discover ? DeviceConnectionEffect::None : DeviceConnectionEffect::Unknown, connectionState()};
+          operation == Lifecycle::Discover ? DeviceConnectionEffect::None : DeviceConnectionEffect::Unknown,
+          finishState()};
       discovered.result = {DeviceConnectionError::BackendFailure, error.what()};
     } catch (...) {
-      result = {DeviceConnectionError::BackendFailure, "Unexpected device backend failure.", DeviceConnectionEffect::Unknown, connectionState()};
+      result = {DeviceConnectionError::BackendFailure, "Unexpected device backend failure.", DeviceConnectionEffect::Unknown, finishState()};
       discovered.result = {DeviceConnectionError::BackendFailure, "Unexpected device backend failure."};
     }
     target->external_busy_.store(false);
     external_busy_.store(false);
+    target->active_work_.fetch_sub(1);
+    active_work_.fetch_sub(1);
+    if (structural) structural_work_.fetch_sub(1);
     emit target->controlChanged();
     emit controlChanged();
     try {
@@ -946,5 +1578,12 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
       else completion(std::move(result));
     } catch (...) { qWarning() << "[GenICam] lifecycle consumer callback threw."; }
   });
+  {
+    std::lock_guard lock(work_mutex_);
+    std::erase_if(admitted_work_, [](const QFuture<void>& work) { return work.isFinished(); });
+    admitted_work_.push_back(work);
+  }
+  if (structural || target == this) tool_work_ = work;
+  if (target != this) target->tool_work_ = work;
   return {};
 }

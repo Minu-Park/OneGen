@@ -86,14 +86,29 @@ Producer/SDK resource arbitration determines whether a connection is available.
 
 The optional consumer adapter's `OneGenSourceController` owns Device leases and
 implements the SDK `IDeviceConnectionControl` capability, from which Playground
-declares the canonical `device.targets`, `device.connection`, `device.discover`,
-`device.connect`, `device.disconnect`, `device.single`, `device.live-start` and
-`device.live-stop` tools; views borrow lease references
-and use the same module commands. A target retains producer, Interface and Device
-identity; each connection gets a fresh UUID. Pending GUI/API/discovery or Interface
-work is refused as Busy, and accepted external work drains before teardown.
-Explicit close and Live stop retain state on backend refusal. Closed leases reject
-every request even when their camera is reused for a later connection.
+declares the canonical `device.targets`, `device.connection`, `device.connections`,
+`device.discover`, `device.connect`, `device.disconnect`, `device.single`,
+`device.live-start` and `device.live-stop` tools; views borrow lease references
+and use the same module commands. The session model is `hierarchical`: one
+Interface connection plus N camera connections. A camera connect opens its
+Interface implicitly; the Interface is listed with `implicitlyOpened`, is
+ref-counted by its cameras, and closes when its last implicit camera disconnects.
+An explicit Interface connect stays open until it is explicitly disconnected.
+Camera connections share the Interface and each keeps its own connection id,
+capabilities, error and owned source. A duplicate camera is refused. A target
+retains producer, Interface and Device identity, and each connection gets a fresh
+UUID. Structural work (connect, disconnect, discovery, Interface close) uses the
+session-wide gate, while Single/Live admission is per connection so one camera's
+operation does not park another. Discovery while connected never opens, closes or
+reconnects anything; it annotates lost or new cameras, and an Interface loss
+annotates its cameras. `source.start`/`source.stop` report the cameras that failed
+in the `failures` list. Accepted external work drains before teardown.
+The claim key follows the GenTL Interface type: a frame-grabber Interface takes
+one exclusive board claim inherited by its cameras, while network and USB
+Interfaces claim per camera; an unknown type is exclusive with its reason
+recorded. Explicit close and Live stop retain state on backend refusal. Closed
+leases reject every request even when their camera is reused for a later
+connection.
 Single and Live follow the action: Single writes
 `AcquisitionMode=SingleFrame` before it starts one native frame, and Live or
 `source.start` writes `AcquisitionMode=Continuous` before continuous acquisition.
@@ -123,8 +138,8 @@ implicitly. TriggerSoftware retains the existing trigger/receive path.
 Revisions count observed changes; stream generations additionally fence selection
 ABA. The producer lock serializes consumer SDK access, but does not make an
 autonomously changing physical device transactional. Interface/System
-parameters, raw-register API writes, multiple-connection lifecycle control and
-cancellation of pending Single remain outside this contract.
+parameters, raw-register API writes and cancellation of pending Single remain
+outside this contract.
 
 GenTL 1.5 multipart buffers are retained without a vendor SDK. The Playground
 adapter assembles standard PFNC `Coord3D_ABC32f` and `Coord3D_C16` range data

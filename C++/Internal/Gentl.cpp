@@ -73,6 +73,7 @@ void Gentl::swap(Gentl& other) noexcept {
   swap(DSGetBufferChunkData, other.DSGetBufferChunkData);
   swap(EventGetInfo, other.EventGetInfo);
   swap(EventGetDataInfo, other.EventGetDataInfo);
+  swap(IFGetPort, other.IFGetPort);
   swap(directories_, other.directories_);
   swap(initialized_, other.initialized_);
 }
@@ -133,6 +134,7 @@ void Gentl::load(const std::filesystem::path& cti) {
         sym(lib, "DSGetBufferPartInfo"));
     DSGetBufferChunkData = reinterpret_cast<decltype(DSGetBufferChunkData)>(
         sym(lib, "DSGetBufferChunkData"));
+    IFGetPort = reinterpret_cast<IfGetPortFn>(sym(lib, "IFGetPort"));
 
     const auto init_result = GCInitLib();
     if (init_result != GenTL::GC_ERR_SUCCESS) {
@@ -190,6 +192,7 @@ void Gentl::unload() {
   DSGetBufferChunkData = nullptr;
   EventGetInfo = nullptr;
   EventGetDataInfo = nullptr;
+  IFGetPort = nullptr;
 }
 
 }  // namespace onegen
