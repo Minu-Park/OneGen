@@ -1,5 +1,5 @@
 #include "QOneGenWidget.h"
-#include "DeviceDiagnostics.h"
+#include "DeviceRuntime/Contract/DeviceDiagnostics.h"
 #include "SingleCaptureDiagnostics.h"
 #include <QElapsedTimer>
 #include <QStyle>
