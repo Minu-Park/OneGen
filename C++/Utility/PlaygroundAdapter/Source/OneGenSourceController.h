@@ -93,9 +93,6 @@ public:
   bool externalBusy() const { return external_busy_.load(); }
   /** @brief Drains accepted API work before consumer panels are removed. */
   void drainControl();
-  /** @brief Installs the host hardware claim used by per-camera Interfaces. */
-  using ResourceClaimFn = std::function<std::shared_ptr<void>(const std::string& key, std::string& error)>;
-  void setResourceClaim(ResourceClaimFn claim);
   /** @brief Opens an exact device through the existing Coordinator and owns its lease. */
   std::shared_ptr<onegen::producer::Lease> openDevice(std::shared_ptr<onegen::producer::Coordinator> coordinator, const onegen::DeviceInfo& device);
   /** @brief Stops and closes the owning device channel, preserving failed-close state. */
@@ -183,9 +180,6 @@ private:
   QString connection_id_;
   /** @brief Parent Interface connection id for one API-connected camera. */
   QString parent_connection_id_;
-  /** @brief Per-camera claim retained while a network or USB camera is open. */
-  std::shared_ptr<void> resource_claim_;
-  ResourceClaimFn resource_claim_fn_;
   std::atomic<bool> gui_busy_{false}, external_busy_{false};
   /** @brief Accepted lifecycle or parameter work not yet completed; cleared before its callback. */
   std::atomic<int> active_work_{0};
@@ -236,7 +230,6 @@ private:
   };
   std::optional<ResolvedTarget> resolveTarget(const std::string& targetId) const;
   onegen::InterfaceInfo interfaceInfoFor(const onegen::DeviceInfo& device) const;
-  std::string cameraClaimKey(const onegen::InterfaceInfo& info, const onegen::DeviceInfo& device) const;
   /** @brief Opens the camera's Interface implicitly when the session owns none yet. */
   onegen::InterfaceInfo ensureCameraInterface(const onegen::DeviceInfo& device);
   /** @brief Closes an implicit Interface after its last camera connection left. */

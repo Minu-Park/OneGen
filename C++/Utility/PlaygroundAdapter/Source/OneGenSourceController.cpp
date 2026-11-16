@@ -81,12 +81,6 @@ void OneGenSourceController::drainControl()
   tool_work_.waitForFinished();
 }
 
-void OneGenSourceController::setResourceClaim(ResourceClaimFn claim)
-{
-  std::lock_guard lock(mutex_);
-  resource_claim_fn_ = std::move(claim);
-}
-
 void OneGenSourceController::configureControl(std::shared_ptr<onegen::producer::Coordinator> coordinator, std::vector<onegen::DeviceInfo> devices) {
   coordinator_ = std::move(coordinator);
   setDevices(std::move(devices));
@@ -236,7 +230,6 @@ void OneGenSourceController::closeDevice() {
     owned_lease_.reset();
     connection_id_.clear();
     parent_connection_id_.clear();
-    resource_claim_.reset();
     discovery_error_.clear();
     control_features_.clear();
     control_streams_.clear();
@@ -1104,11 +1097,6 @@ onegen::InterfaceInfo OneGenSourceController::interfaceInfoFor(const onegen::Dev
   return fallbackInterfaceInfo(device);
 }
 
-std::string OneGenSourceController::cameraClaimKey(
-    const onegen::InterfaceInfo& info, const onegen::DeviceInfo& device) const {
-  return "onegen-camera:" + info.cti_path + '|' + info.id + '|' + device.id;
-}
-
 DeviceConnectionCapabilities OneGenSourceController::connectionCapabilities() const {
   const DeviceConnectionAvailability availability = coordinator_ ? DeviceConnectionAvailability{true, {}}
       : DeviceConnectionAvailability{false, "Device control has no coordinator."};
@@ -1416,22 +1404,9 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
             QUuid::createUuid().toString(QUuid::WithoutBraces), false, 0, {}};
         connectionId = interface_->connectionId.toStdString();
       } else if (operation == Lifecycle::Connect) {
-        const auto info = ensureCameraInterface(selected);
-        std::shared_ptr<void> claim;
-        ResourceClaimFn claimFn;
-        { std::lock_guard lock(mutex_); claimFn = resource_claim_fn_; }
-        if (onegen::interfaceClaimScope(info.tl_type) == onegen::InterfaceClaimScope::Camera && claimFn) {
-          std::string claimError;
-          claim = claimFn(cameraClaimKey(info, selected), claimError);
-          if (!claim) throw std::runtime_error(claimError.empty()
-              ? "Another session holds this camera." : claimError);
-        }
+        ensureCameraInterface(selected);
         OneGenSourceController* camera = cameraController(deviceKey(selected),
             selected.display_name.empty() ? selected.id : selected.display_name);
-        {
-          std::lock_guard lock(camera->mutex_);
-          camera->resource_claim_ = claim;
-        }
         try {
           camera->openDevice(coordinator_, selected);
         } catch (...) {

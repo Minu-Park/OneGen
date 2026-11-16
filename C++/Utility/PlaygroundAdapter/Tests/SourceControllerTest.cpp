@@ -8,6 +8,7 @@
  */
 #include "OneGenSourceController.h"
 #include "ProducerCoordinator.h"
+#include "HardwareResourceKey.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -66,15 +67,15 @@ private:
 
 struct Fixture {
     Fixture(const std::function<std::shared_ptr<void>(const onegen::InterfaceInfo&)>& interfaceClaim = {},
-        const std::function<std::shared_ptr<void>(const std::string&, std::string&)>& cameraClaim = {})
+        const std::function<std::shared_ptr<void>(const onegen::InterfaceInfo&, const onegen::DeviceInfo&)>&
+            cameraClaim = {})
     {
         _coordinator = std::make_shared<onegen::producer::Coordinator>(
-            std::filesystem::path{}, std::chrono::milliseconds{10000}, interfaceClaim);
+            std::filesystem::path{}, std::chrono::milliseconds{10000}, interfaceClaim, cameraClaim);
         if (!_coordinator->set_producer_files({ONEGEN_TEST_PRODUCER}))
             throw std::runtime_error("The synthetic producer could not be selected.");
         _controller = std::make_unique<OneGenSourceController>();
         _controller->configureControl(_coordinator, {});
-        _controller->setResourceClaim(cameraClaim);
         _controller->setFrameConsumer([this](SessionFrame&&, unsigned int index) {
             _frames.fetch_add(1);
             std::lock_guard lock(_framesMutex);
@@ -536,8 +537,9 @@ void OneGenSourceControllerTests::claimsFollowInterfaceType()
                 interfaceClaims.push_back(info.id);
                 return std::shared_ptr<void>(new int(1), [](void* value) { delete static_cast<int*>(value); });
             },
-            [&](const std::string& key, std::string&) {
-                cameraClaims.push_back(key);
+            [&](const onegen::InterfaceInfo&, const onegen::DeviceInfo& device) {
+                cameraClaims.push_back(device.serial);
+                if (device.serial.empty()) return std::shared_ptr<void>{};
                 return std::shared_ptr<void>(new int(1), [](void* value) { delete static_cast<int*>(value); });
             });
         const auto targets = fixture.discover();
@@ -558,8 +560,9 @@ void OneGenSourceControllerTests::claimsFollowInterfaceType()
                 interfaceClaims.push_back(info.id);
                 return std::shared_ptr<void>(new int(1), [](void* value) { delete static_cast<int*>(value); });
             },
-            [&](const std::string& key, std::string&) {
-                cameraClaims.push_back(key);
+            [&](const onegen::InterfaceInfo&, const onegen::DeviceInfo& device) {
+                cameraClaims.push_back(device.serial);
+                if (device.serial.empty()) return std::shared_ptr<void>{};
                 return std::shared_ptr<void>(new int(1), [](void* value) { delete static_cast<int*>(value); });
             });
         const auto targets = fixture.discover();
@@ -568,7 +571,32 @@ void OneGenSourceControllerTests::claimsFollowInterfaceType()
             == DeviceConnectionError::None, "The network camera did not connect.");
         QVERIFY(interfaceClaims.empty());
         QCOMPARE(cameraClaims.size(), std::size_t(1));
-        QVERIFY(cameraClaims.front().rfind("onegen-camera:", 0) == 0);
+        QCOMPARE(cameraClaims.front(), std::string("SYNTH-0001"));
+    }
+    {
+        EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "1");
+        EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "GEV");
+        EnvironmentVariable noSerial("ONEGEN_SYNTHETIC_NO_SERIAL", "1");
+        std::vector<std::string> interfaceClaims;
+        std::vector<std::string> cameraClaims;
+        Fixture fixture(
+            [&](const onegen::InterfaceInfo& info) {
+                interfaceClaims.push_back(info.id);
+                return std::shared_ptr<void>(new int(1), [](void* value) { delete static_cast<int*>(value); });
+            },
+            [&](const onegen::InterfaceInfo&, const onegen::DeviceInfo& device) {
+                cameraClaims.push_back(device.serial);
+                return std::shared_ptr<void>{};
+            });
+        const auto targets = fixture.discover();
+        QCOMPARE(targets.result.error, DeviceConnectionError::None);
+        QVERIFY2(fixture.connect(targetOfKind(targets, DeviceConnectionTargetKind::Device, 0)->targetId).error
+            == DeviceConnectionError::None, "An unclaimed camera without a serial did not connect.");
+        QVERIFY(interfaceClaims.empty());
+        QCOMPARE(cameraClaims.size(), std::size_t(1));
+        QVERIFY(cameraClaims.front().empty());
+        // The shared key rule produces no key, so the module records an unclaimed camera.
+        QVERIFY(playgroundCameraResourceKey(QString::fromStdString(cameraClaims.front())).isEmpty());
     }
 }
 

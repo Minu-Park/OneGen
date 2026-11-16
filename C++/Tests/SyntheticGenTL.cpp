@@ -1259,8 +1259,13 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE IFGetDeviceInfo(IF_HANDLE iface, const char* id
     case DEVICE_INFO_DISPLAYNAME: return giveString(type, buffer, size,
         "Synthetic Camera (" + deviceId(index) + ")");
     case DEVICE_INFO_USER_DEFINED_NAME: return giveString(type, buffer, size, "");
-    case DEVICE_INFO_SERIAL_NUMBER: return giveString(type, buffer, size,
-        "SYNTH-" + std::string(index + 1 < 10 ? "000" : "00") + std::to_string(index + 1));
+    case DEVICE_INFO_SERIAL_NUMBER: {
+      const char* noSerial = std::getenv("ONEGEN_SYNTHETIC_NO_SERIAL");
+      if (noSerial && *noSerial && std::string_view(noSerial) != "0")
+        return giveString(type, buffer, size, "");
+      return giveString(type, buffer, size,
+          "SYNTH-000" + std::to_string(index + 1));
+    }
     case DEVICE_INFO_VERSION: return giveString(type, buffer, size, "1.0.0");
     case DEVICE_INFO_TIMESTAMP_FREQUENCY: return give(type, buffer, size, INFO_DATATYPE_UINT64, std::uint64_t{1000000000});
     default: return GC_ERR_INVALID_PARAMETER;

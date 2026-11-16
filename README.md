@@ -105,8 +105,9 @@ annotates its cameras. `source.start`/`source.stop` report the cameras that fail
 in the `failures` list. Accepted external work drains before teardown.
 The claim key follows the GenTL Interface type: a frame-grabber Interface takes
 one exclusive board claim inherited by its cameras, while network and USB
-Interfaces claim per camera; an unknown type is exclusive with its reason
-recorded. Explicit close and Live stop retain state on backend refusal. Closed
+Interfaces claim per camera with the shared `camera:<serial>` key; an unknown
+type is exclusive with its reason recorded, and a camera whose producer reports
+no serial stays unclaimed with that reason recorded. Explicit close and Live stop retain state on backend refusal. Closed
 leases reject every request even when their camera is reused for a later
 connection.
 Single and Live follow the action: Single writes

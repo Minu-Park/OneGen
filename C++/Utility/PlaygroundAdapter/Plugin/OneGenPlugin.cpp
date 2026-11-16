@@ -167,16 +167,11 @@ public:
   OneGenPluginSession(std::shared_ptr<onegen::producer::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
                       std::shared_ptr<onegen::producer::StartupDiscovery> startup, QString settingsFile,
-                      std::function<void(QOneGenDeviceWidget*)> registerWidget, RetainScan retain,
-                      OneGenSourceController::ResourceClaimFn cameraClaim = {})
+                      std::function<void(QOneGenDeviceWidget*)> registerWidget, RetainScan retain)
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
         startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
         controller_(std::make_unique<OneGenSourceController>()), register_widget_(std::move(registerWidget)),
-        retain_scan_(std::move(retain))
-  {
-    controller_->configureControl(coordinator_, devices_);
-    if (cameraClaim) controller_->setResourceClaim(std::move(cameraClaim));
-  }
+        retain_scan_(std::move(retain)) { controller_->configureControl(coordinator_, devices_); }
 
   ~OneGenPluginSession() override
   {
@@ -333,21 +328,10 @@ public:
       if (!producer_coordinator) return {};
       std::shared_ptr<onegen::producer::StartupDiscovery> startup;
       { std::lock_guard lock(mutex_); startup = startup_; }
-      auto* claims = claims_.load(std::memory_order_acquire);
       return std::make_unique<OneGenPluginSession>(
           producer_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
           std::move(startup), settings_file_, [this](auto* widget) { widgets_.push_back(widget); },
-          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); },
-          [claims](const std::string& key, std::string& claimError) -> std::shared_ptr<void> {
-            if (!claims) {
-              claimError = "The host did not provide hardware resource claims.";
-              return {};
-            }
-            QString error;
-            auto claim = claims->claimResource(QString::fromStdString(key), &error);
-            if (!claim) claimError = error.toStdString();
-            return claim;
-          });
+          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); });
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
       return {};
@@ -469,11 +453,17 @@ private:
   {
     if (onegen::interfaceClaimScope(info.tl_type) != onegen::InterfaceClaimScope::Camera)
       return {};
+    const auto key = playgroundCameraResourceKey(QString::fromStdString(device.serial));
+    if (key.isEmpty()) {
+      // One camera claims its serial exactly once. Without a serial the device cannot be
+      // identified by the shared key rule, so it stays unclaimed and the reason is recorded.
+      qWarning().noquote() << QStringLiteral(
+          "[GenICam] camera=%1 interface=%2 is unclaimed: the producer reported no serial.")
+          .arg(QString::fromStdString(device.id), QString::fromStdString(info.id));
+      return {};
+    }
     auto* claims = claims_.load(std::memory_order_acquire);
-    if (!claims) return {};
-    const QString key = QStringLiteral("onegen-camera:") + QString::fromStdString(info.cti_path)
-        + QLatin1Char('|') + QString::fromStdString(info.id) + QLatin1Char('|')
-        + QString::fromStdString(device.id);
+    if (!claims) throw std::runtime_error("The host did not provide hardware resource claims.");
     QString error;
     auto claim = claims->claimResource(key, &error);
     if (!claim) throw std::runtime_error(error.toStdString());
