@@ -564,17 +564,24 @@ int main()
       coordinates.parts.back().source_id = 0;
       assert(oneGenGraphicsFrame(coordinates, 46)->ranges.front().payload.confidence[0] == 0.25F);
       geometry.output_mode = "CalibratedABC_PointCloud";
-      const auto cloud = oneGenGraphicsFrame(coordinates, 47);
-      assert(cloud && cloud->hasPointCloud() && !cloud->hasRangeFrame() && !cloud->hasSurfaceMesh());
-      assert(cloud->pointClouds.front().payload.xyz.size() == 12 && cloud->pointClouds.front().payload.xyz[0] == 12 && cloud->pointClouds.front().payload.xyz[2] == 9.5);
-      assert(cloud->pointClouds.front().payload.scalarFields.size() == 1 && cloud->pointClouds.front().payload.scalarFields[0].values[0] == 0.25F);
+      const auto cloudFrame = oneGenGraphicsFrame(coordinates, 47);
+      assert(cloudFrame && cloudFrame->hasRangeFrame() && !cloudFrame->hasPointCloud()
+          && !cloudFrame->hasSurfaceMesh());
+      const RangeFrame& cloudRange = cloudFrame->ranges.front().payload;
+      assert(cloudRange.canDerivePointCloud());
+      assert(cloudRange.xValues.size() == 4 && cloudRange.xValues[0] == 12
+          && cloudRange.yValues[0] == 53 && cloudRange.physicalZAt(0) == 9.5);
+      assert(cloudRange.confidence.size() == 4 && cloudRange.confidence[0] == 0.25F);
       geometry.invalid_enabled[2] = true;
-      const auto filteredCloud = oneGenGraphicsFrame(coordinates, 48);
-      assert(filteredCloud && filteredCloud->pointClouds.front().payload.xyz.size() == 9);
-      assert(filteredCloud->pointClouds.front().payload.scalarFields[0].values.size() == 3);
+      const auto filteredFrame = oneGenGraphicsFrame(coordinates, 48);
+      assert(filteredFrame && filteredFrame->hasRangeFrame() && !filteredFrame->hasPointCloud());
+      assert(filteredFrame->ranges.front().payload.validMask
+          == std::vector<std::uint8_t>({1, 0, 1, 1}));
       geometry.invalid_enabled[2] = false;
       coordinates.parts.clear();
-      assert(oneGenGraphicsFrame(coordinates, 49)->hasPointCloud());
+      const auto singleCloudFrame = oneGenGraphicsFrame(coordinates, 49);
+      assert(singleCloudFrame && singleCloudFrame->hasRangeFrame()
+          && singleCloudFrame->ranges.front().payload.canDerivePointCloud());
       geometry.output_mode = "CalibratedABC_Grid";
     }
     coordinates.parts.clear();
@@ -712,10 +719,12 @@ int main()
   const float meterAbc[] = {1.F, 2.F, 3.F};
   std::memcpy(meterCloud.parts[0].payload.data(), meterAbc, sizeof(meterAbc));
   const auto meterPoints = oneGenGraphicsFrame(meterCloud, 66);
-  assert(meterPoints && meterPoints->hasPointCloud() && meterPoints->pointClouds.front().payload.xyz.size() == 3);
-  assert(meterPoints->pointClouds.front().payload.coordinateUnit == GraphicsLengthUnit::Millimeter);
-  assert(meterPoints->pointClouds.front().payload.xyz[0] == 1000 && meterPoints->pointClouds.front().payload.xyz[1] == 2000);
-  assert(meterPoints->pointClouds.front().payload.xyz[2] == 3000);
+  assert(meterPoints && meterPoints->hasRangeFrame() && !meterPoints->hasPointCloud());
+  const RangeFrame& meterRange = meterPoints->ranges.front().payload;
+  assert(meterRange.canDerivePointCloud());
+  assert(meterRange.lengthUnit == GraphicsLengthUnit::Millimeter);
+  assert(meterRange.xValues[0] == 1000 && meterRange.yValues[0] == 2000);
+  assert(meterRange.physicalZAt(0) == 3000);
 
   onegen::Frame confidenceBits;
   confidenceBits.parts = {scalarPart(0x012000bf, 5, {0, 1, 2, 3}), {}};

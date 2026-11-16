@@ -634,55 +634,6 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   return range.isValid() ? std::optional<RangeFrame>(std::move(range)) : reject("converted range layout is invalid");
 }
 
-void presentPointCloud(GraphicsFrame& frame, const onegen::Frame& source)
-{
-  if (!source.scan3d_geometry
-      || source.scan3d_geometry->output_mode != "CalibratedABC_PointCloud") return;
-  std::vector<GraphicsRangeResource> retained;
-  for (auto& resource : frame.ranges) {
-    const auto& range = resource.payload;
-    if (range.xyCoordinateMode != RangeFrameXYCoordinateMode::ExplicitXY
-        || range.xValues.size() != range.zValues.size()
-        || range.yValues.size() != range.zValues.size()) {
-      retained.push_back(std::move(resource));
-      continue;
-    }
-    PointCloudData cloud;
-    cloud.coordinateUnit = range.lengthUnit;
-    ScalarField intensity, confidence;
-    intensity.name = range.intensityField.displayName;
-    intensity.descriptor = range.intensityField;
-    confidence.name = range.confidenceField.displayName;
-    confidence.descriptor = range.confidenceField;
-    intensity.descriptor.sampleKind = confidence.descriptor.sampleKind = MeasurementSampleKind::Point;
-    const auto unit = range.lengthUnit;
-    for (std::size_t i = 0; i < range.zValues.size(); ++i) {
-      if (!range.rangeSampleIsValid(i)) continue;
-      const int x = range.width > 0 ? static_cast<int>(i % static_cast<std::size_t>(range.width)) : 0;
-      const int y = range.width > 0 ? static_cast<int>(i / static_cast<std::size_t>(range.width)) : 0;
-      const auto wx = range.physicalXAt(i, x, unit);
-      const auto wy = range.physicalYAt(i, y, unit);
-      const auto wz = range.physicalZAt(i, unit);
-      if (!std::isfinite(wx) || !std::isfinite(wy) || !std::isfinite(wz)) continue;
-      cloud.xyz.insert(cloud.xyz.end(), {wx, wy, wz});
-      if (!range.intensity.empty()) intensity.values.push_back(range.intensitySampleIsValid(i)
-          ? range.intensity[i] : std::numeric_limits<float>::quiet_NaN());
-      if (!range.confidence.empty()) confidence.values.push_back(range.confidenceSampleIsValid(i)
-          ? range.confidence[i] : std::numeric_limits<float>::quiet_NaN());
-    }
-    if (!intensity.values.empty()) cloud.scalarFields.push_back(std::move(intensity));
-    if (!confidence.values.empty()) cloud.scalarFields.push_back(std::move(confidence));
-    if (cloud.isValid()) {
-      frame.addPointCloud(resource.descriptor.id + ".points", std::move(cloud),
-                          resource.descriptor.displayName, resource.descriptor.groupId,
-                          resource.initialView);
-    } else {
-      retained.push_back(std::move(resource));
-    }
-  }
-  frame.ranges = std::move(retained);
-}
-
 struct PlanarRangeAssembly
 {
   RangeFrame range;
@@ -873,7 +824,6 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
         dropped(index, "confidence part has no matching range or a supported auxiliary layout");
     result.metadata.frameIndex = sequence;
     if (source.frame_id) result.metadata.frameId = std::to_string(source.frame_id);
-    presentPointCloud(result, source);
     if (rejection_reason) *rejection_reason = droppedParts;
     if (result.isValid()) return result;
     if (rejection_reason && !droppedParts.empty()) {
@@ -936,7 +886,6 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     }
     frame.metadata.frameIndex = sequence;
     if (source.frame_id) frame.metadata.frameId = std::to_string(source.frame_id);
-    presentPointCloud(frame, source);
     return frame.isValid() ? std::optional<GraphicsFrame>(std::move(frame))
                            : reject("invalid coordinate layout or missing Scan3d calibration");
   }
