@@ -375,6 +375,25 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     set_tests_properties(test_plugin_discovery PROPERTIES TIMEOUT 30
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+    qt_add_executable(onegen_source_controller_test
+      Utility/PlaygroundAdapter/Tests/SourceControllerTest.cpp
+      Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
+      Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
+      Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
+    set_target_properties(onegen_source_controller_test PROPERTIES AUTOMOC ON)
+    target_link_libraries(onegen_source_controller_test PRIVATE
+      OneGen::QtWidget OneGen::PlaygroundAdapter Qt6::Test)
+    target_compile_definitions(onegen_source_controller_test PRIVATE
+      ONEGEN_TEST_PRODUCER="$<TARGET_FILE:SyntheticGenTL>")
+    add_dependencies(onegen_source_controller_test SyntheticGenTL)
+    add_test(NAME onegen_source_controller_test COMMAND onegen_source_controller_test -o -,txt)
+    set_tests_properties(onegen_source_controller_test PROPERTIES TIMEOUT 300
+      ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+    add_test(NAME onegen_source_controller_unwritable_test COMMAND onegen_source_controller_test -o -,txt)
+    set_tests_properties(onegen_source_controller_unwritable_test PROPERTIES TIMEOUT 300
+      ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ONEGEN_SYNTHETIC_SCENARIO=M15;ONEGEN_TEST_ACQ_MODE=unwritable"
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
   endif()
 endif()
 

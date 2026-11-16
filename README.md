@@ -93,8 +93,16 @@ and use the same module commands. A target retains producer, Interface and Devic
 identity; each connection gets a fresh UUID. Pending GUI/API/discovery or Interface
 work is refused as Busy, and accepted external work drains before teardown.
 Explicit close and Live stop retain state on backend refusal. Closed leases reject
-every request even when their camera is reused for a later connection. Single completes after frame conversion;
-consumer presentation and artifact export remain separate authorities.
+every request even when their camera is reused for a later connection.
+Single and Live follow the action: Single writes
+`AcquisitionMode=SingleFrame` before it starts one native frame, and Live or
+`source.start` writes `AcquisitionMode=Continuous` before continuous acquisition.
+Only `AcquisitionMode` is written, a changed value is logged at INFO and recorded in
+the `diagnostics.OneGen` structured journal, and a missing, unwritable or unsupported
+mode refuses the action with that reason. Single availability is derived from the
+remote node map, so it is never emulated by stopping Live. Single completes after
+frame conversion; consumer presentation and artifact export remain separate
+authorities.
 
 The source controller also implements the consumer's optional
 `IDeviceParameterControl` contract. Existing `Lease::describe_features`,
