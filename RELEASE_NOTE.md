@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`. The temporary widget library resolves Qt Widgets and Resources itself until U2 removes it.
+
 - Select the acquisition mode from the requested action on the remote device node map. Single (`device.single` and the camera panel's Grab One) writes `AcquisitionMode=SingleFrame` before it acquires one native frame; Live (`source.start`, `device.live-start` and the panel's Live) writes `AcquisitionMode=Continuous`. Only `AcquisitionMode` is written, so trigger and other user settings stay. A changed value is logged at INFO and recorded in `diagnostics.OneGen`; Single is declared unavailable with the node-map reason when `AcquisitionMode` is missing, unwritable or has no `SingleFrame`, and an unwritable mode refuses the action instead of stopping a continuous stream.
 
 - Store Live frames only in the consumer's provided frame storage. The plugin-owned frame pool, its 10/12-slot and 2 GiB planning, and the `producerCapabilities().poolSize` report are removed. An empty provided lease drops and counts the frame instead of copying it into plugin memory, and the direct pinned path waits for the consumer's first pool grant instead of relying on a plugin fallback slot.

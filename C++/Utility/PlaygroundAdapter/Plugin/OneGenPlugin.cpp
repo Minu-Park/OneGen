@@ -230,8 +230,8 @@ class OneGenPlugin final : public DevicePluginTemplate, public IDevicePluginSett
     public IDevicePluginResourceClaimsReceiver, public IDevicePluginGenTLPaths,
     public IDevicePluginGenTLProducers, public IDevicePluginGenTLDiscoveryStatus, public IDevicePluginGenTLRetry {
   Q_OBJECT
-  Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
-  Q_INTERFACES(IDevicePlugin IDevicePluginSettings IDevicePluginResourceClaimsReceiver IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus IDevicePluginGenTLRetry)
+  Q_PLUGIN_METADATA(IID PlaygroundDeviceRuntime_iid)
+  Q_INTERFACES(IDeviceRuntime IDevicePluginSettings IDevicePluginResourceClaimsReceiver IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus IDevicePluginGenTLRetry)
 public:
   /** Producers run in the consumer process; their diagnostics go to its Qt log. */
   OneGenPlugin() { onegen::qt::installLogSink(); }

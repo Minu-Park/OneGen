@@ -3,7 +3,7 @@
 
 #include "ProducerCoordinator.h"
 #include "OneGenGraphicsFrameAdapter.h"
-#include "SessionFrame.h"
+#include "DeviceRuntime/Contract/SessionFrame.h"
 #include "Internal/FrameTrace.h"
 
 #include <QDebug>

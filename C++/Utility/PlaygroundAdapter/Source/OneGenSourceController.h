@@ -1,11 +1,11 @@
 #pragma once
 
-#include "FrameStorage.h"
-#include "AbstractSourceController.h"
-#include "DeviceDiagnostics.h"
+#include "DeviceRuntime/Contract/FrameStorage.h"
+#include "DeviceRuntime/Contract/AbstractSourceController.h"
+#include "DeviceRuntime/Contract/DeviceDiagnostics.h"
 #include "engine/GraphicsFrameAdapter.h"
-#include "DeviceConnectionControl.h"
-#include "DeviceParameterControl.h"
+#include "DeviceRuntime/Contract/DeviceConnectionControl.h"
+#include "DeviceRuntime/Contract/DeviceParameterControl.h"
 #include "OneGenTypes.h"
 #include "OneGenNode.h"
 #include <QFuture>
