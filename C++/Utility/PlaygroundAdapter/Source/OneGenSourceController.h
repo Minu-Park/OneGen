@@ -16,7 +16,9 @@
 #include <memory>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace onegen {
 struct Frame;
@@ -27,6 +29,12 @@ struct SharedFrame;
 class FramePool;
 }
 }
+
+/** @brief Reports a refused acquisition-mode write before any acquisition effect. */
+class OneGenAcquisitionModeRefused : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
 
 /** Owns OneGen live acquisition and delivers SessionFrame values synchronously. */
 class OneGenSourceController final : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl,
@@ -172,6 +180,21 @@ private:
   void refreshControlSnapshot();
   /** @brief Copies the connection of this controller or of its one connected child. */
   DeviceConnectionState connectionState() const;
+  /** @brief One applied AcquisitionMode transition for the owning acquisition action. */
+  struct AcquisitionModeChange {
+    bool changed = false;
+    std::string previous;
+    std::string current;
+    std::string sourceName;
+  };
+  /** @brief Writes the action's AcquisitionMode and throws `OneGenAcquisitionModeRefused` on refusal. */
+  AcquisitionModeChange applyAcquisitionMode(bool single);
+  /** @brief Records an applied mode change in the module log and structured diagnostics. */
+  void reportAcquisitionMode(const AcquisitionModeChange& change, const char* action) const;
+  /** @brief Derives Single availability from the cached Remote Device node map. */
+  DeviceConnectionAvailability singleAvailability() const;
+  /** @brief Finds one copied feature by name in a feature tree. */
+  static const onegen::FeatureNode* findFeature(const onegen::FeatureNode& root, std::string_view name);
   enum class Lifecycle { Discover, Connect, Disconnect, Single, LiveStart, LiveStop };
   /** @brief Admits one bounded lifecycle command and drains it before destruction. */
   DeviceConnectionResult admitLifecycle(Lifecycle operation, std::string argument,
