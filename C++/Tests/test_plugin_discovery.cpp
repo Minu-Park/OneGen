@@ -237,6 +237,7 @@ private slots:
     claims.hold(key);
     const auto refused = connect(camera->targetId);
     QCOMPARE(refused.error, DeviceConnectionError::Conflict);
+    QCOMPARE(refused.effect, DeviceConnectionEffect::None);
     QVERIFY(refused.message.find("in use") != std::string::npos);
     QVERIFY(!refused.state || !refused.state->connected);
     claims.drop(key);

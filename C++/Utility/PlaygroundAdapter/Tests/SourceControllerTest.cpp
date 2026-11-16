@@ -619,6 +619,7 @@ void OneGenSourceControllerTests::claimDenialRetiresTheCameraConnection()
     QVERIFY(camera);
     const auto refused = fixture.connect(camera->targetId);
     QCOMPARE(refused.error, DeviceConnectionError::Conflict);
+    QCOMPARE(refused.effect, DeviceConnectionEffect::None);
     QVERIFY(refused.message.find("in use") != std::string::npos);
     QVERIFY(refused.state == std::nullopt || !refused.state->connected);
     // The failed attempt retires its child and implicit Interface, so the same camera can retry.
