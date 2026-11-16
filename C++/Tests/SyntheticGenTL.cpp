@@ -45,6 +45,7 @@ enum class Scenario {
   M12,
   M13,
   M14,
+  M15,
 };
 
 Scenario loadScenario() {
@@ -65,6 +66,7 @@ Scenario loadScenario() {
   if (name == "M12") return Scenario::M12;
   if (name == "M13") return Scenario::M13;
   if (name == "M14") return Scenario::M14;
+  if (name == "M15") return Scenario::M15;
   return Scenario::Default;
 }
 
@@ -124,6 +126,7 @@ constexpr std::uint64_t payload_size_register = 0x1018;
 constexpr std::uint64_t trigger_register = 0x1100;
 constexpr std::uint64_t acquisition_start_register = 0x1104;
 constexpr std::uint64_t acquisition_stop_register = 0x1108;
+constexpr std::uint64_t acquisition_mode_register = 0x110C;
 
 struct ChunkData {
   std::uint64_t id = 0;
@@ -223,6 +226,7 @@ std::condition_variable g_condition;
 DeviceData g_device;
 std::string g_xml;
 std::uint32_t g_component_selector = 0;
+std::uint32_t g_acquisition_mode = 0;
 std::vector<EventData*> g_events;
 GC_ERROR g_last_error = GC_ERR_SUCCESS;
 std::string g_last_error_text;
@@ -306,6 +310,7 @@ std::string makeXml() {
     <pFeature>TriggerSoftware</pFeature>
     <pFeature>ComponentSelector</pFeature>
     <pFeature>ComponentIDValue</pFeature>
+    <pFeature>AcquisitionMode</pFeature>
   </Category>
   <IntReg Name="WidthReg">
     <Address>4096</Address>
@@ -415,6 +420,21 @@ std::string makeXml() {
     <pValue>AcquisitionStopReg</pValue>
     <CommandValue>1</CommandValue>
   </Command>
+  <IntReg Name="AcquisitionModeReg">
+    <Address>4364</Address>
+    <Length>4</Length>
+    <AccessMode>)XML";
+  out << (g_scenario == Scenario::M15 ? "RO" : "RW");
+  out << R"XML(</AccessMode>
+    <pPort>Device</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Enumeration Name="AcquisitionMode">
+    <EnumEntry Name="Continuous"><Value>0</Value></EnumEntry>
+    <EnumEntry Name="SingleFrame"><Value>1</Value></EnumEntry>
+    <pValue>AcquisitionModeReg</pValue>
+  </Enumeration>
   <Port Name="Device"/>
 </RegisterDescription>
 )XML";
@@ -662,6 +682,9 @@ GC_ERROR readRegister(std::uint64_t address, void* buffer, std::size_t* size) {
     case acquisition_stop_register:
       value = 0;
       break;
+    case acquisition_mode_register:
+      value = g_acquisition_mode;
+      break;
     default:
       return GC_ERR_INVALID_ADDRESS;
   }
@@ -686,6 +709,9 @@ GC_ERROR writeRegister(std::uint64_t address, const void* buffer, std::size_t* s
       return GC_ERR_SUCCESS;
     case acquisition_start_register:
     case acquisition_stop_register:
+      return GC_ERR_SUCCESS;
+    case acquisition_mode_register:
+      g_acquisition_mode = value;
       return GC_ERR_SUCCESS;
     case width_register:
     case height_register:

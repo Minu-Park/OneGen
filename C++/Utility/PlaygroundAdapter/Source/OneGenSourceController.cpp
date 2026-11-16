@@ -7,9 +7,12 @@
 #include "Internal/FrameTrace.h"
 
 #include <QDebug>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLoggingCategory>
 #include <QString>
 #include <QStringList>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <functional>
@@ -86,6 +89,97 @@ void OneGenSourceController::refreshControlSnapshot() {
   auto features = lease->describe_features();
   std::lock_guard lock(mutex_);
   control_streams_ = std::move(streams); control_features_ = std::move(features);
+}
+
+const onegen::FeatureNode* OneGenSourceController::findFeature(const onegen::FeatureNode& root,
+                                                               const std::string_view name) {
+  if (root.name == name) return &root;
+  for (const auto& child : root.children)
+    if (const auto* found = findFeature(child, name)) return found;
+  return nullptr;
+}
+
+DeviceConnectionAvailability OneGenSourceController::singleAvailability() const {
+  std::vector<const OneGenSourceController*> candidates;
+  {
+    std::lock_guard lock(mutex_);
+    candidates.push_back(this);
+    for (const auto& [id, child] : children_) candidates.push_back(child.controller.get());
+  }
+  for (const auto* candidate : candidates) {
+    std::lock_guard lock(candidate->mutex_);
+    if (candidate->control_features_.empty()) continue;
+    const onegen::FeatureNode* mode = nullptr;
+    for (const auto& [module, tree] : candidate->control_features_)
+      if (module == "Remote Device") mode = findFeature(tree, "AcquisitionMode");
+    if (!mode) return {false, "The device has no AcquisitionMode feature."};    if (!mode->writable)
+      return {false, "AcquisitionMode is not writable in the device's current state."};
+    if (mode->kind != onegen::NodeKind::Enumeration)
+      return {false, "AcquisitionMode is not an enumeration."};
+    if (std::find(mode->enum_entries.begin(), mode->enum_entries.end(), "SingleFrame")
+        == mode->enum_entries.end())
+      return {false, "AcquisitionMode does not offer SingleFrame."};
+    return {true, {}};
+  }
+  return {false, "Connect the device to observe AcquisitionMode."};
+}
+
+OneGenSourceController::AcquisitionModeChange OneGenSourceController::applyAcquisitionMode(
+    const bool single) {
+  const auto lease = deviceLease();
+  if (!lease) throw OneGenAcquisitionModeRefused("Device is disconnected.");
+  AcquisitionModeChange change;
+  {
+    std::lock_guard lock(mutex_);
+    const auto& info = lease->info();
+    change.sourceName = info.display_name.empty() ? info.id : info.display_name;
+  }
+  const std::string desired = single ? "SingleFrame" : "Continuous";
+  try {
+    const auto mode = lease->read_node(0, "AcquisitionMode");
+    if (!mode.readable)
+      throw OneGenAcquisitionModeRefused("AcquisitionMode is not readable on this device.");
+    if (mode.kind != onegen::NodeKind::Enumeration)
+      throw OneGenAcquisitionModeRefused("AcquisitionMode is not an enumeration on this device.");
+    if (!mode.writable)
+      throw OneGenAcquisitionModeRefused(
+          "AcquisitionMode is not writable in the device's current state.");
+    if (std::find(mode.enum_entries.begin(), mode.enum_entries.end(), desired)
+        == mode.enum_entries.end())
+      throw OneGenAcquisitionModeRefused("AcquisitionMode does not offer " + desired + ".");
+    change.previous = mode.enum_value;
+    change.current = change.previous;
+    if (change.previous != desired) {
+      const auto written = lease->write_node(0, "AcquisitionMode", "enum", desired);
+      change.current = written.enum_value;
+      if (change.current != desired)
+        throw OneGenAcquisitionModeRefused("AcquisitionMode readback is " + change.current
+                                           + " after requesting " + desired + ".");
+      change.changed = true;
+    }
+  } catch (const OneGenAcquisitionModeRefused&) {
+    throw;
+  } catch (const std::exception& error) {
+    throw OneGenAcquisitionModeRefused(std::string("AcquisitionMode could not be written: ")
+                                        + error.what());
+  }
+  return change;
+}
+
+void OneGenSourceController::reportAcquisitionMode(const AcquisitionModeChange& change,
+                                                   const char* action) const {
+  if (!change.changed) return;
+  const auto camera = QString::fromStdString(change.sourceName);
+  const auto previous = QString::fromStdString(change.previous);
+  const auto current = QString::fromStdString(change.current);
+  qCInfo(onegenSourceDiagnosticLog).noquote() << QStringLiteral(
+      "[GenICam] AcquisitionMode changed: camera=%1 action=%2 previous=%3 current=%4")
+      .arg(camera, QString::fromLatin1(action), previous, current);
+  qCDebug(onegenSourceDiagnosticLog).noquote() << "@diagnostic " + QString::fromUtf8(QJsonDocument(QJsonObject{
+      {"event", "acquisition_mode"}, {"fields", QJsonObject{
+          {"camera", camera}, {"action", QString::fromLatin1(action)},
+          {"previous", previous}, {"current", current}, {"changed", true}}}})
+      .toJson(QJsonDocument::Compact));
 }
 std::shared_ptr<onegen::producer::Lease> OneGenSourceController::openDevice(
     std::shared_ptr<onegen::producer::Coordinator> coordinator, const onegen::DeviceInfo& device) {
@@ -352,6 +446,8 @@ void OneGenSourceController::start()
     if (!lease) return;
     const auto& info = lease->info();
     const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
+    const auto modeChange = applyAcquisitionMode(false);
+    reportAcquisitionMode(modeChange, "live");
     configureFrameStorage(*lease, sourceName);
   }
   received_frames_.store(0, std::memory_order_relaxed);
@@ -476,6 +572,8 @@ void OneGenSourceController::grabOne(const QString& diagnosticDirectory)
     }
   }
   if (!lease) return;
+  const auto modeChange = applyAcquisitionMode(true);
+  reportAcquisitionMode(modeChange, "single");
   delivered_frames_.store(0, std::memory_order_relaxed);
   rejected_frames_.store(0, std::memory_order_relaxed);
   emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
@@ -721,7 +819,10 @@ DeviceConnectionState OneGenSourceController::connectionState() const {
 DeviceConnectionCapabilities OneGenSourceController::connectionCapabilities() const {
   const DeviceConnectionAvailability availability = coordinator_ ? DeviceConnectionAvailability{true, {}}
       : DeviceConnectionAvailability{false, "Device control has no coordinator."};
-  return {availability, availability, availability, availability, availability, availability};
+  return {availability, availability, availability, availability,
+      coordinator_ ? singleAvailability()
+                   : DeviceConnectionAvailability{false, "Device control has no coordinator."},
+      availability};
 }
 
 DeviceConnectionResult OneGenSourceController::requestConnectionTargets(TargetsCompletion completion) {
@@ -823,6 +924,10 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
       if (operation != Lifecycle::Disconnect && operation != Lifecycle::Discover && operation != Lifecycle::Connect)
         try { target->refreshControlSnapshot(); } catch (const std::exception& error) { qWarning() << "[GenICam] feature refresh failed:" << error.what(); }
       result = {{}, {}, DeviceConnectionEffect::Applied, connectionState()};
+    } catch (const OneGenAcquisitionModeRefused& error) {
+      // The mode write is the action's first effect; refusal leaves acquisition untouched.
+      result = {DeviceConnectionError::Unavailable, error.what(), DeviceConnectionEffect::None,
+          connectionState()};
     } catch (const std::exception& error) {
       // Discovery keeps the previous inventory, so only device commands leave an uncertain effect.
       result = {DeviceConnectionError::BackendFailure, error.what(),
