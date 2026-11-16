@@ -1,7 +1,10 @@
+#include "DevicePlugin/AbstractSourceController.h"
+#include "DevicePlugin/DeviceConnectionControl.h"
 #include "DevicePlugin/DevicePlugin.h"
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPluginLoader>
@@ -9,6 +12,10 @@
 #include <QTest>
 #include <QScopeGuard>
 #include <algorithm>
+#include <atomic>
+#include <functional>
+#include <future>
+#include <memory>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -16,6 +23,53 @@
 #endif
 
 namespace {
+class TestResourceClaim final : public IDevicePluginResourceClaim {
+public:
+  TestResourceClaim(QString key, std::function<void()> release)
+      : key_(std::move(key)), release_(std::move(release)) {}
+  ~TestResourceClaim() override { release(); }
+  QString key() const override { return key_; }
+  void release() override {
+    if (released_.exchange(true)) return;
+    release_();
+  }
+
+private:
+  QString key_;
+  std::function<void()> release_;
+  std::atomic<bool> released_{false};
+};
+
+/** @brief Host claim stub used to prove the plugin's per-camera claim path. */
+class TestResourceClaims final : public IDevicePluginResourceClaims {
+public:
+  void hold(const QString& key) {
+    QMutexLocker lock(&mutex_);
+    ++held_[key];
+  }
+  void drop(const QString& key) {
+    QMutexLocker lock(&mutex_);
+    if (--held_[key] <= 0) held_.remove(key);
+  }
+  std::shared_ptr<IDevicePluginResourceClaim> claimResource(const QString& key,
+      QString* error) override {
+    {
+      QMutexLocker lock(&mutex_);
+      if (held_.value(key) > 0) {
+        if (error) *error = QStringLiteral("Hardware resource '%1' is in use by another session.")
+                                .arg(key);
+        return {};
+      }
+      ++held_[key];
+    }
+    return std::make_shared<TestResourceClaim>(key, [this, key] { drop(key); });
+  }
+
+private:
+  QMutex mutex_;
+  QHash<QString, int> held_;
+};
+
 QMutex log_mutex;
 QList<QPair<QtMsgType, QString>> logs;
 void capture(QtMsgType type, const QMessageLogContext&, const QString& text) {
@@ -121,6 +175,80 @@ private slots:
     }
     QVERIFY(loader.unload());
   }
+  void cameraClaimDenialIsAPreEffectConflict() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString cti = temporary.filePath("Claim.cti");
+    QVERIFY(QFile::copy(QString::fromUtf8(ONEGEN_TEST_PRODUCER), cti));
+    qputenv("ONEGEN_SYNTHETIC_DEVICES", "1");
+    qputenv("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "GEV");
+    const auto restoreEnvironment = qScopeGuard([] {
+      qunsetenv("ONEGEN_SYNTHETIC_DEVICES");
+      qunsetenv("ONEGEN_SYNTHETIC_INTERFACE_TYPE");
+    });
+
+    QPluginLoader loader(QString::fromUtf8(ONEGEN_TEST_PLUGIN));
+    auto* object = loader.instance();
+    QVERIFY2(object, qPrintable(loader.errorString()));
+    auto* plugin = qobject_cast<IDevicePlugin*>(object);
+    auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
+    auto* receiver = dynamic_cast<IDevicePluginResourceClaimsReceiver*>(object);
+    QVERIFY(plugin && producers && receiver);
+    TestResourceClaims claims;
+    receiver->setResourceClaims(&claims);
+    QString error;
+    QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
+    QVariantMap discovery;
+    QVERIFY2(plugin->discoverDevices(&discovery, &error), qPrintable(error));
+    auto session = plugin->createSession(discovery, &error);
+    QVERIFY2(session != nullptr, qPrintable(error));
+    auto* connection = dynamic_cast<IDeviceConnectionControl*>(session->sourceController());
+    QVERIFY(connection);
+
+    const auto requestTargets = [&]() -> DeviceConnectionTargets {
+      auto promise = std::make_shared<std::promise<DeviceConnectionTargets>>();
+      auto future = promise->get_future();
+      const auto admitted = connection->requestConnectionTargets([promise](DeviceConnectionTargets value) {
+        promise->set_value(std::move(value));
+      });
+      if (admitted.error != DeviceConnectionError::None)
+        return {{admitted.error, admitted.message}, {}};
+      if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+        return {{DeviceConnectionError::Timeout, "Target observation timed out."}, {}};
+      return future.get();
+    };
+    const auto connect = [&](const std::string& target) {
+      auto promise = std::make_shared<std::promise<DeviceConnectionResult>>();
+      auto future = promise->get_future();
+      const auto admitted = connection->requestConnect(target, [promise](DeviceConnectionResult value) {
+        promise->set_value(std::move(value));
+      });
+      if (admitted.error != DeviceConnectionError::None) return admitted;
+      if (future.wait_for(std::chrono::seconds(30)) != std::future_status::ready)
+        return DeviceConnectionResult{DeviceConnectionError::Timeout, "Connect timed out."};
+      return future.get();
+    };
+
+    const auto targets = requestTargets();
+    const auto camera = std::find_if(targets.targets.begin(), targets.targets.end(),
+        [](const auto& target) { return target.kind == DeviceConnectionTargetKind::Device; });
+    QVERIFY(camera != targets.targets.end());
+    const QString key = QStringLiteral("camera:synth-0001");
+    claims.hold(key);
+    const auto refused = connect(camera->targetId);
+    QCOMPARE(refused.error, DeviceConnectionError::Conflict);
+    QVERIFY(refused.message.find("in use") != std::string::npos);
+    QVERIFY(!refused.state || !refused.state->connected);
+    claims.drop(key);
+    const auto accepted = connect(camera->targetId);
+    QVERIFY2(accepted.error == DeviceConnectionError::None, accepted.message.c_str());
+    QVERIFY(accepted.state && accepted.state->connected);
+
+    session.reset();
+    plugin->shutdown();
+    QVERIFY(loader.unload());
+  }
+
   void emptyAndFailedScans_data() {
     QTest::addColumn<QString>("producer");
     QTest::addColumn<int>("phase");
