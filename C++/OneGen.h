@@ -41,6 +41,8 @@ public:
   NodeMap& interface_features(std::string_view id);
   /** Reads the node map of an explicitly producer-scoped interface. */
   NodeMap& interface_features(const InterfaceInfo& info);
+  /** Loads the producer-global System/TL node map shared by every interface. */
+  NodeMap& system_features(const InterfaceInfo& info);
   /** Pins a selected interface until explicit release. */
   void open_interface(std::string_view id);
   /** Pins the interface belonging to the selected producer. */

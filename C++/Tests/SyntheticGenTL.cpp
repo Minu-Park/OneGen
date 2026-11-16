@@ -219,7 +219,7 @@ struct HandleBase {
   std::string module = "Device";
 };
 struct TlHandle : HandleBase {
-  TlHandle() { tag = 0; }
+  TlHandle() { tag = 0; module = "System/TL"; }
 };
 struct IfHandle : HandleBase {
   explicit IfHandle(std::string interface_id)
@@ -243,6 +243,9 @@ std::condition_variable g_condition;
 std::map<std::string, DeviceData> g_devices;
 std::string g_xml;
 std::string g_interface_xml;
+std::string g_system_xml;
+std::uint32_t g_system_heartbeat = 1;
+std::uint32_t g_system_commands = 0;
 const std::string g_interface_id = "SyntheticBoard";
 std::string g_interface_type;
 int g_device_count = 1;
@@ -410,6 +413,7 @@ std::string makeXml() {
     <Endianess>LittleEndian</Endianess>
   </IntReg>
   <Integer Name="Width">
+    <Streamable>Yes</Streamable>
     <pValue>WidthReg</pValue>
     <Min>1</Min>
     <Max>16777215</Max>
@@ -452,6 +456,7 @@ std::string makeXml() {
     <Endianess>LittleEndian</Endianess>
   </IntReg>
   <Enumeration Name="ComponentSelector">
+    <Streamable>Yes</Streamable>
     <EnumEntry Name="Intensity"><Value>0</Value></EnumEntry>
     <EnumEntry Name="Depth"><Value>1</Value></EnumEntry>
 )XML";
@@ -461,6 +466,7 @@ std::string makeXml() {
     out << "\"><Value>2</Value></EnumEntry>\n";
   }
   out << R"XML(    <pValue>ComponentSelectorReg</pValue>
+    <pSelected>ComponentIDValue</pSelected>
   </Enumeration>
   <IntReg Name="ComponentIDValueReg">
     <Address>4116</Address>
@@ -520,6 +526,7 @@ std::string makeXml() {
     <Endianess>LittleEndian</Endianess>
   </IntReg>
   <Enumeration Name="AcquisitionMode">
+    <Streamable>Yes</Streamable>
     <EnumEntry Name="Continuous"><Value>0</Value></EnumEntry>
     <EnumEntry Name="SingleFrame"><Value>1</Value></EnumEntry>
     <pValue>AcquisitionModeReg</pValue>
@@ -559,6 +566,7 @@ std::string makeInterfaceXml() {
     <Endianess>LittleEndian</Endianess>
   </IntReg>
   <Integer Name="InterfaceSpeed">
+    <Streamable>Yes</Streamable>
     <pValue>InterfaceSpeedReg</pValue>
     <Min>0</Min>
     <Max>100000</Max>
@@ -576,6 +584,59 @@ std::string makeInterfaceXml() {
     <pValue>InterfaceTypeReg</pValue>
   </Integer>
   <Port Name="Interface"/>
+</RegisterDescription>
+)XML";
+  return out.str();
+}
+
+std::string makeSystemXml() {
+  std::ostringstream out;
+  out << R"XML(<?xml version="1.0" encoding="utf-8"?>
+<RegisterDescription
+    ModelName="SyntheticSystem"
+    VendorName="OneGen"
+    StandardNameSpace="None"
+    SchemaMajorVersion="1"
+    SchemaMinorVersion="1"
+    SchemaSubMinorVersion="0"
+    MajorVersion="1"
+    MinorVersion="0"
+    SubMinorVersion="0"
+    ProductGuid="1A7C1C77-6E9A-4C22-B8F1-2B3D4C5E6F70"
+    VersionGuid="2B8D2D88-7FAB-4D33-C9A2-3C4E5D6F7081"
+    xmlns="http://www.genicam.org/GenApi/Version_1_1">
+  <Category Name="Root">
+    <pFeature>SystemHeartbeat</pFeature>
+    <pFeature>SystemCommand</pFeature>
+  </Category>
+  <IntReg Name="SystemHeartbeatReg">
+    <Address>9216</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>System</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Integer Name="SystemHeartbeat">
+    <Streamable>Yes</Streamable>
+    <pValue>SystemHeartbeatReg</pValue>
+    <Min>0</Min>
+    <Max>1000</Max>
+    <Inc>1</Inc>
+  </Integer>
+  <IntReg Name="SystemCommandReg">
+    <Address>9220</Address>
+    <Length>4</Length>
+    <AccessMode>RW</AccessMode>
+    <pPort>System</pPort>
+    <Sign>Unsigned</Sign>
+    <Endianess>LittleEndian</Endianess>
+  </IntReg>
+  <Command Name="SystemCommand">
+    <pValue>SystemCommandReg</pValue>
+    <CommandValue>1</CommandValue>
+  </Command>
+  <Port Name="System"/>
 </RegisterDescription>
 )XML";
   return out.str();
@@ -891,9 +952,47 @@ GC_ERROR readInterfaceRegister(std::uint64_t address, void* buffer, std::size_t*
   return GC_ERR_SUCCESS;
 }
 
+GC_ERROR readSystemRegister(std::uint64_t address, void* buffer, std::size_t* size) {
+  if (!size) return GC_ERR_INVALID_PARAMETER;
+  if (!buffer) {
+    *size = 4;
+    return GC_ERR_BUFFER_TOO_SMALL;
+  }
+  if (*size < 4) {
+    *size = 4;
+    return GC_ERR_BUFFER_TOO_SMALL;
+  }
+  std::uint32_t value = 0;
+  switch (address) {
+    case 9216: value = g_system_heartbeat; break;
+    case 9220: value = g_system_commands; break;
+    default: return GC_ERR_INVALID_ADDRESS;
+  }
+  std::memcpy(buffer, &value, sizeof(value));
+  *size = sizeof(value);
+  return GC_ERR_SUCCESS;
+}
+
+GC_ERROR writeSystemRegister(std::uint64_t address, const void* buffer, std::size_t* size) {
+  if (!buffer || !size || *size != 4) return GC_ERR_INVALID_PARAMETER;
+  std::uint32_t value = 0;
+  std::memcpy(&value, buffer, sizeof(value));
+  switch (address) {
+    case 9216: g_system_heartbeat = value; return GC_ERR_SUCCESS;
+    case 9220: ++g_system_commands; return GC_ERR_SUCCESS;
+    default: return GC_ERR_INVALID_ADDRESS;
+  }
+}
+
+const std::string& moduleXml(const std::string& module) {
+  if (module == "Interface") return g_interface_xml;
+  if (module == "System/TL") return g_system_xml;
+  return g_xml;
+}
+
 std::string portUrl(const std::string& module) {
-  const auto size = module == "Interface" ? g_interface_xml.size() : g_xml.size();
-  return "local:synthetic.xml;0;" + hex(size);
+  const auto& xml = moduleXml(module);
+  return "local:synthetic.xml;0;" + hex(xml.size());
 }
 
 }  // namespace
@@ -935,6 +1034,9 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCInitLib(void) {
   g_interface_type = type && *type ? type : "CXP";
   g_xml = makeXml();
   g_interface_xml = makeInterfaceXml();
+  g_system_xml = makeSystemXml();
+  g_system_heartbeat = 1;
+  g_system_commands = 0;
   resetDevices();
   g_last_error = GC_ERR_SUCCESS;
   g_last_error_text.clear();
@@ -948,6 +1050,7 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCCloseLib(void) {
   g_devices.clear();
   g_xml.clear();
   g_interface_xml.clear();
+  g_system_xml.clear();
   return GC_ERR_SUCCESS;
 }
 
@@ -957,7 +1060,7 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCReadPort(PORT_HANDLE port, std::uint64_t addr
   if (!valid(port)) return GC_ERR_INVALID_HANDLE;
   auto& handle = *static_cast<HandleBase*>(port);
   if (address == 0) {
-    const auto& xml = handle.module == "Interface" ? g_interface_xml : g_xml;
+    const auto& xml = moduleXml(handle.module);
     if (xml.empty()) return GC_ERR_INVALID_HANDLE;
     if (!size) return GC_ERR_INVALID_PARAMETER;
     const auto copied = std::min(*size, xml.size());
@@ -974,6 +1077,7 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCReadPort(PORT_HANDLE port, std::uint64_t addr
     return GC_ERR_SUCCESS;
   }
   if (handle.module == "Interface") return readInterfaceRegister(address, buffer, size);
+  if (handle.module == "System/TL") return readSystemRegister(address, buffer, size);
   return readRegister(handle.id, address, buffer, size);
 }
 
@@ -986,6 +1090,7 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCWritePort(PORT_HANDLE port, std::uint64_t add
     if (!buffer || !size || *size != 4) return GC_ERR_INVALID_PARAMETER;
     return GC_ERR_SUCCESS;
   }
+  if (handle.module == "System/TL") return writeSystemRegister(address, buffer, size);
   return writeRegister(handle.id, address, buffer, size);
 }
 
@@ -997,12 +1102,14 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE GCGetPortInfo(PORT_HANDLE port, PORT_INFO_CMD c
   const auto& handle = *static_cast<HandleBase*>(port);
   switch (command) {
     case PORT_INFO_ID: return giveString(type, buffer, size,
-        handle.module == "Interface" ? g_interface_id : handle.id);
+        handle.module == "Interface" ? g_interface_id
+        : handle.module == "System/TL" ? "SyntheticSystem" : handle.id);
     case PORT_INFO_VENDOR: return giveString(type, buffer, size, "OneGen");
     case PORT_INFO_MODEL: return giveString(type, buffer, size, "Synthetic");
     case PORT_INFO_TLTYPE: return giveString(type, buffer, size, "Synthetic");
     case PORT_INFO_MODULE: return giveString(type, buffer, size, handle.module);
-    case PORT_INFO_PORTNAME: return giveString(type, buffer, size, handle.module);
+    case PORT_INFO_PORTNAME: return giveString(type, buffer, size,
+        handle.module == "System/TL" ? "System" : handle.module);
     case PORT_INFO_LITTLE_ENDIAN: return give(type, buffer, size, INFO_DATATYPE_BOOL8, bool8_t{1});
     case PORT_INFO_BIG_ENDIAN: return give(type, buffer, size, INFO_DATATYPE_BOOL8, bool8_t{0});
     case PORT_INFO_ACCESS_READ: return give(type, buffer, size, INFO_DATATYPE_BOOL8, bool8_t{1});

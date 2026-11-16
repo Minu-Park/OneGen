@@ -51,6 +51,7 @@ OneGenSourceController::OneGenSourceController(QObject* parent)
 
 OneGenSourceController::~OneGenSourceController()
 {
+  stopParameterWatches();
   drainControl();
   std::vector<OneGenSourceController*> children;
   {

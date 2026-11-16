@@ -9,6 +9,7 @@
 #include "OneGenSourceController.h"
 #include "ProducerCoordinator.h"
 #include "HardwareResourceKey.h"
+#include "ToolProvider.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -142,6 +143,43 @@ struct Fixture {
         std::lock_guard lock(_framesMutex);
         return _framesByIndex.count(index) ? _framesByIndex.at(index) : 0;
     }
+    DeviceParameterInventory inventory()
+    {
+        auto promise = std::make_shared<std::promise<DeviceParameterInventory>>();
+        auto future = promise->get_future();
+        const auto admitted = _controller->requestParameters([promise](DeviceParameterInventory value) {
+            promise->set_value(std::move(value));
+        });
+        if (admitted.error != DeviceParameterError::None) return {{admitted.error, admitted.message}, {}};
+        if (future.wait_for(std::chrono::seconds(30)) != std::future_status::ready)
+            return {{DeviceParameterError::BackendFailure, "Parameter inventory timed out."}, {}};
+        return future.get();
+    }
+    DeviceParameterResult readParameter(const DeviceParameterTarget& target)
+    {
+        auto promise = std::make_shared<std::promise<DeviceParameterResult>>();
+        auto future = promise->get_future();
+        const auto admitted = _controller->requestReadParameter(target,
+            [promise](DeviceParameterResult value) { promise->set_value(std::move(value)); });
+        if (admitted.error != DeviceParameterError::None) return admitted;
+        if (future.wait_for(std::chrono::seconds(30)) != std::future_status::ready)
+            return {DeviceParameterError::BackendFailure, "Parameter read timed out.",
+                    DeviceParameterEffect::None, std::nullopt};
+        return future.get();
+    }
+    DeviceParameterResult writeParameter(const DeviceParameterTarget& target,
+        const DeviceParameterValue& value, const std::optional<std::uint64_t> revision = {})
+    {
+        auto promise = std::make_shared<std::promise<DeviceParameterResult>>();
+        auto future = promise->get_future();
+        const auto admitted = _controller->requestWriteParameter(target, value, revision,
+            [promise](DeviceParameterResult result) { promise->set_value(std::move(result)); });
+        if (admitted.error != DeviceParameterError::None) return admitted;
+        if (future.wait_for(std::chrono::seconds(30)) != std::future_status::ready)
+            return {DeviceParameterError::BackendFailure, "Parameter write timed out.",
+                    DeviceParameterEffect::None, std::nullopt};
+        return future.get();
+    }
     std::shared_ptr<onegen::producer::Coordinator> _coordinator;
     std::unique_ptr<OneGenSourceController> _controller;
     std::atomic<int> _frames{0};
@@ -176,6 +214,10 @@ private slots:
     void interfaceFeaturesFallBackWithoutIfGetPort();
     void partialStartReportsFailures();
     void perConnectionAdmissionIsolation();
+    void interfaceAndSystemParametersUseTheInterfaceConnection();
+    void parameterTreeStructureAndRevisionFencing();
+    void parameterChangeNotificationsResyncOnOverflow();
+    void declaredModuleActions();
     void cleanupTestCase();
 
 private:
@@ -183,6 +225,8 @@ private:
     DeviceConnectionTargets discover();
     void connectTarget();
     DeviceParameterInventory inventory();
+    ApiResult<QJsonValue> invokeTool(IToolProvider& provider, const QString& name,
+        const QJsonObject& arguments = {});
     std::string readAcquisitionMode();
     void disconnect();
 
@@ -252,6 +296,23 @@ DeviceParameterInventory OneGenSourceControllerTests::inventory()
     if (future.wait_for(std::chrono::seconds(30)) != std::future_status::ready)
         return {{DeviceParameterError::BackendFailure, "Parameter inventory timed out."}, {}};
     return future.get();
+}
+
+ApiResult<QJsonValue> OneGenSourceControllerTests::invokeTool(IToolProvider& provider,
+    const QString& name, const QJsonObject& arguments)
+{
+    std::optional<ApiResult<QJsonValue>> result;
+    const auto admitted = provider.requestTool(name, 1, arguments,
+        [&result](ApiResult<QJsonValue> value) { result = std::move(value); });
+    if (!admitted.succeeded()) {
+        const auto* error = admitted.error();
+        return ApiResult<QJsonValue>::failure(error ? error->code : ApiErrorCode::Internal,
+            error ? error->message : QStringLiteral("The tool was not admitted."));
+    }
+    if (!result && !waitFor([&] { return result.has_value(); }, 30000))
+        return ApiResult<QJsonValue>::failure(ApiErrorCode::Timeout, "The tool did not complete.");
+    return result ? std::move(*result)
+                  : ApiResult<QJsonValue>::failure(ApiErrorCode::Internal, "The tool did not complete.");
 }
 
 std::string OneGenSourceControllerTests::readAcquisitionMode()
@@ -710,6 +771,367 @@ void OneGenSourceControllerTests::perConnectionAdmissionIsolation()
     QCOMPARE(second.get().error, DeviceConnectionError::None);
     QVERIFY(fixture.framesFor(states.at(1).sources.at(0).sourceIndex) >= 1);
     QVERIFY(fixture.framesFor(states.at(2).sources.at(0).sourceIndex) >= 1);
+}
+
+void OneGenSourceControllerTests::interfaceAndSystemParametersUseTheInterfaceConnection()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+    EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "1");
+    EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "CXP");
+    Fixture fixture;
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto opened = fixture.connect(targetOfKind(targets, DeviceConnectionTargetKind::Interface, 0)->targetId);
+    QVERIFY2(opened.error == DeviceConnectionError::None, opened.message.c_str());
+    const auto interfaceConnection = opened.state->connectionId;
+    const auto listed = fixture.inventory();
+    QCOMPARE(listed.result.error, DeviceParameterError::None);
+    const auto findParameter = [&](const std::string& scope, const std::string& name)
+        -> const DeviceParameterDescriptor* {
+        for (const auto& parameter : listed.parameters)
+            if (parameter.target.scope == scope && parameter.target.name == name) return &parameter;
+        return nullptr;
+    };
+    const auto* interfaceSpeed = findParameter("Interface", "InterfaceSpeed");
+    QVERIFY(interfaceSpeed);
+    QCOMPARE(interfaceSpeed->target.connectionId, interfaceConnection);
+    QVERIFY(interfaceSpeed->categoryPath == std::vector<std::string>({"Root"}));
+    QVERIFY(interfaceSpeed->representation == DeviceParameterRepresentation::Number);
+    const auto* systemHeartbeat = findParameter("System/TL", "SystemHeartbeat");
+    QVERIFY(systemHeartbeat);
+    QCOMPARE(systemHeartbeat->target.connectionId, interfaceConnection);
+    QVERIFY(systemHeartbeat->producerShared);
+    QVERIFY(!interfaceSpeed->producerShared);
+    QVERIFY(interfaceSpeed->value);
+    QCOMPARE(std::get<std::int64_t>(*interfaceSpeed->value), std::int64_t(1000));
+
+    const auto written = fixture.writeParameter(interfaceSpeed->target, std::int64_t(2001),
+        interfaceSpeed->revision);
+    QVERIFY2(written.error == DeviceParameterError::None, written.message.c_str());
+    QCOMPARE(written.effect, DeviceParameterEffect::Applied);
+    QVERIFY(written.descriptor && written.descriptor->value);
+    QCOMPARE(std::get<std::int64_t>(*written.descriptor->value), std::int64_t(2001));
+    const auto stale = fixture.writeParameter(interfaceSpeed->target, std::int64_t(2002),
+        interfaceSpeed->revision);
+    QCOMPARE(stale.error, DeviceParameterError::Conflict);
+    QCOMPARE(stale.effect, DeviceParameterEffect::None);
+
+    const auto systemWritten = fixture.writeParameter(systemHeartbeat->target, std::int64_t(7),
+        systemHeartbeat->revision);
+    QVERIFY2(systemWritten.error == DeviceParameterError::None, systemWritten.message.c_str());
+    QCOMPARE(systemWritten.effect, DeviceParameterEffect::Applied);
+    QVERIFY(systemWritten.descriptor && systemWritten.descriptor->value);
+    QCOMPARE(std::get<std::int64_t>(*systemWritten.descriptor->value), std::int64_t(7));
+    const auto systemStale = fixture.writeParameter(systemHeartbeat->target, std::int64_t(8),
+        systemHeartbeat->revision);
+    QCOMPARE(systemStale.error, DeviceParameterError::Conflict);
+
+    const auto camera = fixture.connect(targetOfKind(targets, DeviceConnectionTargetKind::Device, 0)->targetId);
+    QVERIFY2(camera.error == DeviceConnectionError::None, camera.message.c_str());
+    const auto cameraConnection = camera.state->connectionId;
+    const auto afterCamera = fixture.inventory();
+    QCOMPARE(afterCamera.result.error, DeviceParameterError::None);
+    for (const auto& parameter : afterCamera.parameters)
+        if (parameter.target.connectionId == cameraConnection)
+            QVERIFY(parameter.target.scope != "Interface" && parameter.target.scope != "System/TL");
+    auto cameraInterface = *interfaceSpeed;
+    cameraInterface.target.connectionId = cameraConnection;
+    const auto cameraRefused = fixture.writeParameter(cameraInterface.target, std::int64_t(9), std::nullopt);
+    QCOMPARE(cameraRefused.error, DeviceParameterError::Conflict);
+    QVERIFY(cameraRefused.message.find("Interface connection") != std::string::npos);
+    const auto systemWhileCamera = fixture.writeParameter(systemHeartbeat->target, std::int64_t(9), std::nullopt);
+    QVERIFY2(systemWhileCamera.error == DeviceParameterError::None, systemWhileCamera.message.c_str());
+    const auto busyInterface = fixture.writeParameter(interfaceSpeed->target, std::int64_t(2003), std::nullopt);
+    QCOMPARE(busyInterface.error, DeviceParameterError::Unavailable);
+    QVERIFY(busyInterface.message.find("Disconnect all cameras") != std::string::npos);
+    QVERIFY2(fixture.disconnect(cameraConnection).error == DeviceConnectionError::None,
+        "The camera did not disconnect.");
+    const auto afterDisconnect = fixture.writeParameter(interfaceSpeed->target, std::int64_t(2004), std::nullopt);
+    QVERIFY2(afterDisconnect.error == DeviceParameterError::None, afterDisconnect.message.c_str());
+    QCOMPARE(afterDisconnect.effect, DeviceParameterEffect::Applied);
+    QVERIFY2(fixture.disconnect(interfaceConnection).error == DeviceConnectionError::None,
+        "The Interface did not disconnect.");
+}
+
+void OneGenSourceControllerTests::parameterTreeStructureAndRevisionFencing()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+    EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "1");
+    EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "CXP");
+    Fixture fixture;
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto connected = fixture.connect(targetOfKind(targets, DeviceConnectionTargetKind::Device, 0)->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    const auto connection = connected.state->connectionId;
+    const auto listed = fixture.inventory();
+    QCOMPARE(listed.result.error, DeviceParameterError::None);
+    const auto findParameter = [&](const std::string& scope, const std::string& name)
+        -> const DeviceParameterDescriptor* {
+        for (const auto& parameter : listed.parameters)
+            if (parameter.target.connectionId == connection && parameter.target.scope == scope
+                && parameter.target.name == name) return &parameter;
+        return nullptr;
+    };
+    const auto* width = findParameter("RemoteDevice", "Width");
+    QVERIFY(width);
+    QVERIFY(width->categoryPath == std::vector<std::string>({"Root"}));
+    QVERIFY(width->visibility == DeviceParameterVisibility::Primary);
+    QVERIFY(width->representation == DeviceParameterRepresentation::Number);
+    const auto* pixelFormat = findParameter("RemoteDevice", "PixelFormat");
+    QVERIFY(pixelFormat);
+    QVERIFY(pixelFormat->representation == DeviceParameterRepresentation::Choice);
+    const auto* trigger = findParameter("RemoteDevice", "TriggerSoftware");
+    QVERIFY(trigger);
+    QVERIFY(trigger->representation == DeviceParameterRepresentation::Automatic);
+    const auto* componentId = findParameter("RemoteDevice", "ComponentIDValue");
+    QVERIFY(componentId);
+    const auto selectedBy = std::find_if(componentId->selectorRelations.begin(),
+        componentId->selectorRelations.end(), [](const auto& relation) {
+            return relation.name == "ComponentSelector"
+                && relation.role == DeviceParameterSelectorRole::SelectedBy;
+        });
+    QVERIFY(selectedBy != componentId->selectorRelations.end());
+    const auto* componentSelector = findParameter("RemoteDevice", "ComponentSelector");
+    QVERIFY(componentSelector);
+    const auto selects = std::find_if(componentSelector->selectorRelations.begin(),
+        componentSelector->selectorRelations.end(), [](const auto& relation) {
+            return relation.name == "ComponentIDValue"
+                && relation.role == DeviceParameterSelectorRole::Selects;
+        });
+    QVERIFY(selects != componentSelector->selectorRelations.end());
+
+    const auto applied = fixture.writeParameter(width->target, std::int64_t(321), std::nullopt);
+    QVERIFY2(applied.error == DeviceParameterError::None, applied.message.c_str());
+    const auto stale = fixture.writeParameter(width->target, std::int64_t(322), width->revision);
+    QCOMPARE(stale.error, DeviceParameterError::Conflict);
+    const auto current = fixture.readParameter(width->target);
+    QVERIFY2(current.error == DeviceParameterError::None, current.message.c_str());
+    QVERIFY(current.descriptor && current.descriptor->value);
+    QCOMPARE(std::get<std::int64_t>(*current.descriptor->value), std::int64_t(321));
+    const auto fresh = fixture.writeParameter(width->target, std::int64_t(322),
+        current.descriptor->revision);
+    QVERIFY2(fresh.error == DeviceParameterError::None, fresh.message.c_str());
+    QCOMPARE(fresh.effect, DeviceParameterEffect::Applied);
+}
+
+void OneGenSourceControllerTests::parameterChangeNotificationsResyncOnOverflow()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+    EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "1");
+    EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "CXP");
+    EnvironmentVariable queueLimit("ONEGEN_PARAMETER_CHANGE_QUEUE_LIMIT", "2");
+    Fixture fixture;
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto connected = fixture.connect(targetOfKind(targets, DeviceConnectionTargetKind::Device, 0)->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    const auto connection = connected.state->connectionId;
+    std::mutex changesMutex;
+    std::mutex gateMutex;
+    std::vector<DeviceParameterChange> changes;
+    const auto collect = [&](DeviceParameterChange change) {
+        std::lock_guard gate(gateMutex);
+        std::lock_guard lock(changesMutex);
+        changes.push_back(std::move(change));
+    };
+    QCOMPARE(fixture._controller->requestParameterChanges(connection, "test-watch", collect).error,
+        DeviceParameterError::None);
+    QVERIFY(waitFor([&] {
+        std::lock_guard lock(changesMutex);
+        return !changes.empty();
+    }, 30000));
+    {
+        std::lock_guard lock(changesMutex);
+        QVERIFY(changes.front().kind == DeviceParameterChangeKind::Snapshot);
+        QCOMPARE(changes.front().sequence, std::uint64_t(1));
+        QVERIFY(!changes.front().descriptors.empty());
+        QVERIFY(!changes.front().descriptors.front().categoryPath.empty());
+        changes.clear();
+    }
+
+    const auto listed = fixture.inventory();
+    QCOMPARE(listed.result.error, DeviceParameterError::None);
+    const auto width = std::find_if(listed.parameters.begin(), listed.parameters.end(),
+        [&](const auto& parameter) {
+            return parameter.target.connectionId == connection
+                && parameter.target.scope == "RemoteDevice"
+                && parameter.target.name == "Width";
+        });
+    QVERIFY(width != listed.parameters.end());
+    const auto written = fixture.writeParameter(width->target, std::int64_t(100), std::nullopt);
+    QVERIFY2(written.error == DeviceParameterError::None, written.message.c_str());
+    QVERIFY(waitFor([&] {
+        std::lock_guard lock(changesMutex);
+        return !changes.empty();
+    }, 30000));
+    {
+        std::lock_guard lock(changesMutex);
+        QVERIFY(changes.front().kind == DeviceParameterChangeKind::Delta);
+        QCOMPARE(changes.front().sequence, std::uint64_t(2));
+        QCOMPARE(changes.front().descriptors.size(), std::size_t(1));
+        QVERIFY(changes.front().descriptors.front().revision > width->revision);
+        changes.clear();
+    }
+
+    {
+        std::unique_lock gate(gateMutex);
+        for (int step = 0; step < 4; ++step) {
+            const auto applied = fixture.writeParameter(width->target,
+                std::int64_t(200 + step), std::nullopt);
+            QVERIFY2(applied.error == DeviceParameterError::None, applied.message.c_str());
+        }
+    }
+    QVERIFY(waitFor([&] {
+        std::lock_guard lock(changesMutex);
+        return std::any_of(changes.begin(), changes.end(),
+            [](const auto& change) { return change.resync; });
+    }, 30000));
+    {
+        std::lock_guard lock(changesMutex);
+        std::uint64_t previousSequence = 2;
+        bool sawResync = false;
+        for (const auto& change : changes) {
+            QVERIFY(change.sequence > previousSequence);
+            previousSequence = change.sequence;
+            if (!change.resync) continue;
+            sawResync = true;
+            QVERIFY(change.kind == DeviceParameterChangeKind::Snapshot);
+            QVERIFY(!change.overflowReason.empty());
+        }
+        QVERIFY(sawResync);
+        changes.clear();
+    }
+
+    std::promise<DeviceParameterResult> released;
+    auto releasedFuture = released.get_future();
+    QCOMPARE(fixture._controller->releaseParameterChanges(connection, "test-watch",
+        [&released](DeviceParameterResult result) { released.set_value(std::move(result)); }).error,
+        DeviceParameterError::None);
+    QCOMPARE(releasedFuture.wait_for(std::chrono::seconds(30)), std::future_status::ready);
+    QCOMPARE(releasedFuture.get().error, DeviceParameterError::None);
+    QCOMPARE(fixture.writeParameter(width->target, std::int64_t(300), std::nullopt).error,
+        DeviceParameterError::None);
+    QTest::qWait(100);
+    QCoreApplication::processEvents();
+    {
+        std::lock_guard lock(changesMutex);
+        QVERIFY(changes.empty());
+    }
+}
+
+void OneGenSourceControllerTests::declaredModuleActions()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+    EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "1");
+    EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "CXP");
+    Fixture fixture;
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto connected = fixture.connect(targetOfKind(targets, DeviceConnectionTargetKind::Device, 0)->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    const auto cameraConnection = connected.state->connectionId;
+    std::string interfaceConnection;
+    for (const auto& state : fixture.states())
+        if (state.kind == DeviceConnectionTargetKind::Interface) interfaceConnection = state.connectionId;
+    QVERIFY(!interfaceConnection.empty());
+    auto* tools = dynamic_cast<IToolProvider*>(fixture._controller.get());
+    QVERIFY(tools);
+    const auto descriptors = tools->toolDescriptors();
+    const auto findTool = [&](const QString& name) -> const ToolDescriptor* {
+        for (const auto& descriptor : descriptors)
+            if (descriptor.name == name) return &descriptor;
+        return nullptr;
+    };
+    const auto* streamTool = findTool(QStringLiteral("onegen.stream-select"));
+    QVERIFY(streamTool);
+    QCOMPARE(streamTool->presentation.actionId, QStringLiteral("onegen.stream-select"));
+    QCOMPARE(streamTool->presentation.group, QStringLiteral("onegen"));
+    const auto* copyTool = findTool(QStringLiteral("onegen.copy-module-settings"));
+    QVERIFY(copyTool);
+    QCOMPARE(copyTool->presentation.actionId, QStringLiteral("onegen.copy-module-settings"));
+    const auto* restoreTool = findTool(QStringLiteral("onegen.restore-module-settings"));
+    QVERIFY(restoreTool);
+    QCOMPARE(restoreTool->presentation.actionId, QStringLiteral("onegen.restore-module-settings"));
+
+    const auto missingStream = invokeTool(*tools, QStringLiteral("onegen.stream-select"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)}});
+    QVERIFY(!missingStream.succeeded());
+    QVERIFY(missingStream.error());
+    QCOMPARE(missingStream.error()->code, ApiErrorCode::ArgumentRequired);
+    const auto prompt = missingStream.error()->details.value("argumentRequired").toObject();
+    QCOMPARE(prompt.value("argument").toString(), QStringLiteral("stream"));
+    QCOMPARE(prompt.value("format").toString(), QStringLiteral("enum"));
+    QVERIFY(prompt.value("options").toArray().contains(QStringLiteral("0")));
+    const auto selected = invokeTool(*tools, QStringLiteral("onegen.stream-select"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)},
+                    {"stream", QStringLiteral("0")}});
+    QVERIFY2(selected.succeeded(), selected.error() ? qPrintable(selected.error()->message) : "");
+    QCOMPARE(selected.value().toObject().value("stream").toObject().value("index").toInt(), 0);
+
+    const auto copied = invokeTool(*tools, QStringLiteral("onegen.copy-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)},
+                    {"module", QStringLiteral("Device")}});
+    QVERIFY2(copied.succeeded(), copied.error() ? qPrintable(copied.error()->message) : "");
+    const auto settings = copied.value().toObject().value("settings").toString();
+    QVERIFY(!settings.isEmpty());
+    const auto listed = fixture.inventory();
+    QCOMPARE(listed.result.error, DeviceParameterError::None);
+    const auto acquisitionMode = std::find_if(listed.parameters.begin(), listed.parameters.end(),
+        [&](const auto& parameter) {
+            return parameter.target.connectionId == cameraConnection
+                && parameter.target.scope == "Device"
+                && parameter.target.name == "AcquisitionMode";
+        });
+    QVERIFY(acquisitionMode != listed.parameters.end());
+    QVERIFY(acquisitionMode->value);
+    QCOMPARE(std::get<std::string>(*acquisitionMode->value), std::string("Continuous"));
+    QVERIFY2(fixture.writeParameter(acquisitionMode->target, std::string("SingleFrame"), std::nullopt).error
+        == DeviceParameterError::None, "The acquisition mode write failed.");
+    const auto restored = invokeTool(*tools, QStringLiteral("onegen.restore-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)},
+                    {"module", QStringLiteral("Device")}, {"settings", settings}});
+    QVERIFY2(restored.succeeded(), restored.error() ? qPrintable(restored.error()->message) : "");
+    const auto readBack = fixture.readParameter(acquisitionMode->target);
+    QVERIFY2(readBack.error == DeviceParameterError::None, readBack.message.c_str());
+    QVERIFY(readBack.descriptor && readBack.descriptor->value);
+    QCOMPARE(std::get<std::string>(*readBack.descriptor->value), std::string("Continuous"));
+
+    const auto missingModule = invokeTool(*tools, QStringLiteral("onegen.copy-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)}});
+    QVERIFY(!missingModule.succeeded());
+    QCOMPARE(missingModule.error()->code, ApiErrorCode::ArgumentRequired);
+    QCOMPARE(missingModule.error()->details.value("argumentRequired").toObject()
+        .value("format").toString(), QStringLiteral("enum"));
+    const auto missingSettings = invokeTool(*tools, QStringLiteral("onegen.restore-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)},
+                    {"module", QStringLiteral("Device")}});
+    QVERIFY(!missingSettings.succeeded());
+    QCOMPARE(missingSettings.error()->code, ApiErrorCode::ArgumentRequired);
+    QCOMPARE(missingSettings.error()->details.value("argumentRequired").toObject()
+        .value("format").toString(), QStringLiteral("text"));
+
+    const auto interfaceCopy = invokeTool(*tools, QStringLiteral("onegen.copy-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(interfaceConnection)}, {"module", QStringLiteral("Interface")}});
+    QVERIFY2(interfaceCopy.succeeded(), interfaceCopy.error() ? qPrintable(interfaceCopy.error()->message) : "");
+    const auto systemCopy = invokeTool(*tools, QStringLiteral("onegen.copy-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(interfaceConnection)}, {"module", QStringLiteral("System/TL")}});
+    QVERIFY2(systemCopy.succeeded(), systemCopy.error() ? qPrintable(systemCopy.error()->message) : "");
+    const auto systemSettings = systemCopy.value().toObject().value("settings").toString();
+    QVERIFY(!systemSettings.isEmpty());
+    const auto systemRestore = invokeTool(*tools, QStringLiteral("onegen.restore-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(interfaceConnection)}, {"module", QStringLiteral("System/TL")},
+                    {"settings", systemSettings}});
+    QVERIFY2(systemRestore.succeeded(), systemRestore.error() ? qPrintable(systemRestore.error()->message) : "");
+    const auto invalidModule = invokeTool(*tools, QStringLiteral("onegen.copy-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)},
+                    {"module", QStringLiteral("Interface")}});
+    QVERIFY(!invalidModule.succeeded());
+    QCOMPARE(invalidModule.error()->code, ApiErrorCode::InvalidArgument);
 }
 
 void OneGenSourceControllerTests::cleanupTestCase()

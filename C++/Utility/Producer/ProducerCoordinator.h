@@ -67,6 +67,8 @@ public:
   std::vector<DataStreamInfo> data_streams() const;
   void select_data_stream(std::uint32_t index);
   std::vector<std::pair<std::string, FeatureNode>> describe_features() const;
+  /** @brief Snapshots one module's complete feature tree. */
+  FeatureNode module_features(int module) const;
   FeatureNode read_node(int module, std::string_view name) const;
   /** @brief Observes a scalar feature and complete selectors. */
   NodeObservation observe_node(int module, std::string_view name) const;
@@ -158,6 +160,21 @@ public:
   /** Writes while the selected Interface has no active Device leases. */
   FeatureNode write_interface(const InterfaceInfo& info, std::string_view name,
                               std::string_view operation, std::string_view value);
+  /** Reads the producer-global System/TL feature tree shared by every interface. */
+  FeatureNode system_features(const InterfaceInfo& info);
+  /** Reads one producer-global System/TL feature. */
+  FeatureNode read_system(const InterfaceInfo& info, std::string_view name);
+  /** Writes one producer-global System/TL feature under the producer lock. */
+  FeatureNode write_system(const InterfaceInfo& info, std::string_view name,
+                           std::string_view operation, std::string_view value);
+  /** Serializes the interface feature bag. */
+  std::string save_interface_features(const InterfaceInfo& info);
+  /** Restores and verifies the interface feature bag while no Device lease is active. */
+  void load_interface_features(const InterfaceInfo& info, std::string_view contents);
+  /** Serializes the producer-global System/TL feature bag. */
+  std::string save_system_features(const InterfaceInfo& info);
+  /** Restores and verifies the producer-global System/TL feature bag. */
+  void load_system_features(const InterfaceInfo& info, std::string_view contents);
   /** Deduplicates only identical producer/interface/device identities. */
   static std::vector<DeviceInfo> merge(std::vector<DeviceInfo> devices);
   std::unique_ptr<Lease> open(const DeviceInfo& device);

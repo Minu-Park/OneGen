@@ -6,9 +6,13 @@
 #include "engine/GraphicsFrameAdapter.h"
 #include "DeviceConnectionControl.h"
 #include "DeviceParameterControl.h"
+#include "ToolProvider.h"
 #include "OneGenTypes.h"
 #include "OneGenNode.h"
 #include <QFuture>
+
+#include <condition_variable>
+#include <thread>
 
 #include <atomic>
 #include <cstdint>
@@ -38,9 +42,9 @@ public:
 
 /** Owns OneGen live acquisition and delivers SessionFrame values synchronously. */
 class OneGenSourceController final : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl,
-                                     public IFrameStorageClient {
+                                     public IFrameStorageClient, public IToolProvider {
   Q_OBJECT
-  Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient)
+  Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient IToolProvider)
 public:
   /** @brief Applies to this controller and its camera controllers from their next Live start. */
   void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
@@ -132,6 +136,17 @@ public:
   /** @brief Executes an existing command without implicit acquisition changes. */
   DeviceParameterResult requestExecuteParameter(DeviceParameterTarget target,
       std::optional<std::uint64_t> revision, IDeviceParameterControl::Completion completion) override;
+  /** @brief Admits a snapshot-plus-delta subscription for one exact connection. */
+  DeviceParameterResult requestParameterChanges(std::string connectionId, std::string subscriptionId,
+      ChangeListener delivery) override;
+  /** @brief Stops delivery for one subscription and completes after it drained. */
+  DeviceParameterResult releaseParameterChanges(std::string connectionId, std::string subscriptionId,
+      IDeviceParameterControl::Completion completion) override;
+  /** @brief Declares the OneGen module actions with semantic presentation metadata. */
+  QList<ToolDescriptor> toolDescriptors() const override;
+  /** @brief Admits one declared OneGen module action. */
+  ApiResult<void> requestTool(const QString& name, int version, QJsonObject arguments,
+      IToolProvider::Completion completion) override;
 
 signals:
   /** @brief Publishes domain state; consumer views refresh on their owning thread. */
@@ -262,12 +277,41 @@ private:
       IDeviceConnectionControl::Completion completion, TargetsCompletion targetsCompletion);
   DeviceParameterResult parameterAdmission();
   std::vector<OneGenSourceController*> parameterControllers() const;
+  /** @brief One addressable connection for a parameter request. */
+  struct ParameterEndpoint {
+    bool isInterface = false;
+    std::string connectionId;
+    onegen::InterfaceInfo info;
+    std::shared_ptr<onegen::producer::Lease> lease;
+    OneGenSourceController* owner = nullptr;
+  };
+  std::optional<ParameterEndpoint> resolveParameterEndpoint(const std::string& connectionId) const;
+  struct ParameterWatch;
   DeviceParameterDescriptor observeParameter(const std::shared_ptr<onegen::producer::Lease>& lease,
       const std::string& connection, int module, const onegen::FeatureNode& node,
+      const onegen::FeatureNode* moduleRoot = nullptr,
       bool completeContext = false, const std::string& scopeOverride = {});
+  DeviceParameterDescriptor observeCoordinatorParameter(const ParameterEndpoint& endpoint, int module,
+      const onegen::FeatureNode& node, const onegen::FeatureNode* moduleRoot,
+      const std::string& scopeOverride = {});
+  DeviceParameterDescriptor recordParameterObservation(DeviceParameterDescriptor descriptor);
+  DeviceParameterInventory connectionInventory(const std::string& connectionId, std::string* error);
   DeviceParameterResult requestParameter(DeviceParameterTarget target,
       std::optional<DeviceParameterValue> value, std::optional<std::uint64_t> revision,
       bool mutate, IDeviceParameterControl::Completion completion);
+  DeviceParameterResult requestCoordinatorParameter(const ParameterEndpoint& endpoint,
+      DeviceParameterTarget target, std::optional<DeviceParameterValue> value,
+      std::optional<std::uint64_t> revision, bool mutate,
+      IDeviceParameterControl::Completion completion);
+  void notifyParameterChanged(const std::string& connectionId, int module,
+      const DeviceParameterDescriptor& descriptor);
+  void deliverParameterSnapshot(const std::shared_ptr<ParameterWatch>& watch,
+      std::vector<DeviceParameterDescriptor> descriptors, bool resync, std::string reason);
+  void stopParameterWatches();
+  std::mutex parameter_mutex_;
+  std::mutex parameter_write_mutex_;
+  std::mutex parameter_watch_mutex_;
   std::map<std::string, DeviceParameterDescriptor> parameter_observations_;
+  std::map<std::string, std::shared_ptr<ParameterWatch>> parameter_watches_;
   std::uint64_t parameter_revision_ = 0;
 };
