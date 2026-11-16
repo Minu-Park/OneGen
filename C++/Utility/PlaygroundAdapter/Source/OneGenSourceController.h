@@ -305,8 +305,16 @@ private:
       IDeviceParameterControl::Completion completion);
   void notifyParameterChanged(const std::string& connectionId, int module,
       const DeviceParameterDescriptor& descriptor);
+  /** @brief Replaces one connection's cached changes with a resync snapshot after a bulk action. */
+  void notifyParameterResync(const std::string& connectionId, bool producerShared, std::string reason);
   void deliverParameterSnapshot(const std::shared_ptr<ParameterWatch>& watch,
       std::vector<DeviceParameterDescriptor> descriptors, bool resync, std::string reason);
+  /** @brief Tracks one admitted parameter/tool future until completion drains. */
+  void trackParameterWork(const QFuture<void>& work);
+  /** @brief Marks one parameter/tool request active before its worker starts. */
+  void admitParameterWork(OneGenSourceController* selected);
+  /** @brief Clears one request's active mark before its completion callback runs. */
+  void finishParameterWork(OneGenSourceController* selected);
   void stopParameterWatches();
   std::mutex parameter_mutex_;
   std::mutex parameter_write_mutex_;
@@ -314,4 +322,6 @@ private:
   std::map<std::string, DeviceParameterDescriptor> parameter_observations_;
   std::map<std::string, std::shared_ptr<ParameterWatch>> parameter_watches_;
   std::uint64_t parameter_revision_ = 0;
+  /** @brief Admitted parameter/tool work on this controller; zero before the completion callback. */
+  std::atomic<int> parameter_work_{0};
 };

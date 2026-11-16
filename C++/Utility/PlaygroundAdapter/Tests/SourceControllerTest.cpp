@@ -217,6 +217,8 @@ private slots:
     void interfaceAndSystemParametersUseTheInterfaceConnection();
     void parameterTreeStructureAndRevisionFencing();
     void parameterChangeNotificationsResyncOnOverflow();
+    void concurrentParameterRequestsAreRefused();
+    void moduleActionsNotifySubscribers();
     void declaredModuleActions();
     void cleanupTestCase();
 
@@ -1021,6 +1023,161 @@ void OneGenSourceControllerTests::parameterChangeNotificationsResyncOnOverflow()
         std::lock_guard lock(changesMutex);
         QVERIFY(changes.empty());
     }
+}
+
+void OneGenSourceControllerTests::concurrentParameterRequestsAreRefused()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+    EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "1");
+    EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "CXP");
+    EnvironmentVariable delay("ONEGEN_SYNTHETIC_PARAMETER_DELAY_MS", "100");
+    Fixture fixture;
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto connected = fixture.connect(targetOfKind(targets, DeviceConnectionTargetKind::Device, 0)->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+
+    auto firstPromise = std::make_shared<std::promise<DeviceParameterInventory>>();
+    auto firstFuture = firstPromise->get_future();
+    const auto first = fixture._controller->requestParameters(
+        [firstPromise](DeviceParameterInventory value) { firstPromise->set_value(std::move(value)); });
+    QCOMPARE(first.error, DeviceParameterError::None);
+    const auto second = fixture._controller->requestParameters([](DeviceParameterInventory) {});
+    QCOMPARE(second.error, DeviceParameterError::Busy);
+    const auto structural = fixture._controller->requestDiscover([](DeviceConnectionTargets) {});
+    QCOMPARE(structural.error, DeviceConnectionError::Busy);
+    QCOMPARE(firstFuture.wait_for(std::chrono::seconds(60)), std::future_status::ready);
+    QCOMPARE(firstFuture.get().result.error, DeviceParameterError::None);
+
+    auto thirdPromise = std::make_shared<std::promise<DeviceParameterInventory>>();
+    auto thirdFuture = thirdPromise->get_future();
+    const auto third = fixture._controller->requestParameters(
+        [thirdPromise](DeviceParameterInventory value) { thirdPromise->set_value(std::move(value)); });
+    QCOMPARE(third.error, DeviceParameterError::None);
+    QCOMPARE(thirdFuture.wait_for(std::chrono::seconds(60)), std::future_status::ready);
+    QCOMPARE(thirdFuture.get().result.error, DeviceParameterError::None);
+}
+
+void OneGenSourceControllerTests::moduleActionsNotifySubscribers()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+    EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "1");
+    EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "CXP");
+    Fixture fixture;
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto connected = fixture.connect(targetOfKind(targets, DeviceConnectionTargetKind::Device, 0)->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    const auto cameraConnection = connected.state->connectionId;
+    std::string interfaceConnection;
+    for (const auto& state : fixture.states())
+        if (state.kind == DeviceConnectionTargetKind::Interface) interfaceConnection = state.connectionId;
+    QVERIFY(!interfaceConnection.empty());
+    auto* tools = dynamic_cast<IToolProvider*>(fixture._controller.get());
+    QVERIFY(tools);
+    std::mutex changesMutex;
+    std::vector<DeviceParameterChange> changes;
+    const auto collect = [&](DeviceParameterChange change) {
+        std::lock_guard lock(changesMutex);
+        changes.push_back(std::move(change));
+    };
+    const auto clearChanges = [&] {
+        std::lock_guard lock(changesMutex);
+        changes.clear();
+    };
+    const auto waitForResync = [&] {
+        return waitFor([&] {
+            std::lock_guard lock(changesMutex);
+            return std::any_of(changes.begin(), changes.end(),
+                [](const auto& change) { return change.resync; });
+        }, 30000);
+    };
+    const auto hasDescriptor = [&](const std::string& name, const std::string& value) {
+        std::lock_guard lock(changesMutex);
+        for (const auto& change : changes)
+            for (const auto& descriptor : change.descriptors)
+                if (descriptor.target.name == name && descriptor.value
+                    && std::holds_alternative<std::string>(*descriptor.value)
+                    && std::get<std::string>(*descriptor.value) == value) return true;
+        return false;
+    };
+
+    QCOMPARE(fixture._controller->requestParameterChanges(cameraConnection, "action-watch",
+        collect).error, DeviceParameterError::None);
+    QVERIFY(waitFor([&] {
+        std::lock_guard lock(changesMutex);
+        return !changes.empty();
+    }, 30000));
+    clearChanges();
+    const auto copied = invokeTool(*tools, QStringLiteral("onegen.copy-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)},
+                    {"module", QStringLiteral("Device")}});
+    QVERIFY2(copied.succeeded(), copied.error() ? qPrintable(copied.error()->message) : "");
+    const auto settings = copied.value().toObject().value("settings").toString();
+    const auto listed = fixture.inventory();
+    QCOMPARE(listed.result.error, DeviceParameterError::None);
+    const auto acquisitionMode = std::find_if(listed.parameters.begin(), listed.parameters.end(),
+        [&](const auto& parameter) {
+            return parameter.target.connectionId == cameraConnection
+                && parameter.target.scope == "Device"
+                && parameter.target.name == "AcquisitionMode";
+        });
+    QVERIFY(acquisitionMode != listed.parameters.end());
+    QVERIFY2(fixture.writeParameter(acquisitionMode->target, std::string("SingleFrame"),
+        std::nullopt).error == DeviceParameterError::None, "The acquisition mode write failed.");
+    clearChanges();
+    const auto restored = invokeTool(*tools, QStringLiteral("onegen.restore-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)},
+                    {"module", QStringLiteral("Device")}, {"settings", settings}});
+    QVERIFY2(restored.succeeded(), restored.error() ? qPrintable(restored.error()->message) : "");
+    QVERIFY(waitForResync());
+    QVERIFY(hasDescriptor("AcquisitionMode", "Continuous"));
+    {
+        std::lock_guard lock(changesMutex);
+        for (const auto& change : changes)
+            if (change.resync) QVERIFY(!change.overflowReason.empty());
+    }
+
+    clearChanges();
+    QCOMPARE(fixture._controller->releaseParameterChanges(cameraConnection, "action-watch",
+        [](DeviceParameterResult) {}).error, DeviceParameterError::None);
+    QCOMPARE(fixture._controller->requestParameterChanges(interfaceConnection, "system-watch",
+        collect).error, DeviceParameterError::None);
+    QVERIFY(waitFor([&] {
+        std::lock_guard lock(changesMutex);
+        return !changes.empty();
+    }, 30000));
+    clearChanges();
+    const auto systemCopy = invokeTool(*tools, QStringLiteral("onegen.copy-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(interfaceConnection)},
+                    {"module", QStringLiteral("System/TL")}});
+    QVERIFY2(systemCopy.succeeded(), systemCopy.error() ? qPrintable(systemCopy.error()->message) : "");
+    const auto systemSettings = systemCopy.value().toObject().value("settings").toString();
+    const auto systemRestore = invokeTool(*tools, QStringLiteral("onegen.restore-module-settings"),
+        QJsonObject{{"connectionId", QString::fromStdString(interfaceConnection)},
+                    {"module", QStringLiteral("System/TL")}, {"settings", systemSettings}});
+    QVERIFY2(systemRestore.succeeded(), systemRestore.error() ? qPrintable(systemRestore.error()->message) : "");
+    QVERIFY(waitForResync());
+    QCOMPARE(fixture._controller->releaseParameterChanges(interfaceConnection, "system-watch",
+        [](DeviceParameterResult) {}).error, DeviceParameterError::None);
+
+    clearChanges();
+    QCOMPARE(fixture._controller->requestParameterChanges(cameraConnection, "stream-watch",
+        collect).error, DeviceParameterError::None);
+    QVERIFY(waitFor([&] {
+        std::lock_guard lock(changesMutex);
+        return !changes.empty();
+    }, 30000));
+    clearChanges();
+    const auto selected = invokeTool(*tools, QStringLiteral("onegen.stream-select"),
+        QJsonObject{{"connectionId", QString::fromStdString(cameraConnection)},
+                    {"stream", QStringLiteral("0")}});
+    QVERIFY2(selected.succeeded(), selected.error() ? qPrintable(selected.error()->message) : "");
+    QVERIFY(waitForResync());
+    QCOMPARE(fixture._controller->releaseParameterChanges(cameraConnection, "stream-watch",
+        [](DeviceParameterResult) {}).error, DeviceParameterError::None);
 }
 
 void OneGenSourceControllerTests::declaredModuleActions()

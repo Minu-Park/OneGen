@@ -301,6 +301,13 @@ bool deviceAvailable(const std::uint32_t index) {
       && !hiddenDevices().count(index);
 }
 
+void syntheticParameterDelay() {
+  const char* value = std::getenv("ONEGEN_SYNTHETIC_PARAMETER_DELAY_MS");
+  if (!value || !*value) return;
+  const auto ms = parseUnsigned(value, 0);
+  if (ms) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
 bool interfaceHidden() {
   const char* value = std::getenv("ONEGEN_SYNTHETIC_HIDDEN_INTERFACE");
   return value && *value && std::string_view(value) != "0";
@@ -864,6 +871,7 @@ GC_ERROR takeBuffer(std::unique_lock<std::mutex>& lock, EventData* event,
 
 GC_ERROR readRegister(const std::string& device, std::uint64_t address, void* buffer,
                       std::size_t* size) {
+  syntheticParameterDelay();
   if (!size) return GC_ERR_INVALID_PARAMETER;
   if (!buffer) {
     *size = 4;

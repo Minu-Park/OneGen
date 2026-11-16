@@ -232,12 +232,6 @@ struct OneGenSourceController::ParameterWatch {
       }
     }
   }
-  void resetDescriptors(std::vector<DeviceParameterDescriptor> values, std::uint64_t nextRevision) {
-    std::lock_guard lock(mutex);
-    descriptors.clear();
-    for (auto& descriptor : values) descriptors[descriptorKey(descriptor)] = std::move(descriptor);
-    revision = nextRevision;
-  }
   void enqueueSnapshot(std::vector<DeviceParameterDescriptor> values, bool resync, std::string reason) {
     std::lock_guard lock(mutex);
     if (stop || terminal) return;
@@ -351,13 +345,36 @@ std::vector<OneGenSourceController*> OneGenSourceController::parameterController
   for (const auto& [id, child] : children_) result.push_back(child.controller.get());
   return result;
 }
+void OneGenSourceController::trackParameterWork(const QFuture<void>& work) {
+  std::lock_guard lock(work_mutex_);
+  std::erase_if(admitted_work_, [](const QFuture<void>& item) { return item.isFinished(); });
+  admitted_work_.push_back(work);
+}
+void OneGenSourceController::admitParameterWork(OneGenSourceController* selected) {
+  parameter_work_.fetch_add(1);
+  if (selected) selected->parameter_work_.fetch_add(1);
+  external_busy_.store(true);
+  if (selected) selected->external_busy_.store(true);
+  emit controlChanged();
+  if (selected) emit selected->controlChanged();
+}
+void OneGenSourceController::finishParameterWork(OneGenSourceController* selected) {
+  if (selected && selected->parameter_work_.fetch_sub(1) == 1)
+    selected->external_busy_.store(false);
+  if (parameter_work_.fetch_sub(1) == 1) external_busy_.store(false);
+  emit controlChanged();
+  if (selected) emit selected->controlChanged();
+}
 DeviceParameterResult OneGenSourceController::parameterAdmission() {
   Q_ASSERT(QThread::currentThread() == thread());
   if (control_blocked_)
     return failure(Error::Busy, "Discovery, Interface or control work is active.");
+  if (parameter_work_.load() > 0)
+    return failure(Error::Busy, "A parameter operation is active.");
   std::set<std::string> connections;
   for (auto* controller : parameterControllers()) {
-    if (controller->gui_busy_.load() || controller->external_busy_.load())
+    if (controller->gui_busy_.load() || controller->external_busy_.load()
+        || controller->parameter_work_.load() > 0)
       return failure(Error::Busy, "A GUI or API control operation is active.");
     std::lock_guard lock(controller->mutex_);
     if (controller->owned_lease_) connections.insert(controller->connection_id_.toStdString());
@@ -571,10 +588,10 @@ DeviceParameterResult OneGenSourceController::requestParameters(InventoryComplet
   if (connections.empty()) return failure(Error::Disconnected, "Device is disconnected.");
   std::sort(connections.begin(), connections.end());
   connections.erase(std::unique(connections.begin(), connections.end()), connections.end());
-  external_busy_.store(true);
+  admitParameterWork(nullptr);
   const auto controllers = parameterControllers();
   for (auto* controller : controllers) { controller->external_busy_.store(true); emit controller->controlChanged(); }
-  tool_work_ = QtConcurrent::run([this, controllers, connections, completion = std::move(completion)] {
+  auto work = QtConcurrent::run([this, controllers, connections, completion = std::move(completion)] {
     DeviceParameterInventory result;
     try {
       for (const auto& connection : connections) {
@@ -588,8 +605,10 @@ DeviceParameterResult OneGenSourceController::requestParameters(InventoryComplet
     } catch (const std::exception& error) { result.result = failure(Error::BackendFailure, error.what()); result.parameters.clear(); }
     catch (...) { result.result = failure(Error::BackendFailure, "Unexpected feature inventory failure."); result.parameters.clear(); }
     for (auto* controller : controllers) { controller->external_busy_.store(false); emit controller->controlChanged(); }
+    finishParameterWork(nullptr);
     complete(completion, std::move(result));
   });
+  trackParameterWork(work);
   return {};
 }
 DeviceParameterResult OneGenSourceController::requestReadParameter(DeviceParameterTarget target, IDeviceParameterControl::Completion completion) {
@@ -634,8 +653,8 @@ DeviceParameterResult OneGenSourceController::requestParameter(DeviceParameterTa
         "Camera leases cannot access Interface or System/TL features; use the Interface connection.");
   OneGenSourceController* selected = endpoint->owner;
   const auto lease = endpoint->lease;
-  external_busy_.store(true); selected->external_busy_.store(true); emit selected->controlChanged();
-  tool_work_ = QtConcurrent::run([this, selected, lease, module, target = std::move(target), value = std::move(value), revision, mutate, completion = std::move(completion)] {
+  admitParameterWork(selected);
+  auto work = QtConcurrent::run([this, selected, lease, module, target = std::move(target), value = std::move(value), revision, mutate, completion = std::move(completion)] {
     DeviceParameterResult result;
     bool dispatched = false;
     try {
@@ -682,12 +701,12 @@ DeviceParameterResult OneGenSourceController::requestParameter(DeviceParameterTa
       result.error = Error::BackendFailure; result.message = "Unexpected parameter backend failure.";
       if (dispatched && result.effect != DeviceParameterEffect::Applied) { result.effect = DeviceParameterEffect::Unknown; result.descriptor.reset(); }
     }
-    selected->external_busy_.store(false); external_busy_.store(false);
-    emit selected->controlChanged(); emit controlChanged();
+    finishParameterWork(selected);
     if (result.effect == DeviceParameterEffect::Applied && result.descriptor)
       notifyParameterChanged(target.connectionId, module, *result.descriptor);
     complete(completion, std::move(result));
   });
+  trackParameterWork(work);
   return {};
 }
 DeviceParameterResult OneGenSourceController::requestCoordinatorParameter(
@@ -711,8 +730,8 @@ DeviceParameterResult OneGenSourceController::requestCoordinatorParameter(
           "Disconnect all cameras on this Interface before changing Interface settings.");
   }
   if (!coordinator_) return failure(Error::Unavailable, "Device control has no coordinator.");
-  external_busy_.store(true); selected->external_busy_.store(true); emit selected->controlChanged();
-  tool_work_ = QtConcurrent::run([this, selected, endpoint, module, system,
+  admitParameterWork(selected);
+  auto work = QtConcurrent::run([this, selected, endpoint, module, system,
                                   target = std::move(target), value = std::move(value), revision,
                                   mutate, completion = std::move(completion)] {
     DeviceParameterResult result;
@@ -761,12 +780,12 @@ DeviceParameterResult OneGenSourceController::requestCoordinatorParameter(
         result.effect = DeviceParameterEffect::Unknown; result.descriptor.reset();
       }
     }
-    selected->external_busy_.store(false); external_busy_.store(false);
-    emit selected->controlChanged(); emit controlChanged();
+    finishParameterWork(selected);
     if (result.effect == DeviceParameterEffect::Applied && result.descriptor)
       notifyParameterChanged(endpoint.connectionId, module, *result.descriptor);
     complete(completion, std::move(result));
   });
+  trackParameterWork(work);
   return {};
 }
 
@@ -793,9 +812,7 @@ DeviceParameterResult OneGenSourceController::requestParameterChanges(
     std::lock_guard lock(parameter_watch_mutex_);
     parameter_watches_[connectionId + "/" + subscriptionId] = watch;
   }
-  external_busy_.store(true);
-  selected->external_busy_.store(true);
-  emit selected->controlChanged();
+  admitParameterWork(selected);
   watch->startThread();
   watch->initialWork = QtConcurrent::run([this, watch, selected, connectionId] {
     std::string error;
@@ -805,15 +822,9 @@ DeviceParameterResult OneGenSourceController::requestParameterChanges(
     } else {
       watch->enqueueSnapshot(inventory.parameters, false, {});
     }
-    selected->external_busy_.store(false);
-    external_busy_.store(false);
-    emit selected->controlChanged();
+    finishParameterWork(selected);
   });
-  {
-    std::lock_guard lock(work_mutex_);
-    std::erase_if(admitted_work_, [](const QFuture<void>& work) { return work.isFinished(); });
-    admitted_work_.push_back(watch->initialWork);
-  }
+  trackParameterWork(watch->initialWork);
   return {};
 }
 DeviceParameterResult OneGenSourceController::releaseParameterChanges(
@@ -845,6 +856,31 @@ void OneGenSourceController::notifyParameterChanged(const std::string& connectio
     }
   }
   for (const auto& watch : watches) watch->enqueueDescriptor(descriptor);
+}
+void OneGenSourceController::notifyParameterResync(const std::string& connectionId,
+    const bool producerShared, std::string reason) {
+  std::vector<std::shared_ptr<ParameterWatch>> watches;
+  {
+    std::lock_guard lock(parameter_watch_mutex_);
+    for (const auto& [key, watch] : parameter_watches_) {
+      static_cast<void>(key);
+      if (producerShared || watch->connectionId == connectionId) watches.push_back(watch);
+    }
+  }
+  std::map<std::string, std::vector<DeviceParameterDescriptor>> inventories;
+  for (const auto& watch : watches) {
+    auto found = inventories.find(watch->connectionId);
+    if (found == inventories.end()) {
+      std::string error;
+      auto inventory = connectionInventory(watch->connectionId, &error);
+      if (inventory.result.error != Error::None) {
+        watch->enqueueTerminal(inventory.result.error, inventory.result.message);
+        continue;
+      }
+      found = inventories.emplace(watch->connectionId, std::move(inventory.parameters)).first;
+    }
+    deliverParameterSnapshot(watch, found->second, true, reason);
+  }
 }
 void OneGenSourceController::deliverParameterSnapshot(
     const std::shared_ptr<ParameterWatch>& watch,

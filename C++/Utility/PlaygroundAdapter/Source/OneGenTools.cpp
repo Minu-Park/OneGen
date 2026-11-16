@@ -144,7 +144,9 @@ ApiResult<void> OneGenSourceController::requestTool(const QString& name, const i
   if (!coordinator_)
     return Admission::failure(ApiErrorCode::Unavailable, "Device control has no coordinator.");
   auto* selected = endpoint->owner ? endpoint->owner : this;
-  if (external_busy_.load() || selected->external_busy_.load() || selected->active_work_.load() > 0)
+  if (external_busy_.load() || selected->external_busy_.load()
+      || parameter_work_.load() > 0 || selected->parameter_work_.load() > 0
+      || selected->active_work_.load() > 0)
     return Admission::failure(ApiErrorCode::Busy, "A control operation is active on this connection.");
 
   if (name == QLatin1String("onegen.stream-select")) {
@@ -162,9 +164,9 @@ ApiResult<void> OneGenSourceController::requestTool(const QString& name, const i
     bool validIndex = false;
     const auto streamIndex = streamText.toUInt(&validIndex);
     const auto stream = endpoint;
-    external_busy_.store(true); selected->external_busy_.store(true); emit selected->controlChanged();
-    tool_work_ = QtConcurrent::run([this, selected, stream, streamIndex, validIndex,
-                                    completion = std::move(completion)] {
+    admitParameterWork(selected);
+    auto work = QtConcurrent::run([this, selected, stream, streamIndex, validIndex,
+                                   completion = std::move(completion)] {
       ToolResult result = ToolResult::failure(ApiErrorCode::Internal, "The action did not complete.");
       try {
         std::lock_guard lock(parameter_write_mutex_);
@@ -178,6 +180,7 @@ ApiResult<void> OneGenSourceController::requestTool(const QString& name, const i
         } else {
           stream->lease->select_data_stream(streamIndex);
           try { selected->refreshControlSnapshot(); } catch (...) {}
+          try { notifyParameterResync(stream->connectionId, false, "Data stream selected."); } catch (...) {}
           const auto updated = stream->lease->data_streams();
           result = ToolResult::success(QJsonObject{
               {"connectionId", QString::fromStdString(stream->connectionId)},
@@ -190,11 +193,11 @@ ApiResult<void> OneGenSourceController::requestTool(const QString& name, const i
       } catch (...) {
         result = ToolResult::failure(ApiErrorCode::Internal, "Unexpected stream selection failure.");
       }
-      selected->external_busy_.store(false); external_busy_.store(false);
-      emit selected->controlChanged();
+      finishParameterWork(selected);
       try { completion(std::move(result)); }
       catch (...) { qWarning() << "[GenICam] tool consumer callback threw."; }
     });
+    trackParameterWork(work);
     return Admission::success();
   }
 
@@ -238,10 +241,10 @@ ApiResult<void> OneGenSourceController::requestTool(const QString& name, const i
       return Admission::failure(ApiErrorCode::Conflict,
           "Disconnect all cameras on this Interface before restoring Interface settings.");
   }
-  external_busy_.store(true); selected->external_busy_.store(true); emit selected->controlChanged();
-  tool_work_ = QtConcurrent::run([this, selected, endpoint, module = *module, restore,
-                                  settings = settings.toStdString(),
-                                  completion = std::move(completion)] {
+  admitParameterWork(selected);
+  auto work = QtConcurrent::run([this, selected, endpoint, module = *module, restore,
+                                 settings = settings.toStdString(),
+                                 completion = std::move(completion)] {
     ToolResult result = ToolResult::failure(ApiErrorCode::Internal, "The action did not complete.");
     try {
       std::optional<std::string> bag;
@@ -263,6 +266,11 @@ ApiResult<void> OneGenSourceController::requestTool(const QString& name, const i
       if (restore && !endpoint->isInterface) {
         try { selected->refreshControlSnapshot(); } catch (...) {}
       }
+      if (restore) {
+        try {
+          notifyParameterResync(endpoint->connectionId, module == 4, "Module settings restored.");
+        } catch (...) {}
+      }
       const auto moduleText = moduleNames().at(module);
       result = ToolResult::success(restore
           ? QJsonObject{{"connectionId", QString::fromStdString(endpoint->connectionId)},
@@ -275,10 +283,10 @@ ApiResult<void> OneGenSourceController::requestTool(const QString& name, const i
     } catch (...) {
       result = ToolResult::failure(ApiErrorCode::Internal, "Unexpected module settings failure.");
     }
-    selected->external_busy_.store(false); external_busy_.store(false);
-    emit selected->controlChanged();
+    finishParameterWork(selected);
     try { completion(std::move(result)); }
     catch (...) { qWarning() << "[GenICam] tool consumer callback threw."; }
   });
+  trackParameterWork(work);
   return Admission::success();
 }
