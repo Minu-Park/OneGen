@@ -1,5 +1,5 @@
 #include "OneGenSourceController.h"
-#include "../../Qt/SingleCaptureDiagnostics.h"
+#include "SingleCaptureDiagnostics.h"
 
 #include "ProducerCoordinator.h"
 #include "OneGenGraphicsFrameAdapter.h"
@@ -565,7 +565,7 @@ void OneGenSourceController::start()
   catch (...) { emit diagnosticAcquisitionChanged(false, QStringLiteral("camera")); throw; }
   grabbing_.store(true, std::memory_order_relaxed);
   // Direct API start bypasses the GUI operation watcher, so publish the state
-  // change for camera panels to refresh their live controls and telemetry.
+  // change for the Host panel to refresh its live controls and telemetry.
   emit controlChanged();
 }
 
@@ -642,7 +642,7 @@ void OneGenSourceController::stopOwnAcquisition()
         .arg(static_cast<qulonglong>(incomplete_frames_.load(std::memory_order_relaxed)))
         .arg(static_cast<qulonglong>(droppedFrames()));
     emit diagnosticAcquisitionChanged(false, QStringLiteral("camera"));
-    // Match start(): a direct API stop must clear the camera panel's live controls
+    // Match start(): a direct API stop must clear the Host panel's live controls
     // and Debug telemetry without a GUI operation completion.
     emit controlChanged();
   } catch (const std::exception& error) {

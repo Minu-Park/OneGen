@@ -2,7 +2,6 @@
 #include "DeviceRuntime/Contract/DeviceConnectionControl.h"
 #include "DeviceRuntime/Contract/DeviceRuntime.h"
 #include "DevicePluginSession.h"
-#include <QApplication>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QHash>
@@ -120,8 +119,7 @@ private slots:
       {
         auto session = plugin->createSession(data, &error);
         QVERIFY2(session != nullptr, qPrintable(error));
-        QWidget controls;
-        QVERIFY(!session->createDockWidgets(&controls).empty());
+        QVERIFY(session->createDockWidgets(nullptr).empty());
         session.reset();
       }
       plugin->shutdown();
@@ -384,5 +382,5 @@ private slots:
     QVERIFY(loader.unload());
   }
 };
-QTEST_MAIN(PluginDiscoveryTests)
+QTEST_GUILESS_MAIN(PluginDiscoveryTests)
 #include "test_plugin_discovery.moc"
