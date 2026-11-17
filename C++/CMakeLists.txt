@@ -309,6 +309,8 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
       Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
     playground_sdk_add_runtime_contract(onegen_source_controller_test)
     set_target_properties(onegen_source_controller_test PROPERTIES AUTOMOC ON)
+    target_include_directories(onegen_source_controller_test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source")
     target_link_libraries(onegen_source_controller_test PRIVATE
       Playground::DeviceRuntimeContract OneGen::PlaygroundAdapter OneGen::Producer
       Qt6::Concurrent Qt6::Test)
