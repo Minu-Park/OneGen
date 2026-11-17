@@ -1,6 +1,6 @@
 #include "Internal/StageLog.h"
 #include "Internal/ConnectTiming.h"
-#include "Utility/Qt/OneGenLogSink.h"
+#include "Utility/PlaygroundAdapter/OneGenLogSink.h"
 
 #include <QCoreApplication>
 #include <QList>

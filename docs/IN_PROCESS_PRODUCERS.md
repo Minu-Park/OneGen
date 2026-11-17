@@ -202,13 +202,14 @@ Interface, including network and camera-less Interfaces, remains selectable.
 Producer paths in selector tooltips distinguish targets with equal display
 names.
 
-The plugin returns value-only session data immediately. After GUI-thread
-construction, the control panel schedules discovery on a separate future. Each
-completed producer publishes a cumulative merged device list on the GUI thread;
-a snapshot is also published every five seconds while producers are pending.
-Connection and acquisition do not wait for unrelated producers. Discovery runs
-are serialized per coordinator. Shutdown suppresses pending GUI updates and
-joins discovery before teardown.
+The plugin returns value-only session data immediately. Discovery runs through
+the session controller and the retained startup scan; the Host `device.discover`
+path waits for the first camera or terminal scan. Each completed producer
+publishes a cumulative merged device list to the session; a snapshot is also
+published every five seconds while producers are pending. Connection and
+acquisition do not wait for unrelated producers. Discovery runs are serialized
+per coordinator. Shutdown suppresses pending updates and joins discovery before
+teardown.
 
 An individual Interface failure preserves other Interfaces and their Devices,
 appears in the cumulative result, and is not retried as an empty inventory.
@@ -226,16 +227,15 @@ captured or reclassified.
 ## OneGen Session UI
 
 Creating `Device > GenICam` creates one independent OneGen session.
-Device selection preserves the original single-camera row and an empty feature
-view until the Device opens. Interface selection shows the selector and its
-connection action without constructing a Device panel. Opening an Interface
-requires neither a manufacturer adapter nor an attached Device.
+The plugin creates no widget or dock. Playground's common device panel owns the
+session UI and drives the declared `device.*`, `parameters.*`, `source.*` and
+`onegen.*` tools through the session controller.
 
-After Interface connection, the selector is locked and the panel shows an
-Interface settings tab plus one tab per discovered Device. Each Device connects,
-disconnects, and acquires independently; switching tabs never changes connection
-state. Camera-less Interfaces expose settings and rescan with acquisition
-unavailable. Interface and Device panels share Resources control and tree styling.
+The session declares `Plugins/OneGen/Favorites/Nodes` through
+`DeviceSessionMetadata`, so the Host panel keeps the existing favorites
+namespace. Interface and Device selection, connection controls and feature
+trees are generic panel surfaces; GenICam node keys and search text stay in the
+module.
 
 Closing one Device releases only its DataStream and Device and returns its
 camera to the producer for reuse. Interface disconnect drains all child
@@ -318,11 +318,11 @@ path.
 
 The consumer's Debug switch is observed through the `diagnostics.OneGen` Qt
 logging category: Debug enables its debug output, and there is no other
-dependency on the consumer's logging implementation. The panel re-reads the
-category on each one-second telemetry tick, so a toggle during acquisition
-takes effect without restarting it.
+dependency on the consumer's logging implementation. The controller checks the
+category when it emits diagnostic detail, so a toggle during acquisition takes
+effect without restarting it.
 
-- Debug only: the `fps` and `failed` statusbar bubbles, the five-second
+- Debug only: the five-second
   `[GenICam] diagnostics:` line, the per-run first-frame detail
   (`first frame received/chunk count/part/converted`, effective Scan3d), the
   Host frame-storage attachment and the component node inventory taken when a

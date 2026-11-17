@@ -1,14 +1,12 @@
 option(ONEGEN_BUILD_TESTS "Build OneGen tests" ${PROJECT_IS_TOP_LEVEL})
-option(ONEGEN_BUILD_QT_WIDGET "Build the optional OneGen Qt widget target." OFF)
 option(ONEGEN_BUILD_PLAYGROUND_ADAPTER "Build the Playground GraphicsFrame adapter" OFF)
 option(ONEGEN_BUILD_PLAYGROUND_PLUGIN "Build the Playground device plugin" OFF)
 
 if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
-  set(ONEGEN_BUILD_QT_WIDGET ON)
   set(ONEGEN_BUILD_PLAYGROUND_ADAPTER ON)
 endif()
 if(PROJECT_NAME STREQUAL "OneGen" AND PROJECT_IS_TOP_LEVEL AND
-    (ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_ADAPTER OR ONEGEN_BUILD_PLAYGROUND_PLUGIN))
+    (ONEGEN_BUILD_PLAYGROUND_ADAPTER OR ONEGEN_BUILD_PLAYGROUND_PLUGIN))
   find_package(PlaygroundPluginSDK 0.3 CONFIG REQUIRED)
 endif()
 
@@ -192,14 +190,12 @@ if(ONEGEN_BUILD_TESTS)
   endif()
 endif()
 
-if(ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUGIN)
-  find_package(Qt6 QUIET COMPONENTS Core Widgets)
-elseif(ONEGEN_BUILD_TESTS)
+if(ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_PLAYGROUND_PLUGIN)
   find_package(Qt6 QUIET COMPONENTS Core)
 endif()
 
-if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUGIN) AND Qt6_FOUND)
-  if(ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUGIN)
+if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_PLAYGROUND_PLUGIN) AND Qt6_FOUND)
+  if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     find_package(Qt6 REQUIRED COMPONENTS Concurrent)
   endif()
   if(ONEGEN_BUILD_TESTS)
@@ -211,92 +207,7 @@ if((ONEGEN_BUILD_TESTS OR ONEGEN_BUILD_QT_WIDGET OR ONEGEN_BUILD_PLAYGROUND_PLUG
     add_test(NAME test_logging COMMAND test_logging)
     set_tests_properties(test_logging PROPERTIES ENVIRONMENT_MODIFICATION
       "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
-    find_package(Qt6 QUIET COMPONENTS Widgets)
-    if(TARGET Qt6::Widgets)
-      add_executable(test_numeric_editor Tests/test_numeric_editor.cpp
-        Utility/Qt/NumericFeatureEditor.h)
-      set_target_properties(test_numeric_editor PROPERTIES AUTOMOC ON)
-      target_link_libraries(test_numeric_editor PRIVATE onegen Qt6::Widgets)
-      target_compile_options(test_numeric_editor PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
-        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
-      add_test(NAME test_numeric_editor COMMAND test_numeric_editor)
-      set_tests_properties(test_numeric_editor PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
-    endif()
   endif()
-endif()
-
-if(ONEGEN_BUILD_QT_WIDGET)
-  # U2-gated widget libraries resolve the SDK's temporary Resources package
-  # themselves; the runtime contract target does not depend on it.
-  find_package(ResourcesWidgets CONFIG REQUIRED
-    HINTS "${PlaygroundPluginSDK_PREFIX}/lib/cmake/ResourcesWidgets")
-  if(ONEGEN_BUILD_TESTS)
-    find_package(Qt6 REQUIRED COMPONENTS Test)
-  endif()
-  if(NOT Qt6_FOUND)
-    message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires Qt 6.")
-  endif()
-  if(NOT TARGET Playground::DeviceRuntimeContract)
-    message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires Playground::DeviceRuntimeContract.")
-  endif()
-  if(NOT TARGET Resources::Widgets)
-    message(FATAL_ERROR "[OneGen] ONEGEN_BUILD_QT_WIDGET=ON requires the Qt-only Resources::Widgets target.")
-  endif()
-  add_subdirectory(Utility/Qt)
-  add_library(OneGenQtWidget STATIC
-    Utility/Qt/OneGenDialogs.cpp
-    Utility/Qt/OneGenDialogs.h
-    Utility/Qt/QOneGenDeviceWidget.cpp
-    Utility/Qt/QOneGenDeviceWidget.h
-    Utility/Qt/QOneGenWidget.cpp
-    Utility/Qt/QOneGenWidget.h
-    Utility/Qt/NumericFeatureEditor.h
-    Utility/Qt/OneGenLogSink.h
-  )
-  add_library(OneGen::QtWidget ALIAS OneGenQtWidget)
-  set_target_properties(OneGenQtWidget PROPERTIES AUTOMOC ON)
-  target_compile_features(OneGenQtWidget PUBLIC cxx_std_20)
-  target_include_directories(OneGenQtWidget PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Qt"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source")
-  target_link_libraries(OneGenQtWidget
-    PUBLIC
-      OneGen::Producer
-      Playground::DeviceRuntimeContract
-      Resources::Widgets
-      Qt6::Widgets
-      Qt6::Concurrent)
-  if(ONEGEN_BUILD_TESTS AND TARGET Qt6::Test AND ONEGEN_BUILD_PLAYGROUND_ADAPTER)
-    enable_testing()
-    qt_add_executable(OneGenFeatureTreeTests
-      Utility/Qt/OneGenFeatureTreeTests.cpp
-      Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
-      Utility/PlaygroundAdapter/Source/OneGenParameterControl.cpp
-      Utility/PlaygroundAdapter/Source/OneGenTools.cpp
-      Utility/PlaygroundAdapter/Source/OneGenSourceController.h)
-    playground_sdk_add_runtime_contract(OneGenFeatureTreeTests)
-    set_target_properties(OneGenFeatureTreeTests PROPERTIES AUTOMOC ON)
-    target_include_directories(OneGenFeatureTreeTests PRIVATE "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
-    target_link_libraries(OneGenFeatureTreeTests PRIVATE OneGen::QtWidget OneGen::PlaygroundAdapter Qt6::Test)
-    if(TARGET SyntheticGenTL)
-      target_compile_definitions(OneGenFeatureTreeTests PRIVATE
-        ONEGEN_TEST_PRODUCER="$<TARGET_FILE:SyntheticGenTL>")
-      add_dependencies(OneGenFeatureTreeTests SyntheticGenTL)
-    endif()
-    if(TARGET Resources::Resources)
-      target_link_libraries(OneGenFeatureTreeTests PRIVATE Resources::Resources)
-      target_compile_definitions(OneGenFeatureTreeTests PRIVATE ONEGEN_FEATURE_THEME=1)
-    endif()
-    add_test(NAME OneGenFeatureTreeTests COMMAND OneGenFeatureTreeTests -o -,txt)
-    set_tests_properties(OneGenFeatureTreeTests PROPERTIES
-      ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
-  endif()
-  message(STATUS "[OneGen] OneGen::QtWidget enabled.")
 endif()
 
 if(ONEGEN_BUILD_PLAYGROUND_ADAPTER)
@@ -324,12 +235,10 @@ if(ONEGEN_BUILD_PLAYGROUND_ADAPTER)
 endif()
 
 if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
-  if(NOT ONEGEN_BUILD_PLAYGROUND_ADAPTER OR NOT ONEGEN_BUILD_QT_WIDGET
-      OR NOT TARGET Playground::DeviceRuntimeContract
-      OR NOT TARGET Resources::Widgets OR NOT TARGET Resources::Dialogs OR NOT Qt6_FOUND)
-    message(FATAL_ERROR "ONEGEN_BUILD_PLAYGROUND_PLUGIN requires the adapter, OneGen::QtWidget, Playground::DeviceRuntimeContract, Resources::Widgets, Resources::Dialogs, and Qt6::Widgets")
+  if(NOT ONEGEN_BUILD_PLAYGROUND_ADAPTER OR NOT TARGET Playground::DeviceRuntimeContract OR NOT Qt6_FOUND)
+    message(FATAL_ERROR "ONEGEN_BUILD_PLAYGROUND_PLUGIN requires the adapter, Playground::DeviceRuntimeContract and Qt6")
   endif()
-  find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
+  find_package(Qt6 REQUIRED COMPONENTS Concurrent)
   add_library(OneGenPlugin MODULE
     Utility/PlaygroundAdapter/Plugin/OneGenPlugin.cpp
     Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
@@ -347,8 +256,8 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
     "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
   target_link_libraries(OneGenPlugin PRIVATE
-    Playground::DeviceRuntimeContract OneGen::PlaygroundAdapter OneGen::QtWidget
-    Resources::Widgets Resources::Dialogs Qt6::Widgets Qt6::Concurrent)
+    Playground::DeviceRuntimeContract OneGen::PlaygroundAdapter OneGen::Producer
+    Qt6::Core Qt6::Concurrent)
 
   set(_onegen_runtime_payload "${CMAKE_CURRENT_BINARY_DIR}/plugin-runtime")
   file(MAKE_DIRECTORY "${_onegen_runtime_payload}")
@@ -373,7 +282,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
   endif()
   message(STATUS "[OneGen] OneGenPlugin enabled.")
   if(ONEGEN_BUILD_TESTS)
-    find_package(Qt6 REQUIRED COMPONENTS Test)
+    find_package(Qt6 REQUIRED COMPONENTS Widgets Test)
     qt_add_executable(test_plugin_discovery Tests/test_plugin_discovery.cpp)
     set_target_properties(test_plugin_discovery PROPERTIES AUTOMOC ON)
     target_include_directories(test_plugin_discovery PRIVATE "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
@@ -396,7 +305,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     playground_sdk_add_runtime_contract(onegen_source_controller_test)
     set_target_properties(onegen_source_controller_test PROPERTIES AUTOMOC ON)
     target_link_libraries(onegen_source_controller_test PRIVATE
-      OneGen::QtWidget OneGen::PlaygroundAdapter Qt6::Test)
+      OneGen::PlaygroundAdapter OneGen::Producer Qt6::Concurrent Qt6::Test)
     target_compile_definitions(onegen_source_controller_test PRIVATE
       ONEGEN_TEST_PRODUCER="$<TARGET_FILE:SyntheticGenTL>")
     add_dependencies(onegen_source_controller_test SyntheticGenTL)
@@ -409,8 +318,4 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ONEGEN_SYNTHETIC_SCENARIO=M15;ONEGEN_TEST_ACQ_MODE=unwritable"
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
   endif()
-endif()
-
-if(TARGET OneGenQtWidget)
-    target_link_libraries(OneGenQtWidget PUBLIC OneGenPresentation)
 endif()

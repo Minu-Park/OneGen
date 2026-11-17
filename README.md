@@ -8,7 +8,8 @@ enumerates cameras, acquires owned frame payloads, and exposes GenApi features.
 Requirements: CMake 3.24+, a C++20 compiler, and network access for the pinned
 EMVA GenICam package cached under `genicam/`. For extracted local packages, set
 `ONEGEN_GENICAM_ROOT`, `ONEGEN_GENICAM_RUNTIME_ROOT`, and `ONEGEN_GENTL_INCLUDE`.
-Qt 6 Widgets is optional and enables `OneGen::QtWidget`.
+Qt 6 Core and Concurrent are required by the Playground adapter and plugin; no
+Qt Widgets target is built.
 
 ```sh
 cmake -S . -B build
@@ -21,7 +22,7 @@ cmake --build build --target check
 The standalone plugin consumes `PlaygroundPluginSDK` through `find_package`.
 Only this repository, the installed SDK, Qt and the pinned EMVA GenICam package
 are needed; no host checkout, renderer, VTK or theme installation is required.
-The plugin switch enables its adapter and Qt widget.
+The plugin switch enables its adapter and the widget-free device plugin.
 
 ```sh
 cmake -S . -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DCMAKE_CONFIGURATION_TYPES=Release -DCMAKE_BUILD_TYPE=Release -DONEGEN_BUILD_PLAYGROUND_PLUGIN=ON -DONEGEN_BUILD_TESTS=ON
@@ -205,14 +206,14 @@ expansion inside GenApi. File URL paths decode percent escapes and use UTF-8 fil
 
 Set `ONEGEN_TRACE_CONNECT=1` before starting the consumer to enable monotonic
 Connect stage timings. The producer layer reports device refresh/open, per-module
-XML, stream preparation, and feature snapshots; the Qt controls report the open
-call and GUI tree construction. Timing lines go to the consumer log. Timings are
+XML, stream preparation, and feature snapshots; the Host device panel reports the
+open call and panel construction. Timing lines go to the consumer log. Timings are
 disabled by default.
 
-Controls do not periodically poll or refresh the feature tree. Operation-boundary
-refreshes and queued GenApi invalidations remain. The explicit lease polling API
-can advance GenApi-declared intervals and drain events; the control panel no longer
-invokes it on a timer. Producers that
+The common panel does not periodically poll or refresh the feature tree.
+Operation-boundary refreshes and queued GenApi invalidations remain. The explicit
+lease polling API can advance GenApi-declared intervals and drain events; the Host
+panel does not invoke it on a timer. Producers that
 support `EVENT_FEATURE_INVALIDATE`, `EVENT_MODULE`, or `EVENT_REMOTE_DEVICE`
 are handled with bounded event sizes and at most 32 drained messages per channel
 per poll. Numeric and string generic event IDs are supported. Device event
@@ -290,39 +291,25 @@ for (const auto& device : gentl.enumerate())
 ```
 
 The repository follows the Camera/Gocator layout: public headers live next to
-sources in `C++/`, internals in `C++/Internal/`, `QOneGenWidget` in
-`C++/Utility/Qt/`, and the Playground plugin under
+sources in `C++/`, internals in `C++/Internal/`, and the Playground plugin under
 `C++/Utility/PlaygroundAdapter/`. In-process producer coordination and the frame
-pool live in `C++/Utility/Producer/`. The EMVA GenICam fetch cache is `genicam/`; vendor `.cti`
-files are not stored in the module.
+pool live in `C++/Utility/Producer/`. The EMVA GenICam fetch cache is `genicam/`;
+vendor `.cti` files are not stored in the module.
 
-Playground composes the optional `OneGen::QtWidget`, `OneGen::PlaygroundAdapter`,
-and `OneGenPlugin` targets while OneGen keeps its implementation and package
-identity independent.
+Playground composes the optional `OneGen::PlaygroundAdapter` and `OneGenPlugin`
+targets while OneGen keeps its implementation and package identity independent.
+The plugin package stages no Qt Widgets, Resources widget or dialog library, and
+no OpenGL dependency.
 
 The Playground session contract is documented in
 [In-Process GenTL Producers](docs/IN_PROCESS_PRODUCERS.md).
 
-## Qt feature browsing
+## Playground device panel
 
-`OneGenFeatureTree` derives from the Qt-only `SearchableTreeWidget` in
-`Resources::Widgets`. Standalone widgets and adapters resolve their public
-dependencies through the installed consumer SDK.
-No theme installation is required; GenTL/core-only builds do not depend on it.
-OneGen provides internal node search text, snapshot row identities and the
-unchanged node-map/internal-name favorite identities. It uses the consumer's
-explicit settings file/key or `OneGenFeatures.ini` for standalone widgets;
-these stores remain independent and no legacy list is imported implicitly.
-
-## Qt presentation
-
-`C++/Utility/Qt` provides the SDK-independent `OneGenPresentation` target.
-The runtime Qt widget and isolated presentation consumers use the same
-`OneGenControlUi` composition; device discovery, feature access and
-acquisition remain in the runtime widget. The presentation target does not
-install an application theme.
-The feature browser also requires the existing `Resources::Widgets` target.
-Modal dialogs such as the Register Inspector use a consumer
-`OneGenDialogShellFactory` (`setDialogShellFactory()`); without one they use a plain
-Qt dialog. The Playground plugin links `Resources::Dialogs` and supplies its
-`ThemedDialog` shell.
+Playground owns the one device panel for every device session. OneGen no longer
+ships a widget library, creates no session widget or dock, and returns only
+value data and its source controller. The session declares
+`Plugins/OneGen/Favorites/Nodes` through `DeviceSessionMetadata`, so the Host
+panel keeps the existing favorites namespace without a migration. Feature
+search, favorites, connection controls, parameter editing and acquisition
+actions come from the common panel and the controller's declared tools.

@@ -1,9 +1,7 @@
 #include "DevicePluginTemplate.h"
 
-#include "Utility/Qt/QOneGenDeviceWidget.h"
-#include "Chrome/ThemedDialog.h"
 #include "ProducerCoordinator.h"
-#include "Utility/Qt/OneGenLogSink.h"
+#include "Utility/PlaygroundAdapter/OneGenLogSink.h"
 #include "OneGenSourceController.h"
 #include "OneGen.h"
 #include "StartupDiscovery.h"
@@ -146,64 +144,21 @@ std::vector<onegen::DeviceInfo> discover(
   return result.devices;
 }
 
-using RetainScan = std::function<void(std::shared_ptr<onegen::producer::StartupDiscovery>)>;
-/** @brief Replays a shared initial scan once, then permits explicit control refreshes. */
-QOneGenWidget::DiscoverFn cachedDiscovery(
-    std::shared_ptr<onegen::producer::Coordinator> coordinator,
-    std::shared_ptr<onegen::producer::StartupDiscovery> startup, RetainScan retain) {
-  return [coordinator = std::move(coordinator), initial =
-      std::make_shared<std::shared_ptr<onegen::producer::StartupDiscovery>>(std::move(startup)), retain = std::move(retain)]
-      (onegen::producer::Coordinator::ProgressFn progress) mutable {
-    if (auto scan = std::exchange(*initial, {})) return scan->finish(std::move(progress));
-    auto scan = std::make_shared<onegen::producer::StartupDiscovery>(
-        [coordinator](auto update) { return discover(coordinator, std::move(update)); }, logDiscoveryState);
-    retain(scan);
-    return scan->finish(std::move(progress));
-  };
-}
-
 class OneGenPluginSession final : public IDevicePluginSession {
 public:
   OneGenPluginSession(std::shared_ptr<onegen::producer::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
-                      std::shared_ptr<onegen::producer::StartupDiscovery> startup, QString settingsFile,
-                      std::function<void(OneGenSourceController*)> registerController, RetainScan retain)
+                      std::function<void(OneGenSourceController*)> registerController)
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
-        startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
-        controller_(std::make_unique<OneGenSourceController>()),
-        retain_scan_(std::move(retain)) {
+        controller_(std::make_unique<OneGenSourceController>()) {
     registerController(controller_.get());
     controller_->configureControl(coordinator_, devices_);
   }
 
-  ~OneGenPluginSession() override
-  {
-    if (widget_) widget_->prepareForShutdown();
-    controller_.reset();
-  }
-
   QString title() const override { return title_; }
-  std::vector<DevicePluginDock> createDockWidgets(QWidget* parent) override
-  {
-    if (!widget_) {
-      widget_ = new QOneGenDeviceWidget(
-          coordinator_, controller_.get(), devices_,
-          cachedDiscovery(coordinator_, std::move(startup_), retain_scan_), parent, settings_file_, settings_file_.isEmpty() ? QString{}
-              : QStringLiteral("Plugins/OneGen/Favorites/Nodes"));
-      widget_->setTitleCallback([this](const QString& title) {
-        title_ = title;
-        if (title_changed_) title_changed_(title_);
-      });
-      // The host installs Resources; plugin dialogs use its shell while the widget stays theme-free.
-      widget_->setDialogShellFactory([](QWidget* parent, const QString& title) {
-        auto dialog = std::make_unique<ThemedDialog>(title, parent);
-        auto* content = dialog->contentLayout();
-        return OneGenDialogShell{std::move(dialog), content};
-      });
-    }
-    return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
-             Qt::LeftDockWidgetArea, widget_, true}};
-  }
+  DeviceSessionMetadata sessionMetadata() const override
+  { return {QStringLiteral("Plugins/OneGen/Favorites/Nodes")}; }
+  std::vector<DevicePluginDock> createDockWidgets(QWidget*) override { return {}; }
   AbstractSourceController* sourceController() const override { return controller_.get(); }
   unsigned int capabilities() const noexcept override
   {
@@ -216,13 +171,9 @@ public:
 private:
   std::shared_ptr<onegen::producer::Coordinator> coordinator_;
   std::vector<onegen::DeviceInfo> devices_;
-  std::shared_ptr<onegen::producer::StartupDiscovery> startup_;
-  QString settings_file_;
   std::unique_ptr<OneGenSourceController> controller_;
-  QPointer<QOneGenDeviceWidget> widget_;
   QString title_ = QStringLiteral("GenICam Session");
   std::function<void(const QString&)> title_changed_;
-  RetainScan retain_scan_;
 };
 
 } // namespace
@@ -237,8 +188,8 @@ public:
   /** Producers run in the consumer process; their diagnostics go to its Qt log. */
   OneGenPlugin() { onegen::qt::installLogSink(); }
 
-  /** Selects consumer settings without coupling the reusable UI to host paths. */
-  void setSettingsFile(const QString& fileName) override { settings_file_ = fileName; }
+  /** Accepts the host settings path; favorites are declared through session metadata. */
+  void setSettingsFile(const QString&) override {}
   /** Retains the host service used to claim a Siso board before its Interface opens. */
   void setResourceClaims(IDevicePluginResourceClaims* claims) override {
     claims_.store(claims, std::memory_order_release);
@@ -327,16 +278,12 @@ public:
     try {
       const auto producer_coordinator = coordinator();
       if (!producer_coordinator) return {};
-      std::shared_ptr<onegen::producer::StartupDiscovery> startup;
-      { std::lock_guard lock(mutex_); startup = startup_; }
       return std::make_unique<OneGenPluginSession>(
           producer_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
-          std::move(startup), settings_file_,
           [this](OneGenSourceController* controller) {
             std::lock_guard lock(mutex_);
             controllers_.push_back(controller);
-          },
-          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); });
+          });
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
       return {};
@@ -457,7 +404,6 @@ private:
     return std::vector<QPointer<OneGenSourceController>>(controllers_.begin(), controllers_.end());
   }
 
-  QString settings_file_;
   mutable std::vector<QPointer<OneGenSourceController>> controllers_;
   std::shared_ptr<onegen::producer::Coordinator> coordinator()
   {
