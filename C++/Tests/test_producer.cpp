@@ -117,8 +117,8 @@ int main(int argc, char** argv) {
     return std::shared_ptr<std::uint8_t>(new std::uint8_t[bytes],
         std::default_delete<std::uint8_t[]>());
   };
-  assert(lease->create_frame_pool(6, payload, error, storage) && error.empty());
-  assert(!lease->create_frame_pool(6, payload, error, storage));
+  assert(lease->attach_lease_sink(6, payload, error, storage) && error.empty());
+  assert(!lease->attach_lease_sink(6, payload, error, storage));
   std::mutex held_mutex;
   std::deque<std::shared_ptr<const onegen::producer::FrameLease>> held;
   std::atomic<std::uint64_t> shared_frames{0}, owned_frames{0}, last_id{0};
@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
   lease->stop();
   assert(ordered);
   assert(owned_frames == 0);
-  const auto pool = lease->frame_pool();
+  const auto pool = lease->lease_sink();
   assert(pool);
   const auto counters = pool->counters();
   assert(counters.published == shared_frames.load());
@@ -168,8 +168,8 @@ int main(int argc, char** argv) {
   }
 
   // Without a pool, Live delivers owned frames.
-  lease->destroy_frame_pool();
-  assert(!lease->frame_pool());
+  lease->detach_lease_sink();
+  assert(!lease->lease_sink());
   lease->live();
   assert(waitFor([&] { return owned_frames.load() >= 10; }));
   lease->stop();

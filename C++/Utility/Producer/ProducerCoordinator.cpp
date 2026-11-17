@@ -382,18 +382,18 @@ std::uint64_t Lease::payload_size() {
   return camera().payload_size();
 }
 
-bool Lease::create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes,
-                              std::string& error, FramePool::FrameStorage storage) {
+bool Lease::attach_lease_sink(std::uint32_t slot_count, std::uint64_t slot_bytes,
+                              std::string& error, DirectLeaseSink::FrameStorage storage) {
   std::lock_guard lock(producer_->mutex);
   if (closed_.load()) {
     error = "Device lease is closed.";
     return false;
   }
   if (pool_) {
-    error = "A frame pool is already attached.";
+    error = "A lease sink is already attached.";
     return false;
   }
-  auto pool = FramePool::create(slot_count, slot_bytes, error, std::move(storage));
+  auto pool = DirectLeaseSink::create(slot_count, slot_bytes, error, std::move(storage));
   if (!pool) return false;
   pool->set_error_callback([callbacks = callbacks_](std::string_view message) {
     ErrorFn callback;
@@ -407,7 +407,7 @@ bool Lease::create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes
   return true;
 }
 
-void Lease::destroy_frame_pool() {
+void Lease::detach_lease_sink() {
   std::lock_guard lock(producer_->mutex);
   if (!pool_) return;
   if (!closed_.load()) detail::set_direct_frame_sink(*camera_, {});
@@ -416,7 +416,7 @@ void Lease::destroy_frame_pool() {
   pool_.reset();
 }
 
-std::shared_ptr<const FramePool> Lease::frame_pool() const {
+std::shared_ptr<const DirectLeaseSink> Lease::lease_sink() const {
   std::lock_guard lock(producer_->mutex);
   return pool_;
 }

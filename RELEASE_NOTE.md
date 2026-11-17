@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Rename `FramePool` to `DirectLeaseSink` and the `Lease` attachment API to `attach_lease_sink`, `detach_lease_sink` and `lease_sink`. This is not a plugin-owned frame pool: it owns no frame memory, leases the consumer's provided storage for the pinned direct copy, and bounds in-flight frames while the camera owns the GenTL announced buffers. Drop accounting and diagnostics are unchanged.
+
 - Document the widget-free, worker-only current state in the README and retire `docs/IN_PROCESS_PRODUCERS.md` to a short module-owned historical pointer. Playground's device runtime contract is authoritative; the plugin creates no session widget or dock and the Host device panel owns the session UI.
 
 - Clarify the README layout section: producer coordination and the frame pool are module-internal code that runs inside the Playground device worker, with no in-process Host path.

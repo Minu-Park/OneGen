@@ -353,12 +353,12 @@ void OneGenSourceController::setLease(onegen::producer::Lease* lease)
     lease_->set_frame_callback({});
     lease_->set_shared_frame_callback({});
     lease_->set_error_callback({});
-    lease_->destroy_frame_pool();
+    lease_->detach_lease_sink();
   }
-  frame_pool_.reset();
+  lease_sink_.reset();
   lock.unlock();
   // Frame callbacks never acquire direct_pool_mutex_; holding it across the gate
-  // drain prevents start from attaching a pool to the lease being replaced.
+  // drain prevents start from attaching a lease sink to the lease being replaced.
   if (old_gate) old_gate->waitForDrain();
   lock.lock();
   lease_ = lease;
@@ -458,9 +458,9 @@ void OneGenSourceController::configureFrameStorage(
   // Without a consumer provider there is no frame storage to write into. The owned path still
   // delivers every frame, but direct frames have no destination and must not allocate one.
   if (!provider) {
-    lease.destroy_frame_pool();
+    lease.detach_lease_sink();
     std::lock_guard lock(mutex_);
-    frame_pool_.reset();
+    lease_sink_.reset();
     return;
   }
   std::string error;
@@ -468,29 +468,29 @@ void OneGenSourceController::configureFrameStorage(
   if (!payload || *payload == 0) {
     // The direct path cannot copy into the Host pool without a known slot size; the owned path
     // still writes every image through the same provider.
-    lease.destroy_frame_pool();
+    lease.detach_lease_sink();
     std::lock_guard lock(mutex_);
-    frame_pool_.reset();
+    lease_sink_.reset();
     qWarning().noquote() << QStringLiteral(
         "[GenICam] direct frame path unavailable: camera=%1 reason=%2")
         .arg(QString::fromStdString(sourceName), QString::fromStdString(error));
     return;
   }
-  std::shared_ptr<const onegen::producer::FramePool> attached;
+  std::shared_ptr<const onegen::producer::DirectLeaseSink> attached;
   {
     std::lock_guard lock(mutex_);
-    attached = frame_pool_;
+    attached = lease_sink_;
   }
   if (attached && attached->slot_bytes() == *payload) return;
 
-  lease.destroy_frame_pool();
+  lease.detach_lease_sink();
   {
     std::lock_guard lock(mutex_);
-    frame_pool_.reset();
+    lease_sink_.reset();
   }
-  // The pool owns no memory: each reservation takes its slot from the Host provider. Its slot
+  // The sink owns no memory: each reservation takes its slot from the Host provider. Its slot
   // count only bounds how many frames may be in flight.
-  if (!lease.create_frame_pool(kMaximumInFlightFrames, *payload, error,
+  if (!lease.attach_lease_sink(kMaximumInFlightFrames, *payload, error,
           frameStorageFunction(provider))) {
     throw std::runtime_error(error);
   }
@@ -501,7 +501,7 @@ void OneGenSourceController::configureFrameStorage(
       });
   {
     std::lock_guard lock(mutex_);
-    frame_pool_ = lease.frame_pool();
+    lease_sink_ = lease.lease_sink();
   }
   qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral(
       "[GenICam] Host frame storage attached: camera=%1 slots=%2 slotBytes=%3")
@@ -558,7 +558,7 @@ void OneGenSourceController::start()
   partial_frames_.store(0, std::memory_order_relaxed);
   {
     std::lock_guard lock(mutex_);
-    exhausted_baseline_.store(frame_pool_ ? frame_pool_->exhausted() : 0, std::memory_order_relaxed);
+    exhausted_baseline_.store(lease_sink_ ? lease_sink_->exhausted() : 0, std::memory_order_relaxed);
   }
   emit diagnosticAcquisitionChanged(true, QStringLiteral("camera"));
   try { lease->live(); }
@@ -694,10 +694,10 @@ SourceRuntimeDiagnostics OneGenSourceController::runtimeDiagnostics(
 
 std::uint64_t OneGenSourceController::droppedFrames() const
 {
-  std::shared_ptr<const onegen::producer::FramePool> pool;
+  std::shared_ptr<const onegen::producer::DirectLeaseSink> pool;
   {
     std::lock_guard lock(mutex_);
-    pool = frame_pool_;
+    pool = lease_sink_;
   }
   if (!pool) return 0;
   const auto exhausted = pool->exhausted();

@@ -1,6 +1,6 @@
 // Lease bound: exact reserve/publish/cancel/release accounting, leases outliving the pool
 // owner, exhaustion without waiting, and consumer-provided storage with no pool allocation.
-#include "FramePool.h"
+#include "DirectLeaseSink.h"
 
 #include <cassert>
 #include <cstring>
@@ -8,12 +8,12 @@
 #include <vector>
 
 namespace d = onegen::detail;
-using onegen::producer::FramePool;
+using onegen::producer::DirectLeaseSink;
 using onegen::producer::SharedFrame;
 
 namespace {
 
-d::DirectReservation reserve(FramePool& pool) {
+d::DirectReservation reserve(DirectLeaseSink& pool) {
   d::DirectReservation reservation;
   assert(pool.reserve(reservation) == d::ReserveStatus::Reserved);
   assert(reservation.destination.size() == pool.slot_bytes());
@@ -29,12 +29,12 @@ int main() {
         std::default_delete<std::uint8_t[]>());
   };
   std::string error;
-  assert(!FramePool::create(0, 64, error, storage) && !error.empty());
+  assert(!DirectLeaseSink::create(0, 64, error, storage) && !error.empty());
   error.clear();
-  assert(!FramePool::create(3, 64, error, {}) && !error.empty());
+  assert(!DirectLeaseSink::create(3, 64, error, {}) && !error.empty());
 
   error.clear();
-  auto pool = FramePool::create(3, 64, error, storage);
+  auto pool = DirectLeaseSink::create(3, 64, error, storage);
   assert(pool && error.empty());
   std::vector<std::shared_ptr<const onegen::producer::FrameLease>> held;
   pool->set_frame_callback([&](const SharedFrame& frame) { held.push_back(frame.lease); });
@@ -86,7 +86,7 @@ int main() {
   // Reservations own the pool only until publish/cancel completes, as in the acquisition loop.
   for (auto* reservation : {&full, &again, &oversized, &stopped}) reservation->owner.reset();
   // Leases keep slot memory alive after the creator drops the pool.
-  std::weak_ptr<FramePool> weak = pool;
+  std::weak_ptr<DirectLeaseSink> weak = pool;
   const auto bytes = held[0]->bytes();
   pool.reset();
   assert(!weak.expired());
@@ -111,7 +111,7 @@ int main() {
       });
     };
     std::string storage_error;
-    auto external = FramePool::create(2, 64, storage_error, storage);
+    auto external = DirectLeaseSink::create(2, 64, storage_error, storage);
     assert(external && storage_error.empty());
     assert(outstanding == 0);
     std::vector<std::shared_ptr<const onegen::producer::FrameLease>> leases;

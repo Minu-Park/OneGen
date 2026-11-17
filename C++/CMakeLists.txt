@@ -131,10 +131,10 @@ if(ONEGEN_BUILD_TESTS)
   endif()
 endif()
 
-# In-process producer coordination: discovery, device leases and the frame slot pool.
+# Producer coordination: discovery, device leases and the pinned direct lease sink.
 add_library(OneGenProducer STATIC
-  Utility/Producer/FramePool.cpp
-  Utility/Producer/FramePool.h
+  Utility/Producer/DirectLeaseSink.cpp
+  Utility/Producer/DirectLeaseSink.h
   Utility/Producer/ParameterTypes.h
   Utility/Producer/ProducerCoordinator.cpp
   Utility/Producer/ProducerCoordinator.h
@@ -145,15 +145,15 @@ target_include_directories(OneGenProducer PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/Utility/Producer")
 target_link_libraries(OneGenProducer PUBLIC onegen)
 if(ONEGEN_BUILD_TESTS)
-  add_executable(test_frame_pool Tests/test_frame_pool.cpp)
-  target_link_libraries(test_frame_pool PRIVATE OneGen::Producer)
-  add_test(NAME test_frame_pool COMMAND test_frame_pool)
+  add_executable(test_direct_lease_sink Tests/test_direct_lease_sink.cpp)
+  target_link_libraries(test_direct_lease_sink PRIVATE OneGen::Producer)
+  add_test(NAME test_direct_lease_sink COMMAND test_direct_lease_sink)
   add_executable(test_producer Tests/test_producer.cpp)
   target_link_libraries(test_producer PRIVATE OneGen::Producer)
   add_dependencies(test_producer SyntheticGenTL FailingInitProducer)
   add_test(NAME test_producer COMMAND test_producer
     $<TARGET_FILE:SyntheticGenTL> $<TARGET_FILE:FailingInitProducer>)
-  foreach(_test test_frame_pool test_producer)
+  foreach(_test test_direct_lease_sink test_producer)
     target_compile_options(${_test} PRIVATE
       $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
       $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
