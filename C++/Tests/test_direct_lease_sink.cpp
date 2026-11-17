@@ -1,5 +1,5 @@
-// Lease bound: exact reserve/publish/cancel/release accounting, leases outliving the pool
-// owner, exhaustion without waiting, and consumer-provided storage with no pool allocation.
+// Lease sink: exact reserve/publish/cancel/release accounting, leases outliving the sink
+// owner, exhaustion without waiting, and consumer-provided storage with no sink allocation.
 #include "DirectLeaseSink.h"
 
 #include <cassert>
@@ -13,10 +13,10 @@ using onegen::producer::SharedFrame;
 
 namespace {
 
-d::DirectReservation reserve(DirectLeaseSink& pool) {
+d::DirectReservation reserve(DirectLeaseSink& sink) {
   d::DirectReservation reservation;
-  assert(pool.reserve(reservation) == d::ReserveStatus::Reserved);
-  assert(reservation.destination.size() == pool.slot_bytes());
+  assert(sink.reserve(reservation) == d::ReserveStatus::Reserved);
+  assert(reservation.destination.size() == sink.slot_bytes());
   assert(reservation.owner);
   return reservation;
 }
@@ -34,67 +34,67 @@ int main() {
   assert(!DirectLeaseSink::create(3, 64, error, {}) && !error.empty());
 
   error.clear();
-  auto pool = DirectLeaseSink::create(3, 64, error, storage);
-  assert(pool && error.empty());
+  auto sink = DirectLeaseSink::create(3, 64, error, storage);
+  assert(sink && error.empty());
   std::vector<std::shared_ptr<const onegen::producer::FrameLease>> held;
-  pool->set_frame_callback([&](const SharedFrame& frame) { held.push_back(frame.lease); });
+  sink->set_frame_callback([&](const SharedFrame& frame) { held.push_back(frame.lease); });
 
   onegen::Frame metadata;
   metadata.frame_id = 7;
   metadata.width = 8;
   metadata.height = 4;
   for (int index = 0; index < 3; ++index) {
-    auto reservation = reserve(*pool);
+    auto reservation = reserve(*sink);
     std::memset(reservation.destination.data(), 0x40 + index, 32);
-    pool->publish(reservation, metadata, 32);
+    sink->publish(reservation, metadata, 32);
   }
   assert(held.size() == 3);
   assert(held[1]->bytes().size() == 32 && held[1]->bytes()[0] == 0x41);
   assert(held[2]->metadata().frame_id == 7);
-  assert(pool->counters().held == 3 && pool->counters().max_held == 3);
+  assert(sink->counters().held == 3 && sink->counters().max_held == 3);
 
-  // A full pool refuses instead of waiting; the acquisition loop counts the drop.
+  // A full lease set refuses instead of waiting; the acquisition loop counts the drop.
   d::DirectReservation full;
-  assert(pool->reserve(full) == d::ReserveStatus::Busy);
-  pool->note_slot_exhausted();
-  assert(pool->exhausted() == 1);
+  assert(sink->reserve(full) == d::ReserveStatus::Busy);
+  sink->note_slot_exhausted();
+  assert(sink->exhausted() == 1);
 
   // Releasing a lease from any owner returns exactly that slot.
   held.erase(held.begin());
-  assert(pool->counters().held == 2);
-  auto again = reserve(*pool);
-  pool->cancel(again, d::CancelCause::Fallback);
-  again = reserve(*pool);
-  assert(pool->reserve(full) == d::ReserveStatus::Busy);
-  pool->cancel(again, d::CancelCause::Timeout);
+  assert(sink->counters().held == 2);
+  auto again = reserve(*sink);
+  sink->cancel(again, d::CancelCause::Fallback);
+  again = reserve(*sink);
+  assert(sink->reserve(full) == d::ReserveStatus::Busy);
+  sink->cancel(again, d::CancelCause::Timeout);
   // A second cancel or a stale release is harmless.
-  pool->cancel(again, d::CancelCause::Timeout);
+  sink->cancel(again, d::CancelCause::Timeout);
 
   // A publish larger than the slot is refused and frees the reservation.
-  auto oversized = reserve(*pool);
-  pool->publish(oversized, metadata, pool->slot_bytes() + 1);
+  auto oversized = reserve(*sink);
+  sink->publish(oversized, metadata, sink->slot_bytes() + 1);
   assert(held.size() == 2);
-  assert(pool->counters().held == 2);
-  pool->cancel(reserve(*pool), d::CancelCause::Capacity);
+  assert(sink->counters().held == 2);
+  sink->cancel(reserve(*sink), d::CancelCause::Capacity);
 
   // Stop refuses new reservations; published leases stay valid.
-  pool->request_stop();
+  sink->request_stop();
   d::DirectReservation stopped;
-  assert(pool->reserve(stopped) == d::ReserveStatus::Stopped);
-  pool->resume();
+  assert(sink->reserve(stopped) == d::ReserveStatus::Stopped);
+  sink->resume();
 
-  // Reservations own the pool only until publish/cancel completes, as in the acquisition loop.
+  // Reservations own the sink only until publish/cancel completes, as in the acquisition loop.
   for (auto* reservation : {&full, &again, &oversized, &stopped}) reservation->owner.reset();
-  // Leases keep slot memory alive after the creator drops the pool.
-  std::weak_ptr<DirectLeaseSink> weak = pool;
+  // Leases keep slot storage alive after the creator drops the sink.
+  std::weak_ptr<DirectLeaseSink> weak = sink;
   const auto bytes = held[0]->bytes();
-  pool.reset();
+  sink.reset();
   assert(!weak.expired());
   assert(bytes[0] == 0x41);
   held.clear();
   assert(weak.expired());
 
-  // Consumer-provided storage: the pool allocates nothing, each reservation writes into the
+  // Consumer-provided storage: the sink allocates nothing, each reservation writes into the
   // bytes the consumer handed out, and a lease keeps exactly those bytes alive.
   {
     int outstanding = 0;
@@ -130,14 +130,14 @@ int main() {
     external->cancel(cancelled, d::CancelCause::Timeout);
     assert(outstanding == 1);
 
-    // No storage from the consumer reads as a full pool and takes no slot.
+    // No storage from the consumer reads as a full set and takes no slot.
     refuse = true;
     d::DirectReservation none;
     assert(external->reserve(none) == d::ReserveStatus::Busy);
     refuse = false;
     external->cancel(reserve(*external), d::CancelCause::Timeout);
 
-    // The lease, not the pool, keeps the bytes alive.
+    // The lease, not the sink, keeps the bytes alive.
     external.reset();
     assert(outstanding == 1 && leases[0]->bytes()[0] == 0x5a);
     leases.clear();

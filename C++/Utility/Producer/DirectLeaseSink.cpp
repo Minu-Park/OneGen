@@ -8,14 +8,14 @@
 
 namespace onegen::producer {
 
-FrameLease::FrameLease(std::shared_ptr<DirectLeaseSink> pool, std::uint32_t slot,
+FrameLease::FrameLease(std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
                        std::span<const std::uint8_t> bytes, Frame metadata,
                        std::shared_ptr<std::uint8_t> storage) noexcept
-    : pool_(std::move(pool)), storage_(std::move(storage)), slot_(slot), bytes_(bytes),
+    : sink_(std::move(sink)), storage_(std::move(storage)), slot_(slot), bytes_(bytes),
       metadata_(std::move(metadata)) {}
 
 FrameLease::~FrameLease() {
-  if (pool_) pool_->release(slot_);
+  if (sink_) sink_->release(slot_);
 }
 
 std::shared_ptr<DirectLeaseSink> DirectLeaseSink::create(std::uint32_t slots,
@@ -30,15 +30,15 @@ std::shared_ptr<DirectLeaseSink> DirectLeaseSink::create(std::uint32_t slots,
     error = "Lease sink requires consumer storage.";
     return {};
   }
-  std::shared_ptr<DirectLeaseSink> pool(new (std::nothrow) DirectLeaseSink(slots, slot_bytes));
-  if (!pool) {
+  std::shared_ptr<DirectLeaseSink> sink(new (std::nothrow) DirectLeaseSink(slots, slot_bytes));
+  if (!sink) {
     error = "Lease sink allocation failed.";
     return {};
   }
-  pool->storage_ = std::move(storage);
-  pool->reserved_.resize(slots);
-  for (std::uint32_t index = 0; index < slots; ++index) pool->free_.push_back(index);
-  return pool;
+  sink->storage_ = std::move(storage);
+  sink->reserved_.resize(slots);
+  for (std::uint32_t index = 0; index < slots; ++index) sink->free_.push_back(index);
+  return sink;
 }
 
 DirectLeaseSink::DirectLeaseSink(std::uint32_t slots, std::uint64_t slot_bytes) noexcept

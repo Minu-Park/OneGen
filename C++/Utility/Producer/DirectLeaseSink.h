@@ -36,10 +36,10 @@ public:
 
 private:
   friend class DirectLeaseSink;
-  FrameLease(std::shared_ptr<DirectLeaseSink> pool, std::uint32_t slot,
+  FrameLease(std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
              std::span<const std::uint8_t> bytes, Frame metadata,
              std::shared_ptr<std::uint8_t> storage) noexcept;
-  std::shared_ptr<DirectLeaseSink> pool_;
+  std::shared_ptr<DirectLeaseSink> sink_;
   // Consumer-provided bytes behind bytes(); the lease keeps this storage alive.
   std::shared_ptr<std::uint8_t> storage_;
   std::uint32_t slot_ = 0;

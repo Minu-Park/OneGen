@@ -120,7 +120,7 @@ private:
   bool shared_interface_ = false;
   std::uint64_t stream_generation_ = 1;
   std::shared_ptr<LeaseCallbacks> callbacks_;
-  std::shared_ptr<DirectLeaseSink> pool_;
+  std::shared_ptr<DirectLeaseSink> sink_;
   std::atomic<bool> closed_{false};
 };
 

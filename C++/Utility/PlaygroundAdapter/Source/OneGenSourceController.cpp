@@ -344,7 +344,7 @@ std::vector<GraphicsSourceDescriptor> OneGenSourceController::sourceDescriptors(
 
 void OneGenSourceController::setLease(onegen::producer::Lease* lease)
 {
-  std::unique_lock poolLock(direct_pool_mutex_);
+  std::unique_lock leaseLock(direct_lease_mutex_);
   std::unique_lock lock(mutex_);
   if (lease_ == lease) return;
   auto old_gate = std::move(callback_gate_);
@@ -357,7 +357,7 @@ void OneGenSourceController::setLease(onegen::producer::Lease* lease)
   }
   lease_sink_.reset();
   lock.unlock();
-  // Frame callbacks never acquire direct_pool_mutex_; holding it across the gate
+  // Frame callbacks never acquire direct_lease_mutex_; holding it across the gate
   // drain prevents start from attaching a lease sink to the lease being replaced.
   if (old_gate) old_gate->waitForDrain();
   lock.lock();
@@ -538,7 +538,7 @@ void OneGenSourceController::start()
   }
   onegen::producer::Lease* lease = nullptr;
   {
-    std::unique_lock poolLock(direct_pool_mutex_);
+    std::unique_lock leaseLock(direct_lease_mutex_);
     {
       std::lock_guard lock(mutex_);
       lease = lease_;
@@ -694,13 +694,13 @@ SourceRuntimeDiagnostics OneGenSourceController::runtimeDiagnostics(
 
 std::uint64_t OneGenSourceController::droppedFrames() const
 {
-  std::shared_ptr<const onegen::producer::DirectLeaseSink> pool;
+  std::shared_ptr<const onegen::producer::DirectLeaseSink> sink;
   {
     std::lock_guard lock(mutex_);
-    pool = lease_sink_;
+    sink = lease_sink_;
   }
-  if (!pool) return 0;
-  const auto exhausted = pool->exhausted();
+  if (!sink) return 0;
+  const auto exhausted = sink->exhausted();
   const auto baseline = exhausted_baseline_.load(std::memory_order_relaxed);
   return exhausted > baseline ? exhausted - baseline : 0;
 }

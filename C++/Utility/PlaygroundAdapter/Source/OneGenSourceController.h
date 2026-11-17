@@ -170,18 +170,18 @@ private:
   void bindLease();
   /** @brief Frames dropped for lack of a free slot since the last start. */
   std::uint64_t droppedFrames() const;
-  /** @brief Attaches the Host-storage lease sink bound while the caller holds direct_pool_mutex_. */
+  /** @brief Attaches the Host-storage lease sink bound while the caller holds direct_lease_mutex_. */
   void configureFrameStorage(onegen::producer::Lease& lease, const std::string& sourceName);
   mutable std::mutex mutex_;
   std::shared_ptr<IFrameStorageProvider> frame_storage_;
   /** @brief Serializes frame-storage attachment with lease replacement without callbacks under mutex_. */
-  std::mutex direct_pool_mutex_;
+  std::mutex direct_lease_mutex_;
   struct Child { unsigned int index; std::string label; std::unique_ptr<OneGenSourceController> controller; };
   std::map<std::string, Child> children_;
   unsigned int next_source_index_ = 0;
   onegen::producer::Lease* lease_ = nullptr;
   std::unique_ptr<GraphicsFrameCallbackGate> callback_gate_;
-  /** Attached lease bound, read lock-free by diagnostics; the lease owns its lifetime. */
+  /** Attached lease sink; diagnostics copy this pointer under mutex_ and read exhausted() atomically. */
   std::shared_ptr<const onegen::producer::DirectLeaseSink> lease_sink_;
   /** Lease-sink exhaustion count at the last start, so failed counts one run. */
   std::atomic<std::uint64_t> exhausted_baseline_{0};

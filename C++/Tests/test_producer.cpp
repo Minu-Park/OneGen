@@ -1,5 +1,5 @@
 // In-process producer coordination against the synthetic GenTL producer: discovery with a
-// failing producer, leases, checked writes, pooled Live with held leases, owned Live, Single,
+// failing producer, leases, checked writes, leased Live with held leases, owned Live, Single,
 // close/reopen and idle reset. Usage: test_producer <SyntheticGenTL.cti> <FailingInitProducer.cti>
 #include "ProducerCoordinator.h"
 #include "ProducerMessages.h"
@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
   assert(lease->write_node_checked(3, "Width", "int", "1", observed, false).status
          == NodeWriteStatus::Unavailable);
 
-  // Pooled Live over consumer storage: the consumer holds up to four leases; the producer
+  // Leased Live over consumer storage: the consumer holds up to four leases; the producer
   // never waits for it and allocates no frame memory itself.
   std::string error;
   const auto payload = lease->payload_size();
@@ -138,9 +138,9 @@ int main(int argc, char** argv) {
   lease->stop();
   assert(ordered);
   assert(owned_frames == 0);
-  const auto pool = lease->lease_sink();
-  assert(pool);
-  const auto counters = pool->counters();
+  const auto sink = lease->lease_sink();
+  assert(sink);
+  const auto counters = sink->counters();
   assert(counters.published == shared_frames.load());
   assert(counters.max_held <= 6);
   // Leases still held by the consumer stay valid and readable after stop.
@@ -149,7 +149,7 @@ int main(int argc, char** argv) {
     assert(!held.empty() && !held.back()->bytes().empty());
     held.clear();
   }
-  assert(pool->counters().held == 0);
+  assert(sink->counters().held == 0);
 
   // Holding every slot makes acquisition drop and count frames instead of blocking.
   std::deque<std::shared_ptr<const onegen::producer::FrameLease>> all;
@@ -157,9 +157,9 @@ int main(int argc, char** argv) {
     std::lock_guard lock(held_mutex);
     all.push_back(frame.lease);
   });
-  const auto exhausted_before = pool->exhausted();
+  const auto exhausted_before = sink->exhausted();
   lease->live();
-  assert(waitFor([&] { return pool->exhausted() > exhausted_before + 20; }));
+  assert(waitFor([&] { return sink->exhausted() > exhausted_before + 20; }));
   lease->stop();
   {
     std::lock_guard lock(held_mutex);
@@ -167,7 +167,7 @@ int main(int argc, char** argv) {
     all.clear();
   }
 
-  // Without a pool, Live delivers owned frames.
+  // Without a lease sink, Live delivers owned frames.
   lease->detach_lease_sink();
   assert(!lease->lease_sink());
   lease->live();
