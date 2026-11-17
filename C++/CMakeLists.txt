@@ -310,7 +310,8 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     playground_sdk_add_runtime_contract(onegen_source_controller_test)
     set_target_properties(onegen_source_controller_test PROPERTIES AUTOMOC ON)
     target_link_libraries(onegen_source_controller_test PRIVATE
-      OneGen::PlaygroundAdapter OneGen::Producer Qt6::Concurrent Qt6::Test)
+      Playground::DeviceRuntimeContract OneGen::PlaygroundAdapter OneGen::Producer
+      Qt6::Concurrent Qt6::Test)
     target_compile_definitions(onegen_source_controller_test PRIVATE
       ONEGEN_TEST_PRODUCER="$<TARGET_FILE:SyntheticGenTL>")
     add_dependencies(onegen_source_controller_test SyntheticGenTL)
