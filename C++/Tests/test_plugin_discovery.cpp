@@ -109,10 +109,10 @@ private slots:
       auto* object = loader.instance();
       QVERIFY2(object, qPrintable(loader.errorString()));
       auto* plugin = qobject_cast<IDeviceRuntime*>(object);
-      auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
-      QVERIFY(plugin && producers);
+      auto* discovery = qobject_cast<IDeviceRuntimeDiscovery*>(object);
+      QVERIFY(plugin && discovery);
       QString error;
-      QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
+      QVERIFY2(discovery->setDiscoverySources({cti}, &error), qPrintable(error));
       QVERIFY2(plugin->discoverDevices(&error), qPrintable(error));
       QVERIFY(mapped());
       {
@@ -137,17 +137,16 @@ private slots:
     auto* object = loader.instance();
     QVERIFY2(object, qPrintable(loader.errorString()));
     auto* plugin = qobject_cast<IDeviceRuntime*>(object);
-    auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
-    auto* observer = qobject_cast<IDevicePluginGenTLDiscoveryStatus*>(object);
-    QVERIFY(plugin && producers && observer);
+    auto* discovery = qobject_cast<IDeviceRuntimeDiscovery*>(object);
+    QVERIFY(plugin && discovery);
     QString error;
-    QVERIFY(producers->setGenTLProducerFiles({fast, broken}, &error));
-    QCOMPARE(observer->genTLDiscoveryStatus().phase, GenTLDiscoveryPhase::Waiting);
+    QVERIFY(discovery->setDiscoverySources({fast, broken}, &error));
+    QCOMPARE(discovery->discoveryStatus().phase, GenTLDiscoveryPhase::Waiting);
     logs.clear();
     const auto previous = qInstallMessageHandler(capture);
     const auto restoreHandler = qScopeGuard([previous] { qInstallMessageHandler(previous); });
     QVERIFY2(plugin->discoverDevices(&error), qPrintable(error));
-    QTRY_COMPARE_WITH_TIMEOUT(observer->genTLDiscoveryStatus().phase, GenTLDiscoveryPhase::Partial, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(discovery->discoveryStatus().phase, GenTLDiscoveryPhase::Partial, 10000);
     QVERIFY(hasInfo("camera search completed:"));
     QVERIFY(hasInfo("producer search failed:"));
     QVERIFY(hasInfo("Broken.cti"));
@@ -184,13 +183,13 @@ private slots:
     auto* object = loader.instance();
     QVERIFY2(object, qPrintable(loader.errorString()));
     auto* plugin = qobject_cast<IDeviceRuntime*>(object);
-    auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
+    auto* discovery = qobject_cast<IDeviceRuntimeDiscovery*>(object);
     auto* receiver = dynamic_cast<IDevicePluginResourceClaimsReceiver*>(object);
-    QVERIFY(plugin && producers && receiver);
+    QVERIFY(plugin && discovery && receiver);
     TestResourceClaims claims;
     receiver->setResourceClaims(&claims);
     QString error;
-    QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
+    QVERIFY2(discovery->setDiscoverySources({cti}, &error), qPrintable(error));
     QVERIFY2(plugin->discoverDevices(&error), qPrintable(error));
     auto session = plugin->createSession({}, &error);
     QVERIFY2(session != nullptr, qPrintable(error));
@@ -259,15 +258,13 @@ private slots:
     auto* object = loader.instance();
     QVERIFY2(object, qPrintable(loader.errorString()));
     auto* plugin = qobject_cast<IDeviceRuntime*>(object);
-    auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
-    auto* paths = qobject_cast<IDevicePluginGenTLPaths*>(object);
-    auto* retry = qobject_cast<IDevicePluginGenTLRetry*>(object);
+    auto* discovery = qobject_cast<IDeviceRuntimeDiscovery*>(object);
     auto* claimsReceiver = dynamic_cast<IDevicePluginResourceClaimsReceiver*>(object);
-    QVERIFY(plugin && producers && paths && retry && claimsReceiver);
+    QVERIFY(plugin && discovery && claimsReceiver);
     TestResourceClaims claims;
     claimsReceiver->setResourceClaims(&claims);
     QString error;
-    QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
+    QVERIFY2(discovery->setDiscoverySources({cti}, &error), qPrintable(error));
     QVERIFY2(plugin->discoverDevices(&error), qPrintable(error));
     auto session = plugin->createSession({}, &error);
     QVERIFY2(session != nullptr, qPrintable(error));
@@ -288,20 +285,20 @@ private slots:
           [](const auto& target) { return target.kind == DeviceConnectionTargetKind::Device; });
     };
     QVERIFY(deviceCount() > 0);
-    QVERIFY(QTest::qWaitFor([&] { return paths->genTLPathChangeBlockReason().isEmpty(); }, 10000));
+    QVERIFY(QTest::qWaitFor([&] { return discovery->discoveryChangeBlockReason().isEmpty(); }, 10000));
 
     // No widget is registered; the host order must reach the live session through its controller.
     qputenv("ONEGEN_SYNTHETIC_HIDDEN_DEVICES", "0");
-    QVERIFY2(paths->resetGenTLSearch(&error), qPrintable(error));
-    QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
-    QVERIFY2(producers->startGenTLDiscovery(&error), qPrintable(error));
-    paths->rescanGenTLPaths();
+    QVERIFY2(discovery->prepareDiscoveryChange(&error), qPrintable(error));
+    QVERIFY2(discovery->setDiscoverySources({cti}, &error), qPrintable(error));
+    QVERIFY2(discovery->startDiscovery(&error), qPrintable(error));
+    discovery->rescanDiscovery();
     QVERIFY(QTest::qWaitFor([&] { return deviceCount() == 1
-        && paths->genTLPathChangeBlockReason().isEmpty(); }, 30000));
+        && discovery->discoveryChangeBlockReason().isEmpty(); }, 30000));
     qunsetenv("ONEGEN_SYNTHETIC_HIDDEN_DEVICES");
-    QVERIFY2(retry->retryGenTLDiscovery(&error), qPrintable(error));
+    QVERIFY2(discovery->retryDiscovery(&error), qPrintable(error));
     QVERIFY(QTest::qWaitFor([&] { return deviceCount() > 1
-        && paths->genTLPathChangeBlockReason().isEmpty(); }, 30000));
+        && discovery->discoveryChangeBlockReason().isEmpty(); }, 30000));
 
     const auto discovered = targets();
     const auto camera = std::find_if(discovered.targets.cbegin(), discovered.targets.cend(),
@@ -315,9 +312,9 @@ private slots:
     QCOMPARE(future.wait_for(std::chrono::seconds(30)), std::future_status::ready);
     const auto connected = future.get();
     QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
-    const auto reason = paths->genTLPathChangeBlockReason();
+    const auto reason = discovery->discoveryChangeBlockReason();
     QVERIFY(reason.contains("Disconnect"));
-    QVERIFY(!retry->retryGenTLDiscovery(&error));
+    QVERIFY(!discovery->retryDiscovery(&error));
     QCOMPARE(error, reason);
 
     session.reset();
@@ -346,16 +343,15 @@ private slots:
     auto* object = loader.instance();
     QVERIFY2(object, qPrintable(loader.errorString()));
     auto* plugin = qobject_cast<IDeviceRuntime*>(object);
-    auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
-    auto* observer = qobject_cast<IDevicePluginGenTLDiscoveryStatus*>(object);
-    QVERIFY(plugin && producers && observer);
+    auto* discovery = qobject_cast<IDeviceRuntimeDiscovery*>(object);
+    QVERIFY(plugin && discovery);
     QString error;
-    QVERIFY(producers->setGenTLProducerFiles(files, &error));
+    QVERIFY(discovery->setDiscoverySources(files, &error));
     logs.clear();
     const auto previous = qInstallMessageHandler(capture);
     const auto restoreHandler = qScopeGuard([previous] { qInstallMessageHandler(previous); });
     QVERIFY(plugin->discoverDevices(&error));
-    QCOMPARE(int(observer->genTLDiscoveryStatus().phase), phase);
+    QCOMPARE(int(discovery->discoveryStatus().phase), phase);
     QVERIFY(hasInfo("camera search completed:"));
     if (phase == int(GenTLDiscoveryPhase::Failed)) QVERIFY(hasInfo("Producer inactive"));
     auto session = plugin->createSession({}, &error);
