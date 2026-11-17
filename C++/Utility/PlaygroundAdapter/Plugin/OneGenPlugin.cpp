@@ -167,11 +167,14 @@ public:
   OneGenPluginSession(std::shared_ptr<onegen::producer::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
                       std::shared_ptr<onegen::producer::StartupDiscovery> startup, QString settingsFile,
-                      std::function<void(QOneGenDeviceWidget*)> registerWidget, RetainScan retain)
+                      std::function<void(OneGenSourceController*)> registerController, RetainScan retain)
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
         startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
-        controller_(std::make_unique<OneGenSourceController>()), register_widget_(std::move(registerWidget)),
-        retain_scan_(std::move(retain)) { controller_->configureControl(coordinator_, devices_); }
+        controller_(std::make_unique<OneGenSourceController>()),
+        retain_scan_(std::move(retain)) {
+    registerController(controller_.get());
+    controller_->configureControl(coordinator_, devices_);
+  }
 
   ~OneGenPluginSession() override
   {
@@ -197,7 +200,6 @@ public:
         auto* content = dialog->contentLayout();
         return OneGenDialogShell{std::move(dialog), content};
       });
-      register_widget_(widget_);
     }
     return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
              Qt::LeftDockWidgetArea, widget_, true}};
@@ -220,7 +222,6 @@ private:
   QPointer<QOneGenDeviceWidget> widget_;
   QString title_ = QStringLiteral("GenICam Session");
   std::function<void(const QString&)> title_changed_;
-  std::function<void(QOneGenDeviceWidget*)> register_widget_;
   RetainScan retain_scan_;
 };
 
@@ -330,7 +331,11 @@ public:
       { std::lock_guard lock(mutex_); startup = startup_; }
       return std::make_unique<OneGenPluginSession>(
           producer_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
-          std::move(startup), settings_file_, [this](auto* widget) { widgets_.push_back(widget); },
+          std::move(startup), settings_file_,
+          [this](OneGenSourceController* controller) {
+            std::lock_guard lock(mutex_);
+            controllers_.push_back(controller);
+          },
           [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); });
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
@@ -344,10 +349,7 @@ public:
       if (shutting_down_) return QStringLiteral("GenICam is shutting down.");
       if (startup_ && startup_->running()) return QStringLiteral("Wait for the GenICam startup search to finish before applying paths.");
     }
-    for (const auto& widget : widgets_)
-      if (widget && !widget->canReconfigureSearch())
-        return widget->genTLPathChangeBlockReason();
-    return {};
+    return sessionBlockReason();
   }
 
   /** @brief Retries the retained inventory without closing successful producers. */
@@ -368,10 +370,16 @@ public:
       if (error) *error = QString::fromLocal8Bit(exception.what());
       return false;
     }
-    std::erase_if(widgets_, [](const auto& widget) { return widget.isNull(); });
-    for (const auto& widget : widgets_) if (widget)
-      widget->retryGenTLDiscovery(cachedDiscovery(producer_coordinator, scan,
-          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); }));
+    // Every live session consumes the same retained scan, so one retry produces one producer search.
+    const auto discovery = sharedDiscovery(scan);
+    for (const auto& controller : liveControllers()) {
+      if (!controller) continue;
+      QString refusal;
+      if (!controller->retryDiscovery(&refusal, discovery)) {
+        if (error) *error = refusal;
+        return false;
+      }
+    }
     return true;
   }
 
@@ -389,14 +397,28 @@ public:
     return true;
   }
 
-  /** @brief Refreshes surviving controls after the host applies new search paths. */
+  /** @brief Refreshes the retained inventory and notifies live sessions after the host applies paths. */
   void rescanGenTLPaths() override {
+    // The host starts the retained scan immediately before this call, so the scan-running
+    // preflight would reject the very rescan it requested.
+    const auto reason = sessionBlockReason();
+    if (!reason.isEmpty()) { qInfo().noquote() << "[GenICam]" << reason; return; }
+    {
+      std::lock_guard lock(mutex_);
+      // A completed startup scan is stale after a path change; a running one was just started for this rescan.
+      if (startup_ && !startup_->running()) startup_.reset();
+    }
     QString error;
     if (!startGenTLDiscovery(&error)) { qInfo().noquote() << "[GenICam]" << error; return; }
-    std::erase_if(widgets_, [](const auto& widget) { return widget.isNull(); });
-    for (const auto& widget : widgets_) if (widget)
-      widget->rescanGenTLPaths(cachedDiscovery(coordinator_, startup_,
-          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); }));
+    std::shared_ptr<onegen::producer::StartupDiscovery> scan;
+    { std::lock_guard lock(mutex_); scan = startup_; }
+    if (!scan) { qInfo().noquote() << "[GenICam] Discovery could not start."; return; }
+    const auto discovery = sharedDiscovery(scan);
+    for (const auto& controller : liveControllers()) {
+      if (!controller) continue;
+      QString refusal;
+      if (!controller->retryDiscovery(&refusal, discovery)) qInfo().noquote() << "[GenICam]" << refusal;
+    }
   }
 
   void shutdown() override
@@ -411,8 +433,32 @@ public:
   }
 
 private:
+  /** @brief Reports shutdown or a live session that still owns a connection or control work. */
+  QString sessionBlockReason() const {
+    { std::lock_guard lock(mutex_); if (shutting_down_) return QStringLiteral("GenICam is shutting down."); }
+    for (const auto& controller : liveControllers()) {
+      if (!controller) continue;
+      const auto reason = controller->genTLPathChangeBlockReason();
+      if (!reason.isEmpty()) return reason;
+    }
+    return {};
+  }
+
+  /** @brief Supplies one retained scan to every live session without starting another producer search. */
+  static OneGenSourceController::DiscoveryFn sharedDiscovery(
+      const std::shared_ptr<onegen::producer::StartupDiscovery>& scan) {
+    return [scan] { return scan->finish({}); };
+  }
+
+  /** @brief Copies live session controllers so discovery notifications never hold the plugin lock. */
+  std::vector<QPointer<OneGenSourceController>> liveControllers() const {
+    std::lock_guard lock(mutex_);
+    std::erase_if(controllers_, [](const auto& controller) { return controller.isNull(); });
+    return std::vector<QPointer<OneGenSourceController>>(controllers_.begin(), controllers_.end());
+  }
+
   QString settings_file_;
-  std::vector<QPointer<QOneGenDeviceWidget>> widgets_;
+  mutable std::vector<QPointer<OneGenSourceController>> controllers_;
   std::shared_ptr<onegen::producer::Coordinator> coordinator()
   {
     std::lock_guard<std::mutex> lock(mutex_);
