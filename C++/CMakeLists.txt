@@ -238,7 +238,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
   if(NOT ONEGEN_BUILD_PLAYGROUND_ADAPTER OR NOT TARGET Playground::DeviceRuntimeContract OR NOT Qt6_FOUND)
     message(FATAL_ERROR "ONEGEN_BUILD_PLAYGROUND_PLUGIN requires the adapter, Playground::DeviceRuntimeContract and Qt6")
   endif()
-  find_package(Qt6 REQUIRED COMPONENTS Concurrent)
+  find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
   add_library(OneGenPlugin MODULE
     Utility/PlaygroundAdapter/Plugin/OneGenPlugin.cpp
     Utility/PlaygroundAdapter/Source/OneGenSourceController.cpp
@@ -250,11 +250,16 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     PREFIX "" OUTPUT_NAME OneGenPlugin AUTOMOC ON
     PLAYGROUND_PLUGIN_PACKAGE
       "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake")
+  # The U2-gated session header still includes <QWidget>; the module needs the
+  # Qt Widgets headers but links only Core/Concurrent, so no Qt6Widgets import
+  # reaches the package.
+  get_target_property(_onegen_qt_widget_includes Qt6::Widgets INTERFACE_INCLUDE_DIRECTORIES)
   target_include_directories(OneGenPlugin PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
-    "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
+    "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}"
+    ${_onegen_qt_widget_includes})
   target_link_libraries(OneGenPlugin PRIVATE
     Playground::DeviceRuntimeContract OneGen::PlaygroundAdapter OneGen::Producer
     Qt6::Core Qt6::Concurrent)
