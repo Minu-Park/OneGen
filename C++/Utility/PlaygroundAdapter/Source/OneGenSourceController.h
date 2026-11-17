@@ -12,6 +12,7 @@
 #include <QFuture>
 
 #include <condition_variable>
+#include <functional>
 #include <thread>
 
 #include <atomic>
@@ -91,8 +92,10 @@ public:
   std::vector<onegen::DeviceInfo> devices() const;
   /** @brief Reports why producer search paths cannot change while this session is open. */
   QString genTLPathChangeBlockReason() const;
+  /** @brief Supplies one already-running shared scan's final inventory to a discovery admission. */
+  using DiscoveryFn = std::function<std::vector<onegen::DeviceInfo>()>;
   /** @brief Retries discovery through the same admission and inventory path as device.discover. */
-  bool retryDiscovery(QString* error);
+  bool retryDiscovery(QString* error, DiscoveryFn discovery = {});
   /** @brief Observes the GUI's pending discovery/Interface guard without calling widgets. */
   void setControlBlocked(bool blocked) { control_blocked_ = blocked; }
   /** @brief Shares existing GUI operation admission with external commands. */
@@ -278,7 +281,8 @@ private:
   enum class Lifecycle { Discover, Connect, Disconnect, Single, LiveStart, LiveStop };
   /** @brief Admits one bounded lifecycle command and drains it before destruction. */
   DeviceConnectionResult admitLifecycle(Lifecycle operation, std::string argument,
-      IDeviceConnectionControl::Completion completion, TargetsCompletion targetsCompletion);
+      IDeviceConnectionControl::Completion completion, TargetsCompletion targetsCompletion,
+      DiscoveryFn discovery = {});
   DeviceParameterResult parameterAdmission();
   std::vector<OneGenSourceController*> parameterControllers() const;
   /** @brief One addressable connection for a parameter request. */

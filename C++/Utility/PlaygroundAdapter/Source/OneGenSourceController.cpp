@@ -115,17 +115,18 @@ QString OneGenSourceController::genTLPathChangeBlockReason() const {
   return {};
 }
 
-bool OneGenSourceController::retryDiscovery(QString* error) {
+bool OneGenSourceController::retryDiscovery(QString* error, DiscoveryFn discovery) {
   const auto reason = genTLPathChangeBlockReason();
   if (!reason.isEmpty()) {
     if (error) *error = reason;
     return false;
   }
-  const auto admitted = requestDiscover([](DeviceConnectionTargets result) {
-    if (result.result.error != DeviceConnectionError::None)
-      qWarning().noquote() << QStringLiteral("[GenICam] session discovery retry failed:")
-          << QString::fromStdString(result.result.message);
-  });
+  const auto admitted = admitLifecycle(Lifecycle::Discover, {}, {},
+      [](DeviceConnectionTargets result) {
+        if (result.result.error != DeviceConnectionError::None)
+          qWarning().noquote() << QStringLiteral("[GenICam] session discovery retry failed:")
+              << QString::fromStdString(result.result.message);
+      }, std::move(discovery));
   if (admitted.error != DeviceConnectionError::None) {
     if (error) *error = QString::fromStdString(admitted.message);
     return false;
@@ -1316,7 +1317,8 @@ bool OneGenSourceController::controllerBusy(const OneGenSourceController& contro
 }
 
 DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operation, std::string argument,
-    IDeviceConnectionControl::Completion completion, TargetsCompletion targetsCompletion) {
+    IDeviceConnectionControl::Completion completion, TargetsCompletion targetsCompletion,
+    DiscoveryFn discovery) {
   Q_ASSERT(QThread::currentThread() == thread());
   if (!coordinator_) return refused(DeviceConnectionError::Unavailable, "Device control has no coordinator.");
   const bool structural = operation == Lifecycle::Discover || operation == Lifecycle::Connect
@@ -1397,6 +1399,7 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
   if (structural) structural_work_.fetch_add(1);
   emit target->controlChanged();
   auto work = QtConcurrent::run([this, target, selected, operation, completion, targetsCompletion,
+                                    discovery = std::move(discovery),
                                     reason = std::move(argument), resolved, interfaceOperation, structural] {
     DeviceConnectionResult result{DeviceConnectionError::BackendFailure, "Device operation did not complete.", DeviceConnectionEffect::Unknown};
     DeviceConnectionTargets discovered;
@@ -1406,9 +1409,15 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
     };
     try {
       if (operation == Lifecycle::Discover) {
-        const auto inventory = coordinator_->discover();
-        if (!inventory.completed) throw std::runtime_error("Discovery did not complete; previous inventory is preserved.");
-        { std::lock_guard lock(mutex_); devices_ = inventory.devices; }
+        std::vector<onegen::DeviceInfo> inventoryDevices;
+        if (discovery) {
+          inventoryDevices = discovery();
+        } else {
+          auto inventory = coordinator_->discover();
+          if (!inventory.completed) throw std::runtime_error("Discovery did not complete; previous inventory is preserved.");
+          inventoryDevices = std::move(inventory.devices);
+        }
+        { std::lock_guard lock(mutex_); devices_ = inventoryDevices; }
         std::optional<onegen::InterfaceInfo> tracked;
         {
           std::lock_guard lock(mutex_);
@@ -1427,10 +1436,10 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
           } catch (...) {
           }
         }
-        annotateDiscovery(inventory.devices, interfacePresent);
+        annotateDiscovery(inventoryDevices, interfacePresent);
         std::vector<onegen::InterfaceInfo> interfaces;
         try { interfaces = coordinator_->interfaces(); } catch (...) {}
-        discovered = copiedTargets(inventory.devices, interfaces);
+        discovered = copiedTargets(inventoryDevices, interfaces);
         emit inventoryChanged();
       } else if (operation == Lifecycle::Connect && resolved && resolved->isInterface) {
         try {

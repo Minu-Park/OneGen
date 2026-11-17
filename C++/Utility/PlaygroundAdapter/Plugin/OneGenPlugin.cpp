@@ -356,15 +356,6 @@ public:
   bool retryGenTLDiscovery(QString* error) override {
     const auto reason = genTLPathChangeBlockReason();
     if (!reason.isEmpty()) { if (error) *error = reason; return false; }
-    // Live sessions refresh through the same discovery path as device.discover.
-    for (const auto& controller : liveControllers()) {
-      if (!controller) continue;
-      QString refusal;
-      if (!controller->retryDiscovery(&refusal)) {
-        if (error) *error = refusal;
-        return false;
-      }
-    }
     std::shared_ptr<onegen::producer::StartupDiscovery> scan;
     std::shared_ptr<onegen::producer::Coordinator> producer_coordinator;
     try {
@@ -378,6 +369,16 @@ public:
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
       return false;
+    }
+    // Every live session consumes the same retained scan, so one retry produces one producer search.
+    const auto discovery = sharedDiscovery(scan);
+    for (const auto& controller : liveControllers()) {
+      if (!controller) continue;
+      QString refusal;
+      if (!controller->retryDiscovery(&refusal, discovery)) {
+        if (error) *error = refusal;
+        return false;
+      }
     }
     return true;
   }
@@ -409,10 +410,14 @@ public:
     }
     QString error;
     if (!startGenTLDiscovery(&error)) { qInfo().noquote() << "[GenICam]" << error; return; }
+    std::shared_ptr<onegen::producer::StartupDiscovery> scan;
+    { std::lock_guard lock(mutex_); scan = startup_; }
+    if (!scan) { qInfo().noquote() << "[GenICam] Discovery could not start."; return; }
+    const auto discovery = sharedDiscovery(scan);
     for (const auto& controller : liveControllers()) {
       if (!controller) continue;
       QString refusal;
-      if (!controller->retryDiscovery(&refusal)) qInfo().noquote() << "[GenICam]" << refusal;
+      if (!controller->retryDiscovery(&refusal, discovery)) qInfo().noquote() << "[GenICam]" << refusal;
     }
   }
 
@@ -437,6 +442,12 @@ private:
       if (!reason.isEmpty()) return reason;
     }
     return {};
+  }
+
+  /** @brief Supplies one retained scan to every live session without starting another producer search. */
+  static OneGenSourceController::DiscoveryFn sharedDiscovery(
+      const std::shared_ptr<onegen::producer::StartupDiscovery>& scan) {
+    return [scan] { return scan->finish({}); };
   }
 
   /** @brief Copies live session controllers so discovery notifications never hold the plugin lock. */
