@@ -1,4 +1,4 @@
-#include "DevicePluginTemplate.h"
+#include "DevicePluginSession.h"
 
 #include "ProducerCoordinator.h"
 #include "Utility/PlaygroundAdapter/OneGenLogSink.h"
@@ -178,7 +178,7 @@ private:
 
 } // namespace
 
-class OneGenPlugin final : public DevicePluginTemplate, public IDevicePluginSettings,
+class OneGenPlugin final : public QObject, public IDeviceRuntime, public IDevicePluginSettings,
     public IDevicePluginResourceClaimsReceiver, public IDevicePluginGenTLPaths,
     public IDevicePluginGenTLProducers, public IDevicePluginGenTLDiscoveryStatus, public IDevicePluginGenTLRetry {
   Q_OBJECT
