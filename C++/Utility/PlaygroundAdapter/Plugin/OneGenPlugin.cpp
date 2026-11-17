@@ -167,11 +167,15 @@ public:
   OneGenPluginSession(std::shared_ptr<onegen::producer::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
                       std::shared_ptr<onegen::producer::StartupDiscovery> startup, QString settingsFile,
+                      std::function<void(OneGenSourceController*)> registerController,
                       std::function<void(QOneGenDeviceWidget*)> registerWidget, RetainScan retain)
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
         startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
         controller_(std::make_unique<OneGenSourceController>()), register_widget_(std::move(registerWidget)),
-        retain_scan_(std::move(retain)) { controller_->configureControl(coordinator_, devices_); }
+        retain_scan_(std::move(retain)) {
+    registerController(controller_.get());
+    controller_->configureControl(coordinator_, devices_);
+  }
 
   ~OneGenPluginSession() override
   {
@@ -330,7 +334,12 @@ public:
       { std::lock_guard lock(mutex_); startup = startup_; }
       return std::make_unique<OneGenPluginSession>(
           producer_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
-          std::move(startup), settings_file_, [this](auto* widget) { widgets_.push_back(widget); },
+          std::move(startup), settings_file_,
+          [this](OneGenSourceController* controller) {
+            std::lock_guard lock(mutex_);
+            controllers_.push_back(controller);
+          },
+          [this](auto* widget) { widgets_.push_back(widget); },
           [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); });
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
@@ -344,9 +353,11 @@ public:
       if (shutting_down_) return QStringLiteral("GenICam is shutting down.");
       if (startup_ && startup_->running()) return QStringLiteral("Wait for the GenICam startup search to finish before applying paths.");
     }
-    for (const auto& widget : widgets_)
-      if (widget && !widget->canReconfigureSearch())
-        return widget->genTLPathChangeBlockReason();
+    for (const auto& controller : liveControllers()) {
+      if (!controller) continue;
+      const auto reason = controller->genTLPathChangeBlockReason();
+      if (!reason.isEmpty()) return reason;
+    }
     return {};
   }
 
@@ -354,6 +365,15 @@ public:
   bool retryGenTLDiscovery(QString* error) override {
     const auto reason = genTLPathChangeBlockReason();
     if (!reason.isEmpty()) { if (error) *error = reason; return false; }
+    // Live sessions refresh through the same discovery path as device.discover.
+    for (const auto& controller : liveControllers()) {
+      if (!controller) continue;
+      QString refusal;
+      if (!controller->retryDiscovery(&refusal)) {
+        if (error) *error = refusal;
+        return false;
+      }
+    }
     std::shared_ptr<onegen::producer::StartupDiscovery> scan;
     std::shared_ptr<onegen::producer::Coordinator> producer_coordinator;
     try {
@@ -368,10 +388,6 @@ public:
       if (error) *error = QString::fromLocal8Bit(exception.what());
       return false;
     }
-    std::erase_if(widgets_, [](const auto& widget) { return widget.isNull(); });
-    for (const auto& widget : widgets_) if (widget)
-      widget->retryGenTLDiscovery(cachedDiscovery(producer_coordinator, scan,
-          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); }));
     return true;
   }
 
@@ -389,14 +405,22 @@ public:
     return true;
   }
 
-  /** @brief Refreshes surviving controls after the host applies new search paths. */
+  /** @brief Refreshes the retained inventory and notifies live sessions after the host applies paths. */
   void rescanGenTLPaths() override {
+    const auto reason = genTLPathChangeBlockReason();
+    if (!reason.isEmpty()) { qInfo().noquote() << "[GenICam]" << reason; return; }
+    {
+      std::lock_guard lock(mutex_);
+      // A completed startup scan is stale after a path change; a running one was just started for this rescan.
+      if (startup_ && !startup_->running()) startup_.reset();
+    }
     QString error;
     if (!startGenTLDiscovery(&error)) { qInfo().noquote() << "[GenICam]" << error; return; }
-    std::erase_if(widgets_, [](const auto& widget) { return widget.isNull(); });
-    for (const auto& widget : widgets_) if (widget)
-      widget->rescanGenTLPaths(cachedDiscovery(coordinator_, startup_,
-          [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); }));
+    for (const auto& controller : liveControllers()) {
+      if (!controller) continue;
+      QString refusal;
+      if (!controller->retryDiscovery(&refusal)) qInfo().noquote() << "[GenICam]" << refusal;
+    }
   }
 
   void shutdown() override
@@ -411,8 +435,18 @@ public:
   }
 
 private:
+  /** @brief Copies live session controllers so discovery notifications never hold the plugin lock. */
+  std::vector<QPointer<OneGenSourceController>> liveControllers() const {
+    std::lock_guard lock(mutex_);
+    std::vector<QPointer<OneGenSourceController>> controllers;
+    controllers.reserve(controllers_.size());
+    for (const auto& controller : controllers_) if (controller) controllers.push_back(controller);
+    return controllers;
+  }
+
   QString settings_file_;
   std::vector<QPointer<QOneGenDeviceWidget>> widgets_;
+  std::vector<QPointer<OneGenSourceController>> controllers_;
   std::shared_ptr<onegen::producer::Coordinator> coordinator()
   {
     std::lock_guard<std::mutex> lock(mutex_);

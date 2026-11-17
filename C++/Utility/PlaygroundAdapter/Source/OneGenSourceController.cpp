@@ -98,6 +98,40 @@ std::shared_ptr<onegen::producer::Lease> OneGenSourceController::deviceLease() c
 std::vector<onegen::DeviceInfo> OneGenSourceController::devices() const {
   std::lock_guard lock(mutex_); return devices_;
 }
+
+QString OneGenSourceController::genTLPathChangeBlockReason() const {
+  {
+    std::lock_guard lock(mutex_);
+    if (interface_)
+      return QStringLiteral("Disconnect GenICam cameras and Interfaces before applying paths.");
+    for (const auto& [key, child] : children_) {
+      std::lock_guard childLock(child.controller->mutex_);
+      if (child.controller->owned_lease_ && child.controller->owned_lease_->alive())
+        return QStringLiteral("Disconnect GenICam cameras and Interfaces before applying paths.");
+    }
+  }
+  if (controllerBusy(*this))
+    return QStringLiteral("Wait for GenICam searches or pending operations to finish before applying paths.");
+  return {};
+}
+
+bool OneGenSourceController::retryDiscovery(QString* error) {
+  const auto reason = genTLPathChangeBlockReason();
+  if (!reason.isEmpty()) {
+    if (error) *error = reason;
+    return false;
+  }
+  const auto admitted = requestDiscover([](DeviceConnectionTargets result) {
+    if (result.result.error != DeviceConnectionError::None)
+      qWarning().noquote() << QStringLiteral("[GenICam] session discovery retry failed:")
+          << QString::fromStdString(result.result.message);
+  });
+  if (admitted.error != DeviceConnectionError::None) {
+    if (error) *error = QString::fromStdString(admitted.message);
+    return false;
+  }
+  return true;
+}
 std::vector<std::pair<std::string, onegen::FeatureNode>> OneGenSourceController::controlFeatures() const {
   std::lock_guard lock(mutex_); return control_features_;
 }

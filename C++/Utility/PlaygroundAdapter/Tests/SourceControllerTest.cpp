@@ -209,6 +209,7 @@ private slots:
     void severalCamerasShareOneInterface();
     void explicitInterfaceStaysOpenUntilDisconnect();
     void discoveryAnnotatesLossWithoutTeardown();
+    void pathChangeUsesSessionStateAndRefreshesInventory();
     void claimsFollowInterfaceType();
     void claimDenialRetiresTheCameraConnection();
     void interfaceFeaturesFallBackWithoutIfGetPort();
@@ -586,6 +587,52 @@ void OneGenSourceControllerTests::discoveryAnnotatesLossWithoutTeardown()
     QCOMPARE(fixture.discover().result.error, DeviceConnectionError::None);
     QVERIFY(fixture.states().front().error.empty());
     fixture._controller->stop();
+}
+
+void OneGenSourceControllerTests::pathChangeUsesSessionStateAndRefreshesInventory()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+    EnvironmentVariable devices("ONEGEN_SYNTHETIC_DEVICES", "2");
+    EnvironmentVariable type("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "CXP");
+    Fixture fixture;
+    QVERIFY(fixture._controller->genTLPathChangeBlockReason().isEmpty());
+    // Selecting a camera without opening it creates a child controller but no connection.
+    fixture._controller->cameraController("selected-camera", "Selected camera");
+    QVERIFY(fixture._controller->genTLPathChangeBlockReason().isEmpty());
+
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto* camera = targetOfKind(targets, DeviceConnectionTargetKind::Device, 0);
+    QVERIFY(camera);
+    QVERIFY2(fixture.connect(camera->targetId).error == DeviceConnectionError::None,
+        "The camera did not connect.");
+    QVERIFY(fixture._controller->genTLPathChangeBlockReason().contains("Disconnect"));
+    QString error;
+    QVERIFY(!fixture._controller->retryDiscovery(&error));
+    QVERIFY(error.contains("Disconnect"));
+
+    const auto states = fixture.states();
+    QVERIFY(!states.empty());
+    QVERIFY2(fixture.disconnect(states.back().connectionId).error == DeviceConnectionError::None,
+        "The connection did not close.");
+    QVERIFY(fixture._controller->genTLPathChangeBlockReason().isEmpty());
+
+    const auto targetCount = [&]() -> std::size_t {
+        DeviceConnectionTargets value;
+        const auto admitted = fixture._controller->requestConnectionTargets(
+            [&value](DeviceConnectionTargets result) { value = std::move(result); });
+        if (admitted.error != DeviceConnectionError::None) return 0;
+        return static_cast<std::size_t>(std::count_if(value.targets.cbegin(), value.targets.cend(),
+            [](const auto& target) { return target.kind == DeviceConnectionTargetKind::Device; }));
+    };
+    {
+        EnvironmentVariable hidden("ONEGEN_SYNTHETIC_HIDDEN_DEVICES", "0");
+        QVERIFY2(fixture._controller->retryDiscovery(&error), qPrintable(error));
+        QVERIFY(waitFor([&] { return targetCount() == 1; }, 30000));
+    }
+    QVERIFY2(fixture._controller->retryDiscovery(&error), qPrintable(error));
+    QVERIFY(waitFor([&] { return targetCount() > 1; }, 30000));
 }
 
 void OneGenSourceControllerTests::claimsFollowInterfaceType()

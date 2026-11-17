@@ -89,6 +89,10 @@ public:
   void setDevices(std::vector<onegen::DeviceInfo> devices);
   /** @brief Copies the module's current producer-scoped inventory. */
   std::vector<onegen::DeviceInfo> devices() const;
+  /** @brief Reports why producer search paths cannot change while this session is open. */
+  QString genTLPathChangeBlockReason() const;
+  /** @brief Retries discovery through the same admission and inventory path as device.discover. */
+  bool retryDiscovery(QString* error);
   /** @brief Observes the GUI's pending discovery/Interface guard without calling widgets. */
   void setControlBlocked(bool blocked) { control_blocked_ = blocked; }
   /** @brief Shares existing GUI operation admission with external commands. */

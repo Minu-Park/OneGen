@@ -251,6 +251,88 @@ private slots:
     QVERIFY(loader.unload());
   }
 
+  void genTLPathsRefreshSessionWithoutWidget() {
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString cti = temporary.filePath("Refresh.cti");
+    QVERIFY(QFile::copy(QString::fromUtf8(ONEGEN_TEST_PRODUCER), cti));
+    qputenv("ONEGEN_SYNTHETIC_DEVICES", "2");
+    qputenv("ONEGEN_SYNTHETIC_INTERFACE_TYPE", "CXP");
+    const auto restoreEnvironment = qScopeGuard([] {
+      qunsetenv("ONEGEN_SYNTHETIC_DEVICES");
+      qunsetenv("ONEGEN_SYNTHETIC_INTERFACE_TYPE");
+      qunsetenv("ONEGEN_SYNTHETIC_HIDDEN_DEVICES");
+    });
+
+    QPluginLoader loader(QString::fromUtf8(ONEGEN_TEST_PLUGIN));
+    auto* object = loader.instance();
+    QVERIFY2(object, qPrintable(loader.errorString()));
+    auto* plugin = qobject_cast<IDeviceRuntime*>(object);
+    auto* producers = qobject_cast<IDevicePluginGenTLProducers*>(object);
+    auto* paths = qobject_cast<IDevicePluginGenTLPaths*>(object);
+    auto* retry = qobject_cast<IDevicePluginGenTLRetry*>(object);
+    auto* claimsReceiver = dynamic_cast<IDevicePluginResourceClaimsReceiver*>(object);
+    QVERIFY(plugin && producers && paths && retry && claimsReceiver);
+    TestResourceClaims claims;
+    claimsReceiver->setResourceClaims(&claims);
+    QString error;
+    QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
+    QVariantMap data;
+    QVERIFY2(plugin->discoverDevices(&data, &error), qPrintable(error));
+    QVERIFY(!data.value("devices").toList().isEmpty());
+    auto session = plugin->createSession(data, &error);
+    QVERIFY2(session != nullptr, qPrintable(error));
+    auto* connection = dynamic_cast<IDeviceConnectionControl*>(session->sourceController());
+    QVERIFY(connection);
+
+    const auto targets = [&]() -> DeviceConnectionTargets {
+      DeviceConnectionTargets value;
+      const auto admitted = connection->requestConnectionTargets(
+          [&value](DeviceConnectionTargets result) { value = std::move(result); });
+      if (admitted.error != DeviceConnectionError::None)
+        return {{admitted.error, admitted.message}, {}};
+      return value;
+    };
+    const auto deviceCount = [&]() {
+      const auto discovered = targets();
+      return std::count_if(discovered.targets.cbegin(), discovered.targets.cend(),
+          [](const auto& target) { return target.kind == DeviceConnectionTargetKind::Device; });
+    };
+    QVERIFY(deviceCount() > 0);
+    QVERIFY(QTest::qWaitFor([&] { return paths->genTLPathChangeBlockReason().isEmpty(); }, 10000));
+
+    // No widget is registered; a path rescan must reach the live session through its controller.
+    qputenv("ONEGEN_SYNTHETIC_HIDDEN_DEVICES", "0");
+    paths->rescanGenTLPaths();
+    QVERIFY(QTest::qWaitFor([&] { return deviceCount() == 1
+        && paths->genTLPathChangeBlockReason().isEmpty(); }, 30000));
+    qunsetenv("ONEGEN_SYNTHETIC_HIDDEN_DEVICES");
+    QVERIFY2(retry->retryGenTLDiscovery(&error), qPrintable(error));
+    QVERIFY(QTest::qWaitFor([&] { return deviceCount() > 1
+        && paths->genTLPathChangeBlockReason().isEmpty(); }, 30000));
+
+    const auto discovered = targets();
+    const auto camera = std::find_if(discovered.targets.cbegin(), discovered.targets.cend(),
+        [](const auto& target) { return target.kind == DeviceConnectionTargetKind::Device; });
+    QVERIFY(camera != discovered.targets.cend());
+    auto promise = std::make_shared<std::promise<DeviceConnectionResult>>();
+    auto future = promise->get_future();
+    const auto admitted = connection->requestConnect(camera->targetId,
+        [promise](DeviceConnectionResult result) { promise->set_value(std::move(result)); });
+    QVERIFY2(admitted.error == DeviceConnectionError::None, admitted.message.c_str());
+    QCOMPARE(future.wait_for(std::chrono::seconds(30)), std::future_status::ready);
+    const auto connected = future.get();
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    const auto reason = paths->genTLPathChangeBlockReason();
+    QVERIFY(reason.contains("Disconnect"));
+    QVERIFY(!retry->retryGenTLDiscovery(&error));
+    QCOMPARE(error, reason);
+
+    session.reset();
+    plugin->shutdown();
+    QVERIFY(loader.unload());
+  }
+
   void emptyAndFailedScans_data() {
     QTest::addColumn<QString>("producer");
     QTest::addColumn<int>("phase");
