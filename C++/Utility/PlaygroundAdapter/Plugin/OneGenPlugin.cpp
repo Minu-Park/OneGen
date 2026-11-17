@@ -1,4 +1,4 @@
-#include "DevicePluginSession.h"
+#include "DeviceRuntime/Contract/DevicePluginSession.h"
 
 #include "ProducerCoordinator.h"
 #include "Utility/PlaygroundAdapter/OneGenLogSink.h"

@@ -1,7 +1,7 @@
 #include "DeviceRuntime/Contract/AbstractSourceController.h"
 #include "DeviceRuntime/Contract/DeviceConnectionControl.h"
 #include "DeviceRuntime/Contract/DeviceRuntime.h"
-#include "DevicePluginSession.h"
+#include "DeviceRuntime/Contract/DevicePluginSession.h"
 #include <QElapsedTimer>
 #include <QFile>
 #include <QHash>

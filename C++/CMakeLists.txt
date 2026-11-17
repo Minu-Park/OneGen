@@ -253,8 +253,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
   target_include_directories(OneGenPlugin PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
-    "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin")
   target_link_libraries(OneGenPlugin PRIVATE
     Playground::DeviceRuntimeContract OneGen::PlaygroundAdapter OneGen::Producer
     Qt6::Core Qt6::Concurrent)
@@ -277,7 +276,7 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     endif()
     playground_sdk_package_plugin(OneGenPlugin
       PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
-      ICON "${PlaygroundPluginSDK_ICON_DIR}/genicam-48.png"
+      ICON "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/icon.png"
       RUNTIME_FILES ${ONEGEN_GENICAM_RUNTIME_FILES})
   endif()
   message(STATUS "[OneGen] OneGenPlugin enabled.")
@@ -285,7 +284,6 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     find_package(Qt6 REQUIRED COMPONENTS Test)
     qt_add_executable(test_plugin_discovery Tests/test_plugin_discovery.cpp)
     set_target_properties(test_plugin_discovery PROPERTIES AUTOMOC ON)
-    target_include_directories(test_plugin_discovery PRIVATE "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
     playground_sdk_add_runtime_contract(test_plugin_discovery)
     target_link_libraries(test_plugin_discovery PRIVATE Playground::DeviceRuntimeContract Qt6::Test ${CMAKE_DL_LIBS})
     target_compile_definitions(test_plugin_discovery PRIVATE
