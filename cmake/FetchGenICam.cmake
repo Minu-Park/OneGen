@@ -263,8 +263,14 @@ if(_gentl_inc)
   target_include_directories(genicam::genicam INTERFACE "${_gentl_inc}")
 endif()
 target_link_libraries(genicam::genicam INTERFACE ${_genapi_libs})
+# The absolute SDK directory exists only in this build tree. An INTERFACE
+# linker rpath would follow genicam::genicam into every consumer, including the
+# staged OneGenPlugin, where it survives as a build-machine LC_RPATH and breaks
+# relocation. Keep it on build-tree consumers instead: the plugin uses
+# BUILD_WITH_INSTALL_RPATH with @loader_path/runtime and resolves the staged
+# dylibs from the package runtime on the target machine.
 if(_rpath AND NOT WIN32)
-  target_link_options(genicam::genicam INTERFACE "LINKER:-rpath,${_rpath}")
+  set(CMAKE_BUILD_RPATH "${_rpath}")
 endif()
 
 message(STATUS "GenApi include: ${_inc}")

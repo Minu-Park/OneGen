@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Make the macOS plugin package relocatable: the absolute GenICam SDK directory stays on build-tree consumers only, so the staged `OneGenPlugin` Mach-O carries no absolute `LC_RPATH` and resolves the staged dylibs through `@loader_path/runtime`.
+
 - Refresh GenTL producer paths and retry discovery through the session controller instead of the widget library. The block reason and retry now derive from the live session state, a path change or retry refreshes each open session through the same discovery and inventory path as `device.discover`, and a session without a widget still receives the updated inventory. Connected cameras or Interfaces are refused with an explicit message.
 
 - Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`. The temporary widget library resolves Qt Widgets and Resources itself until U2 removes it.
