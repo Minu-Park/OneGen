@@ -75,8 +75,10 @@ library directories (including vendor runtimes found through `PATH`) for the
 producer lifetime, and refuses a CTI with an import it cannot find. Retiring a
 drained producer closes its transport, releases its native mapping and removes
 its search registrations. A native fault in a producer terminates the process.
-Do not copy a CTI without its producer tree. See
-[In-Process GenTL Producers](docs/IN_PROCESS_PRODUCERS.md).
+Do not copy a CTI without its producer tree. The retired
+[in-process producer note](docs/IN_PROCESS_PRODUCERS.md) is module-owned
+history; the current worker-only session contract is in this README and the
+Playground device runtime contract.
 
 The selector explicitly distinguishes every enumerated Interface from Device entries.
 InterfaceIDs are opaque and producer-scoped; DeviceIDs are Interface-scoped.
@@ -301,8 +303,10 @@ targets while OneGen keeps its implementation and package identity independent.
 The plugin package stages no Qt Widgets, Resources widget or dialog library, and
 no OpenGL dependency.
 
-The Playground session contract is documented in
-[In-Process GenTL Producers](docs/IN_PROCESS_PRODUCERS.md).
+The current worker-only Playground session state is described under
+[Playground device panel](#playground-device-panel); the retired
+[in-process producer note](docs/IN_PROCESS_PRODUCERS.md) is a short module-owned
+historical pointer, not a Playground contract.
 
 ## Playground device panel
 

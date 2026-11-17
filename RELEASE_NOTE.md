@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document the widget-free, worker-only current state in the README and retire `docs/IN_PROCESS_PRODUCERS.md` to a short module-owned historical pointer. Playground's device runtime contract is authoritative; the plugin creates no session widget or dock and the Host device panel owns the session UI.
+
 - Make the macOS plugin package relocatable: the absolute GenICam SDK directory stays on build-tree consumers only, so the staged `OneGenPlugin` Mach-O carries no absolute `LC_RPATH` and resolves the staged dylibs through `@loader_path/runtime`.
 
 - Adopt the widget-free device runtime ABI: `discoverDevices` and `createSession` take only an error string, and discovery devices are retained inside the plugin under its existing mutex instead of being passed through a `QVariantMap`. The session no longer overrides `createDockWidgets`.
