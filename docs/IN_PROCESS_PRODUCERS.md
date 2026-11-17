@@ -231,11 +231,10 @@ The plugin creates no widget or dock. Playground's common device panel owns the
 session UI and drives the declared `device.*`, `parameters.*`, `source.*` and
 `onegen.*` tools through the session controller.
 
-The session declares `Plugins/OneGen/Favorites/Nodes` through
-`DeviceSessionMetadata`, so the Host panel keeps the existing favorites
-namespace. Interface and Device selection, connection controls and feature
-trees are generic panel surfaces; GenICam node keys and search text stay in the
-module.
+Favorites live in the Host panel's default `Plugins/<packageId>/Favorites` store;
+the retired OneGen node list has no migration. Interface and Device selection,
+connection controls and feature trees are generic panel surfaces; GenICam node
+keys and search text stay in the module.
 
 Closing one Device releases only its DataStream and Device and returns its
 camera to the producer for reuse. Interface disconnect drains all child

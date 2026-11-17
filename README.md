@@ -308,8 +308,7 @@ The Playground session contract is documented in
 
 Playground owns the one device panel for every device session. OneGen no longer
 ships a widget library, creates no session widget or dock, and returns only
-value data and its source controller. The session declares
-`Plugins/OneGen/Favorites/Nodes` through `DeviceSessionMetadata`, so the Host
-panel keeps the existing favorites namespace without a migration. Feature
-search, favorites, connection controls, parameter editing and acquisition
-actions come from the common panel and the controller's declared tools.
+value data and its source controller. Favorites live in the Host panel's default
+`Plugins/<packageId>/Favorites` store; the retired OneGen node list has no
+migration. Feature search, favorites, connection controls, parameter editing and
+acquisition actions come from the common panel and the controller's declared tools.

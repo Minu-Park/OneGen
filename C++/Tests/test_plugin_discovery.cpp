@@ -120,8 +120,6 @@ private slots:
         auto session = plugin->createSession(data, &error);
         QVERIFY2(session != nullptr, qPrintable(error));
         QVERIFY(session->createDockWidgets(nullptr).empty());
-        QCOMPARE(session->sessionMetadata().favoritesSettingsKey,
-                 QStringLiteral("Plugins/OneGen/Favorites/Nodes"));
         session.reset();
       }
       plugin->shutdown();

@@ -156,8 +156,6 @@ public:
   }
 
   QString title() const override { return title_; }
-  DeviceSessionMetadata sessionMetadata() const override
-  { return {QStringLiteral("Plugins/OneGen/Favorites/Nodes")}; }
   std::vector<DevicePluginDock> createDockWidgets(QWidget*) override { return {}; }
   AbstractSourceController* sourceController() const override { return controller_.get(); }
   unsigned int capabilities() const noexcept override
