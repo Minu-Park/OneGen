@@ -4,6 +4,8 @@
 
 - Make the macOS plugin package relocatable: the absolute GenICam SDK directory stays on build-tree consumers only, so the staged `OneGenPlugin` Mach-O carries no absolute `LC_RPATH` and resolves the staged dylibs through `@loader_path/runtime`.
 
+- Adopt the widget-free device runtime ABI: `discoverDevices` and `createSession` take only an error string, and discovery devices are retained inside the plugin under its existing mutex instead of being passed through a `QVariantMap`. The session no longer overrides `createDockWidgets`.
+
 - Remove the OneGen widget library and every widget-only target. `QOneGenWidget`, `QOneGenDeviceWidget`, `OneGenControlUi`, `OneGenFeatureTree`, the dialogs, numeric editor and widget tests are gone; `OneGen::QtWidget` and `OneGenPresentation` no longer exist. The plugin session returns no docks; Playground's common device panel owns the session UI and favorites use its default `Plugins/<packageId>/Favorites` store, with no migration of the retired OneGen node list. The package builds and stages without Qt Widgets, Resources widget or dialog libraries, and OpenGL.
 
 - Refresh GenTL producer paths and retry discovery through the session controller instead of the widget library. The block reason and retry now derive from the live session state, a path change or retry refreshes each open session through the same discovery and inventory path as `device.discover`, and a session without a widget still receives the updated inventory. Connected cameras or Interfaces are refused with an explicit message.

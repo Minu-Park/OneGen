@@ -45,58 +45,6 @@ void logDiscoveryState(const onegen::producer::StartupDiscovery::Status& before,
       .arg(QLatin1String(GenTLDiscoveryState::name(state.phase)), state.detail);
 }
 
-QVariantList toDiscoveryData(const std::vector<onegen::DeviceInfo>& devices)
-{
-  QVariantList values;
-  for (const auto& device : devices) {
-    QStringList candidates;
-    QStringList candidate_ids;
-    QStringList candidate_interfaces;
-    for (const auto& cti : device.cti_candidates)
-      candidates.append(QString::fromStdString(cti));
-    for (const auto& id : device.cti_candidate_ids) candidate_ids.append(QString::fromStdString(id));
-    for (const auto& id : device.cti_candidate_interfaces) candidate_interfaces.append(QString::fromStdString(id));
-    values.append(QVariantMap{
-        {QStringLiteral("id"), QString::fromStdString(device.id)},
-        {QStringLiteral("displayName"), QString::fromStdString(device.display_name)},
-        {QStringLiteral("serial"), QString::fromStdString(device.serial)},
-        {QStringLiteral("model"), QString::fromStdString(device.model)},
-        {QStringLiteral("ip"), QString::fromStdString(device.ip)},
-        {QStringLiteral("tlType"), QString::fromStdString(device.tl_type)},
-        {QStringLiteral("ctiPath"), QString::fromStdString(device.cti_path)},
-        {QStringLiteral("ctiCandidates"), candidates},
-        {QStringLiteral("ctiCandidateIds"), candidate_ids},
-        {QStringLiteral("ctiCandidateInterfaces"), candidate_interfaces},
-        {QStringLiteral("interfaceId"), QString::fromStdString(device.interface_id)}});
-  }
-  return values;
-}
-
-std::vector<onegen::DeviceInfo> fromDiscoveryData(const QVariantList& values)
-{
-  std::vector<onegen::DeviceInfo> devices;
-  for (const auto& value : values) {
-    const auto item = value.toMap();
-    onegen::DeviceInfo device;
-    device.id = item.value(QStringLiteral("id")).toString().toStdString();
-    device.display_name = item.value(QStringLiteral("displayName")).toString().toStdString();
-    device.serial = item.value(QStringLiteral("serial")).toString().toStdString();
-    device.model = item.value(QStringLiteral("model")).toString().toStdString();
-    device.ip = item.value(QStringLiteral("ip")).toString().toStdString();
-    device.tl_type = item.value(QStringLiteral("tlType")).toString().toStdString();
-    device.cti_path = item.value(QStringLiteral("ctiPath")).toString().toStdString();
-    for (const auto& candidate : item.value(QStringLiteral("ctiCandidates")).toStringList())
-      device.cti_candidates.push_back(candidate.toStdString());
-    for (const auto& id : item.value(QStringLiteral("ctiCandidateIds")).toStringList())
-      device.cti_candidate_ids.push_back(id.toStdString());
-    for (const auto& id : item.value(QStringLiteral("ctiCandidateInterfaces")).toStringList())
-      device.cti_candidate_interfaces.push_back(id.toStdString());
-    device.interface_id = item.value(QStringLiteral("interfaceId")).toString().toStdString();
-    devices.push_back(std::move(device));
-  }
-  return devices;
-}
-
 std::vector<onegen::DeviceInfo> discover(
     const std::shared_ptr<onegen::producer::Coordinator>& coordinator,
     onegen::producer::Coordinator::ProgressFn progress)
@@ -156,7 +104,6 @@ public:
   }
 
   QString title() const override { return title_; }
-  std::vector<DevicePluginDock> createDockWidgets(QWidget*) override { return {}; }
   AbstractSourceController* sourceController() const override { return controller_.get(); }
   unsigned int capabilities() const noexcept override
   {
@@ -249,7 +196,7 @@ public:
   DevicePluginDescriptor descriptor() const override
   { return {QStringLiteral("onegen"), playgroundDevicePluginDisplayName(), playgroundDevicePluginVersion(), false}; }
 
-  bool discoverDevices(QVariantMap* data, QString* error) override
+  bool discoverDevices(QString* error) override
   {
     try {
       QString startup_error;
@@ -262,7 +209,7 @@ public:
       qDebug().noquote() << (devices.empty()
           ? QStringLiteral("[GenICam] opening session without a camera; available startup results are reused")
           : QStringLiteral("[GenICam] camera available: opening session with %1 camera(s); remaining producer search continues").arg(devices.size()));
-      if (data) data->insert(QStringLiteral("devices"), toDiscoveryData(devices));
+      { std::lock_guard lock(mutex_); discovered_devices_ = devices; }
       return true;
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
@@ -271,13 +218,16 @@ public:
   }
 
   std::unique_ptr<IDevicePluginSession> createSession(
-      const QVariantMap& data, QString* error) override
+      const QVariantMap& sessionOptions, QString* error) override
   {
+    Q_UNUSED(sessionOptions)
     try {
       const auto producer_coordinator = coordinator();
       if (!producer_coordinator) return {};
+      std::vector<onegen::DeviceInfo> devices;
+      { std::lock_guard lock(mutex_); devices = discovered_devices_; }
       return std::make_unique<OneGenPluginSession>(
-          producer_coordinator, fromDiscoveryData(data.value(QStringLiteral("devices")).toList()),
+          producer_coordinator, std::move(devices),
           [this](OneGenSourceController* controller) {
             std::lock_guard lock(mutex_);
             controllers_.push_back(controller);
@@ -464,6 +414,8 @@ private:
   std::atomic<IDevicePluginResourceClaims*> claims_{nullptr};
   std::shared_ptr<onegen::producer::Coordinator> coordinator_;
   std::shared_ptr<onegen::producer::StartupDiscovery> startup_;
+  /** @brief Discovery result retained for the session opened from this plugin instance. */
+  std::vector<onegen::DeviceInfo> discovered_devices_;
   GenTLDiscoveryState discovery_state_;
   bool shutting_down_ = false;
   bool producers_configured_ = false;

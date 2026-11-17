@@ -113,13 +113,11 @@ private slots:
       QVERIFY(plugin && producers);
       QString error;
       QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
-      QVariantMap data;
-      QVERIFY2(plugin->discoverDevices(&data, &error), qPrintable(error));
+      QVERIFY2(plugin->discoverDevices(&error), qPrintable(error));
       QVERIFY(mapped());
       {
-        auto session = plugin->createSession(data, &error);
+        auto session = plugin->createSession({}, &error);
         QVERIFY2(session != nullptr, qPrintable(error));
-        QVERIFY(session->createDockWidgets(nullptr).empty());
         session.reset();
       }
       plugin->shutdown();
@@ -148,17 +146,13 @@ private slots:
     logs.clear();
     const auto previous = qInstallMessageHandler(capture);
     const auto restoreHandler = qScopeGuard([previous] { qInstallMessageHandler(previous); });
-    QVariantMap data;
-    QVERIFY2(plugin->discoverDevices(&data, &error), qPrintable(error));
-    QVERIFY(!data.value("devices").toList().isEmpty());
+    QVERIFY2(plugin->discoverDevices(&error), qPrintable(error));
     QTRY_COMPARE_WITH_TIMEOUT(observer->genTLDiscoveryStatus().phase, GenTLDiscoveryPhase::Partial, 10000);
     QVERIFY(hasInfo("camera search completed:"));
     QVERIFY(hasInfo("producer search failed:"));
     QVERIFY(hasInfo("Broken.cti"));
-    // The same completed scan is reused when a second session opens.
-    QVariantMap replay;
-    QVERIFY(plugin->discoverDevices(&replay, &error));
-    QVERIFY(!replay.value("devices").toList().isEmpty());
+    // Repeating discovery reuses the retained result without another producer search.
+    QVERIFY(plugin->discoverDevices(&error));
     plugin->shutdown();
     qInstallMessageHandler(previous);
     {
@@ -197,9 +191,8 @@ private slots:
     receiver->setResourceClaims(&claims);
     QString error;
     QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
-    QVariantMap discovery;
-    QVERIFY2(plugin->discoverDevices(&discovery, &error), qPrintable(error));
-    auto session = plugin->createSession(discovery, &error);
+    QVERIFY2(plugin->discoverDevices(&error), qPrintable(error));
+    auto session = plugin->createSession({}, &error);
     QVERIFY2(session != nullptr, qPrintable(error));
     auto* connection = dynamic_cast<IDeviceConnectionControl*>(session->sourceController());
     QVERIFY(connection);
@@ -275,10 +268,8 @@ private slots:
     claimsReceiver->setResourceClaims(&claims);
     QString error;
     QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
-    QVariantMap data;
-    QVERIFY2(plugin->discoverDevices(&data, &error), qPrintable(error));
-    QVERIFY(!data.value("devices").toList().isEmpty());
-    auto session = plugin->createSession(data, &error);
+    QVERIFY2(plugin->discoverDevices(&error), qPrintable(error));
+    auto session = plugin->createSession({}, &error);
     QVERIFY2(session != nullptr, qPrintable(error));
     auto* connection = dynamic_cast<IDeviceConnectionControl*>(session->sourceController());
     QVERIFY(connection);
@@ -363,13 +354,11 @@ private slots:
     logs.clear();
     const auto previous = qInstallMessageHandler(capture);
     const auto restoreHandler = qScopeGuard([previous] { qInstallMessageHandler(previous); });
-    QVariantMap data;
-    QVERIFY(plugin->discoverDevices(&data, &error));
-    QVERIFY(data.value("devices").toList().isEmpty());
+    QVERIFY(plugin->discoverDevices(&error));
     QCOMPARE(int(observer->genTLDiscoveryStatus().phase), phase);
     QVERIFY(hasInfo("camera search completed:"));
     if (phase == int(GenTLDiscoveryPhase::Failed)) QVERIFY(hasInfo("Producer inactive"));
-    auto session = plugin->createSession(data, &error);
+    auto session = plugin->createSession({}, &error);
     QVERIFY2(session, qPrintable(error));
     session.reset();
     plugin->shutdown();
