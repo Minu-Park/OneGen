@@ -183,10 +183,10 @@ class OneGenPlugin final : public QObject, public IDeviceRuntime, public IDevice
   Q_PLUGIN_METADATA(IID PlaygroundDeviceRuntime_iid)
   Q_INTERFACES(IDeviceRuntime IDevicePluginSettings IDevicePluginResourceClaimsReceiver IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus IDevicePluginGenTLRetry)
 public:
-  /** Producers run in the consumer process; their diagnostics go to its Qt log. */
+  /** Producers run in the hosting process; their diagnostics go to its Qt log. */
   OneGenPlugin() { onegen::qt::installLogSink(); }
 
-  /** Accepts the host settings path; favorites are declared through session metadata. */
+  /** Ignores the host settings path; the Host panel owns the favourites store. */
   void setSettingsFile(const QString&) override {}
   /** Retains the host service used to claim a Siso board before its Interface opens. */
   void setResourceClaims(IDevicePluginResourceClaims* claims) override {
