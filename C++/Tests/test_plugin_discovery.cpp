@@ -301,8 +301,11 @@ private slots:
     QVERIFY(deviceCount() > 0);
     QVERIFY(QTest::qWaitFor([&] { return paths->genTLPathChangeBlockReason().isEmpty(); }, 10000));
 
-    // No widget is registered; a path rescan must reach the live session through its controller.
+    // No widget is registered; the host order must reach the live session through its controller.
     qputenv("ONEGEN_SYNTHETIC_HIDDEN_DEVICES", "0");
+    QVERIFY2(paths->resetGenTLSearch(&error), qPrintable(error));
+    QVERIFY2(producers->setGenTLProducerFiles({cti}, &error), qPrintable(error));
+    QVERIFY2(producers->startGenTLDiscovery(&error), qPrintable(error));
     paths->rescanGenTLPaths();
     QVERIFY(QTest::qWaitFor([&] { return deviceCount() == 1
         && paths->genTLPathChangeBlockReason().isEmpty(); }, 30000));

@@ -167,11 +167,10 @@ public:
   OneGenPluginSession(std::shared_ptr<onegen::producer::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
                       std::shared_ptr<onegen::producer::StartupDiscovery> startup, QString settingsFile,
-                      std::function<void(OneGenSourceController*)> registerController,
-                      std::function<void(QOneGenDeviceWidget*)> registerWidget, RetainScan retain)
+                      std::function<void(OneGenSourceController*)> registerController, RetainScan retain)
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
         startup_(std::move(startup)), settings_file_(std::move(settingsFile)),
-        controller_(std::make_unique<OneGenSourceController>()), register_widget_(std::move(registerWidget)),
+        controller_(std::make_unique<OneGenSourceController>()),
         retain_scan_(std::move(retain)) {
     registerController(controller_.get());
     controller_->configureControl(coordinator_, devices_);
@@ -201,7 +200,6 @@ public:
         auto* content = dialog->contentLayout();
         return OneGenDialogShell{std::move(dialog), content};
       });
-      register_widget_(widget_);
     }
     return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
              Qt::LeftDockWidgetArea, widget_, true}};
@@ -224,7 +222,6 @@ private:
   QPointer<QOneGenDeviceWidget> widget_;
   QString title_ = QStringLiteral("GenICam Session");
   std::function<void(const QString&)> title_changed_;
-  std::function<void(QOneGenDeviceWidget*)> register_widget_;
   RetainScan retain_scan_;
 };
 
@@ -339,7 +336,6 @@ public:
             std::lock_guard lock(mutex_);
             controllers_.push_back(controller);
           },
-          [this](auto* widget) { widgets_.push_back(widget); },
           [this](auto scan) { std::lock_guard lock(mutex_); startup_ = std::move(scan); });
     } catch (const std::exception& exception) {
       if (error) *error = QString::fromLocal8Bit(exception.what());
@@ -353,12 +349,7 @@ public:
       if (shutting_down_) return QStringLiteral("GenICam is shutting down.");
       if (startup_ && startup_->running()) return QStringLiteral("Wait for the GenICam startup search to finish before applying paths.");
     }
-    for (const auto& controller : liveControllers()) {
-      if (!controller) continue;
-      const auto reason = controller->genTLPathChangeBlockReason();
-      if (!reason.isEmpty()) return reason;
-    }
-    return {};
+    return sessionBlockReason();
   }
 
   /** @brief Retries the retained inventory without closing successful producers. */
@@ -407,7 +398,9 @@ public:
 
   /** @brief Refreshes the retained inventory and notifies live sessions after the host applies paths. */
   void rescanGenTLPaths() override {
-    const auto reason = genTLPathChangeBlockReason();
+    // The host starts the retained scan immediately before this call, so the scan-running
+    // preflight would reject the very rescan it requested.
+    const auto reason = sessionBlockReason();
     if (!reason.isEmpty()) { qInfo().noquote() << "[GenICam]" << reason; return; }
     {
       std::lock_guard lock(mutex_);
@@ -435,18 +428,26 @@ public:
   }
 
 private:
+  /** @brief Reports shutdown or a live session that still owns a connection or control work. */
+  QString sessionBlockReason() const {
+    { std::lock_guard lock(mutex_); if (shutting_down_) return QStringLiteral("GenICam is shutting down."); }
+    for (const auto& controller : liveControllers()) {
+      if (!controller) continue;
+      const auto reason = controller->genTLPathChangeBlockReason();
+      if (!reason.isEmpty()) return reason;
+    }
+    return {};
+  }
+
   /** @brief Copies live session controllers so discovery notifications never hold the plugin lock. */
   std::vector<QPointer<OneGenSourceController>> liveControllers() const {
     std::lock_guard lock(mutex_);
-    std::vector<QPointer<OneGenSourceController>> controllers;
-    controllers.reserve(controllers_.size());
-    for (const auto& controller : controllers_) if (controller) controllers.push_back(controller);
-    return controllers;
+    std::erase_if(controllers_, [](const auto& controller) { return controller.isNull(); });
+    return std::vector<QPointer<OneGenSourceController>>(controllers_.begin(), controllers_.end());
   }
 
   QString settings_file_;
-  std::vector<QPointer<QOneGenDeviceWidget>> widgets_;
-  std::vector<QPointer<OneGenSourceController>> controllers_;
+  mutable std::vector<QPointer<OneGenSourceController>> controllers_;
   std::shared_ptr<onegen::producer::Coordinator> coordinator()
   {
     std::lock_guard<std::mutex> lock(mutex_);
