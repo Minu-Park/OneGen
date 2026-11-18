@@ -59,26 +59,7 @@ outcome and original failure reason at INFO. Records emitted while a producer is
 being probed are reported at Debug; device/interface operations retain their
 normal warning/error levels.
 
-Pass a vendor CTI file to `OneGen::loadCti()`, then enumerate devices or open a
-camera by ID, user-defined name, IP address, serial number, display name, or
-model. Loading a CTI executes vendor code, so only use trusted producers.
-Standalone discovery resolves `.cti` entries from `GENICAM_GENTL64_PATH` or
-`GENICAM_GENTL32_PATH`, without vendor-specific paths or filenames. The consumer
-adapter uses the exact injected producer inventory; an empty list never falls
-back to ambient paths. Producers load in the consumer process, one OneGen system
-per canonical CTI, and control and feature calls are serialized by the producer lock; blocking Single and Live acquisition run outside it so stop can interrupt them.
-Each producer loads from its install directory so relative dependencies resolve.
-A CTI whose shipped libraries collide with different same-named libraries
-already loaded in the process is refused before load. On Windows, OneGen also
-follows the CTI's static and delay-load imports, registers the producer's
-library directories (including vendor runtimes found through `PATH`) for the
-producer lifetime, and refuses a CTI with an import it cannot find. Retiring a
-drained producer closes its transport, releases its native mapping and removes
-its search registrations. A native fault in a producer terminates the process.
-Do not copy a CTI without its producer tree. The retired
-[in-process producer note](docs/IN_PROCESS_PRODUCERS.md) is module-owned
-history; the current worker-only session contract is in this README and the
-Playground device runtime contract.
+Pass a vendor CTI file to `OneGen::loadCti()`, then enumerate devices or open a camera by ID, user-defined name, IP address, serial number, display name, or model. Loading a CTI executes vendor code, so only use trusted producers. Standalone discovery resolves `.cti` entries from `GENICAM_GENTL64_PATH` or `GENICAM_GENTL32_PATH`, without vendor-specific paths or filenames. The consumer adapter uses the exact injected producer inventory; an empty list never falls back to ambient paths. The package manifest declares `genTLConsumer`, `genTLExternalProducers` and per-CTI instancing, and the adapter exposes the transport-neutral `IDeviceRuntimeDiscovery/1.0` capability for source handoff, change preflight, idle reset, background scan start, retry, rescan and copied status. The Host resolves the external-producer owner from installed manifests alone; two declarers are refused explicitly and neither receives external CTIs. Producers load in the consumer process, one OneGen system per canonical CTI, and control and feature calls are serialized by the producer lock; blocking Single and Live acquisition run outside it so stop can interrupt them. Each producer loads from its install directory so relative dependencies resolve. A CTI whose shipped libraries collide with different same-named libraries already loaded in the process is refused before load. On Windows, OneGen also follows the CTI's static and delay-load imports, registers the producer's library directories (including vendor runtimes found through `PATH`) for the producer lifetime, and refuses a CTI with an import it cannot find. Retiring a drained producer closes its transport, releases its native mapping and removes its search registrations. A native fault in a producer terminates the process. Do not copy a CTI without its producer tree. The retired [in-process producer note](docs/IN_PROCESS_PRODUCERS.md) is module-owned history; the current worker-only session contract is in this README and the Playground device runtime contract.
 
 The selector explicitly distinguishes every enumerated Interface from Device entries.
 InterfaceIDs are opaque and producer-scoped; DeviceIDs are Interface-scoped.

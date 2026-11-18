@@ -124,11 +124,10 @@ private:
 } // namespace
 
 class OneGenPlugin final : public QObject, public IDeviceRuntime, public IDevicePluginSettings,
-    public IDevicePluginResourceClaimsReceiver, public IDevicePluginGenTLPaths,
-    public IDevicePluginGenTLProducers, public IDevicePluginGenTLDiscoveryStatus, public IDevicePluginGenTLRetry {
+    public IDevicePluginResourceClaimsReceiver, public IDeviceRuntimeDiscovery {
   Q_OBJECT
   Q_PLUGIN_METADATA(IID PlaygroundDeviceRuntime_iid)
-  Q_INTERFACES(IDeviceRuntime IDevicePluginSettings IDevicePluginResourceClaimsReceiver IDevicePluginGenTLPaths IDevicePluginGenTLProducers IDevicePluginGenTLDiscoveryStatus IDevicePluginGenTLRetry)
+  Q_INTERFACES(IDeviceRuntime IDevicePluginSettings IDevicePluginResourceClaimsReceiver IDeviceRuntimeDiscovery)
 public:
   /** Producers run in the hosting process; their diagnostics go to its Qt log. */
   OneGenPlugin() { onegen::qt::installLogSink(); }
@@ -141,9 +140,9 @@ public:
   }
 
   /** @brief Accepts exact CTI files without consulting process search variables. */
-  bool setGenTLProducerFiles(const QStringList& files, QString* error) override {
+  bool setDiscoverySources(const QStringList& files, QString* error) override {
     try {
-      const auto reason = genTLPathChangeBlockReason();
+      const auto reason = discoveryChangeBlockReason();
       if (!reason.isEmpty()) throw std::runtime_error(reason.toStdString());
       const auto producer_coordinator = coordinator();
       std::vector<std::filesystem::path> producers;
@@ -169,14 +168,14 @@ public:
   }
 
   /** @brief Exposes actual asynchronous completion independently of start admission. */
-  GenTLDiscoverySnapshot genTLDiscoveryStatus() const override {
+  DeviceDiscoverySnapshot discoveryStatus() const override {
     std::lock_guard lock(mutex_);
     if (shutting_down_ || !startup_) return discovery_state_.snapshot();
     return consumerStatus(startup_->status());
   }
 
   /** @brief Starts one retained scan shared by startup and later control panels. */
-  bool startGenTLDiscovery(QString* error) override {
+  bool startDiscovery(QString* error) override {
     try {
       const auto producer_coordinator = coordinator();
       std::lock_guard lock(mutex_);
@@ -200,7 +199,7 @@ public:
   {
     try {
       QString startup_error;
-      if (!startGenTLDiscovery(&startup_error)) throw std::runtime_error(startup_error.toStdString());
+      if (!startDiscovery(&startup_error)) throw std::runtime_error(startup_error.toStdString());
       std::shared_ptr<onegen::producer::StartupDiscovery> startup;
       { std::lock_guard lock(mutex_); startup = startup_; }
       const auto devices = startup->waitForCamera(std::chrono::milliseconds{0}, [] {
@@ -239,7 +238,7 @@ public:
   }
 
   /** @brief Keeps connected cameras, Interfaces and ongoing searches intact. */
-  QString genTLPathChangeBlockReason() const override {
+  QString discoveryChangeBlockReason() const override {
     { std::lock_guard lock(mutex_);
       if (shutting_down_) return QStringLiteral("GenICam is shutting down.");
       if (startup_ && startup_->running()) return QStringLiteral("Wait for the GenICam startup search to finish before applying paths.");
@@ -248,8 +247,8 @@ public:
   }
 
   /** @brief Retries the retained inventory without closing successful producers. */
-  bool retryGenTLDiscovery(QString* error) override {
-    const auto reason = genTLPathChangeBlockReason();
+  bool retryDiscovery(QString* error) override {
+    const auto reason = discoveryChangeBlockReason();
     if (!reason.isEmpty()) { if (error) *error = reason; return false; }
     std::shared_ptr<onegen::producer::StartupDiscovery> scan;
     std::shared_ptr<onegen::producer::Coordinator> producer_coordinator;
@@ -279,8 +278,8 @@ public:
   }
 
   /** @brief Closes idle producers without unloading the plugin. */
-  bool resetGenTLSearch(QString* error) override {
-    const auto reason = genTLPathChangeBlockReason();
+  bool prepareDiscoveryChange(QString* error) override {
+    const auto reason = discoveryChangeBlockReason();
     if (!reason.isEmpty()) { if (error) *error = reason; return false; }
     std::lock_guard lock(mutex_);
     if (coordinator_ && !coordinator_->reset_idle_search()) {
@@ -293,7 +292,7 @@ public:
   }
 
   /** @brief Refreshes the retained inventory and notifies live sessions after the host applies paths. */
-  void rescanGenTLPaths() override {
+  void rescanDiscovery() override {
     // The host starts the retained scan immediately before this call, so the scan-running
     // preflight would reject the very rescan it requested.
     const auto reason = sessionBlockReason();
@@ -304,7 +303,7 @@ public:
       if (startup_ && !startup_->running()) startup_.reset();
     }
     QString error;
-    if (!startGenTLDiscovery(&error)) { qInfo().noquote() << "[GenICam]" << error; return; }
+    if (!startDiscovery(&error)) { qInfo().noquote() << "[GenICam]" << error; return; }
     std::shared_ptr<onegen::producer::StartupDiscovery> scan;
     { std::lock_guard lock(mutex_); scan = startup_; }
     if (!scan) { qInfo().noquote() << "[GenICam] Discovery could not start."; return; }
