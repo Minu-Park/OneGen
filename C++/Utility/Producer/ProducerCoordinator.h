@@ -9,7 +9,7 @@
  * Retiring the drained producer closes its transport and releases its native library and search directories.
  */
 
-#include "FramePool.h"
+#include "DirectLeaseSink.h"
 #include "OneGen.h"
 #include "OneGenNode.h"
 #include "OneGenTypes.h"
@@ -50,7 +50,7 @@ struct LeaseCallbacks;
 class Lease {
 public:
   using FrameFn = std::function<void(const Frame&)>;
-  using SharedFrameFn = FramePool::SharedFrameFn;
+  using SharedFrameFn = DirectLeaseSink::SharedFrameFn;
   using ErrorFn = std::function<void(std::string_view)>;
   using InvalidateFn = std::function<void(int, std::string_view)>;
 
@@ -82,19 +82,19 @@ public:
   void live();
   void trigger();
   void stop();
-  /** @brief Owned frames: layouts the direct path cannot represent, or no attached pool. */
+  /** @brief Owned frames: layouts the direct path cannot represent, or no attached lease sink. */
   void set_frame_callback(FrameFn cb);
-  /** @brief Leased frames from the attached pool, delivered on the acquisition thread. */
+  /** @brief Leased frames from the attached sink, delivered on the acquisition thread. */
   void set_shared_frame_callback(SharedFrameFn cb);
   /** @brief Bytes one frame slot must hold for the current stream configuration. */
   std::uint64_t payload_size();
-  /** @brief Attaches the next live()'s lease bound over consumer-provided frame storage. */
-  bool create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes, std::string& error,
-                         FramePool::FrameStorage storage);
-  /** @brief Detaches the pool; published leases stay valid until released. */
-  void destroy_frame_pool();
-  /** @brief The attached pool, if any; diagnostics read its counters without the producer lock. */
-  std::shared_ptr<const FramePool> frame_pool() const;
+  /** @brief Attaches the next live()'s lease sink bound over consumer-provided frame storage. */
+  bool attach_lease_sink(std::uint32_t slot_count, std::uint64_t slot_bytes, std::string& error,
+                         DirectLeaseSink::FrameStorage storage);
+  /** @brief Detaches the sink; published leases stay valid until released. */
+  void detach_lease_sink();
+  /** @brief The attached sink, if any; diagnostics read its counters without the producer lock. */
+  std::shared_ptr<const DirectLeaseSink> lease_sink() const;
   void set_error_callback(ErrorFn cb);
   void set_invalidate_callback(InvalidateFn cb);
   /** True until close(). */
@@ -120,7 +120,7 @@ private:
   bool shared_interface_ = false;
   std::uint64_t stream_generation_ = 1;
   std::shared_ptr<LeaseCallbacks> callbacks_;
-  std::shared_ptr<FramePool> pool_;
+  std::shared_ptr<DirectLeaseSink> sink_;
   std::atomic<bool> closed_{false};
 };
 

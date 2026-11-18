@@ -275,7 +275,7 @@ for (const auto& device : gentl.enumerate())
 
 The repository follows the Camera/Gocator layout: public headers live next to
 sources in `C++/`, internals in `C++/Internal/`, and the Playground plugin under
-`C++/Utility/PlaygroundAdapter/`. Producer coordination and the frame pool live in `C++/Utility/Producer/`; at runtime they execute inside the Playground device worker. The EMVA GenICam fetch cache is `genicam/`; vendor `.cti` files are not stored in the module.
+`C++/Utility/PlaygroundAdapter/`. Producer coordination and the pinned direct lease sink live in `C++/Utility/Producer/`; at runtime they execute inside the Playground device worker. The EMVA GenICam fetch cache is `genicam/`; vendor `.cti` files are not stored in the module.
 
 Playground composes the optional `OneGen::PlaygroundAdapter` and `OneGenPlugin`
 targets while OneGen keeps its implementation and package identity independent.

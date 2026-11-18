@@ -28,7 +28,7 @@ enum class FallbackReason : std::uint8_t {
 struct DirectReservation {
   std::span<std::uint8_t> destination;
   std::uint64_t ticket = 0;
-  /** Keeps the owning pool and its mapping alive until publish/cancel completes. */
+  /** Keeps the owning DirectLeaseSink alive until publish/cancel completes. */
   std::shared_ptr<void> owner;
 };
 
@@ -44,7 +44,7 @@ enum class CancelCause : std::uint8_t {
   Detached,
 };
 
-/** Worker-owned destination/pool operations; all calls are thread-affine to the live loop. */
+/** Worker-owned destination/lease-sink operations; all calls are thread-affine to the live loop. */
 class DirectFrameSink {
 public:
   virtual ~DirectFrameSink() = default;
@@ -53,7 +53,7 @@ public:
   virtual void publish(const DirectReservation& reservation, const Frame& metadata,
                        std::size_t used_bytes) = 0;
   virtual void cancel(const DirectReservation& reservation, CancelCause cause) noexcept = 0;
-  /** Records one frame that was dequeued and discarded because no slot was free. */
+  /** Records one Busy drop: no free lease slot or no storage from the consumer. */
   virtual void note_slot_exhausted() noexcept {}
   virtual void note_fallback(FallbackReason reason, const Frame& frame) noexcept = 0;
   virtual FallbackReason metadata_gate(const Frame& metadata) const noexcept = 0;

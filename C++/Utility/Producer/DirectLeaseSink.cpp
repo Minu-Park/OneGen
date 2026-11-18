@@ -1,4 +1,4 @@
-#include "FramePool.h"
+#include "DirectLeaseSink.h"
 
 #include "Internal/StageLog.h"
 
@@ -8,66 +8,68 @@
 
 namespace onegen::producer {
 
-FrameLease::FrameLease(std::shared_ptr<FramePool> pool, std::uint32_t slot,
+FrameLease::FrameLease(std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
                        std::span<const std::uint8_t> bytes, Frame metadata,
                        std::shared_ptr<std::uint8_t> storage) noexcept
-    : pool_(std::move(pool)), storage_(std::move(storage)), slot_(slot), bytes_(bytes),
+    : sink_(std::move(sink)), storage_(std::move(storage)), slot_(slot), bytes_(bytes),
       metadata_(std::move(metadata)) {}
 
 FrameLease::~FrameLease() {
-  if (pool_) pool_->release(slot_);
+  if (sink_) sink_->release(slot_);
 }
 
-std::shared_ptr<FramePool> FramePool::create(std::uint32_t slots, std::uint64_t slot_bytes,
-                                             std::string& error, FrameStorage storage) {
+std::shared_ptr<DirectLeaseSink> DirectLeaseSink::create(std::uint32_t slots,
+                                                         std::uint64_t slot_bytes,
+                                                         std::string& error,
+                                                         FrameStorage storage) {
   if (slots == 0 || slot_bytes == 0) {
-    error = "Frame pool requires at least one non-empty slot.";
+    error = "Lease sink requires at least one non-empty slot.";
     return {};
   }
   if (!storage) {
-    error = "Frame pool requires consumer storage.";
+    error = "Lease sink requires consumer storage.";
     return {};
   }
-  std::shared_ptr<FramePool> pool(new (std::nothrow) FramePool(slots, slot_bytes));
-  if (!pool) {
-    error = "Frame pool allocation failed.";
+  std::shared_ptr<DirectLeaseSink> sink(new (std::nothrow) DirectLeaseSink(slots, slot_bytes));
+  if (!sink) {
+    error = "Lease sink allocation failed.";
     return {};
   }
-  pool->storage_ = std::move(storage);
-  pool->reserved_.resize(slots);
-  for (std::uint32_t index = 0; index < slots; ++index) pool->free_.push_back(index);
-  return pool;
+  sink->storage_ = std::move(storage);
+  sink->reserved_.resize(slots);
+  for (std::uint32_t index = 0; index < slots; ++index) sink->free_.push_back(index);
+  return sink;
 }
 
-FramePool::FramePool(std::uint32_t slots, std::uint64_t slot_bytes) noexcept
+DirectLeaseSink::DirectLeaseSink(std::uint32_t slots, std::uint64_t slot_bytes) noexcept
     : slot_count_(slots), slot_bytes_(slot_bytes), states_(slots, SlotState::Free) {
   free_.reserve(slots);
 }
 
-FramePool::~FramePool() = default;
+DirectLeaseSink::~DirectLeaseSink() = default;
 
-void FramePool::set_frame_callback(SharedFrameFn callback) {
+void DirectLeaseSink::set_frame_callback(SharedFrameFn callback) {
   std::lock_guard lock(mutex_);
   on_frame_ = std::move(callback);
 }
 
-void FramePool::set_error_callback(ErrorFn callback) {
+void DirectLeaseSink::set_error_callback(ErrorFn callback) {
   std::lock_guard lock(mutex_);
   on_error_ = std::move(callback);
 }
 
-void FramePool::request_stop() noexcept {
+void DirectLeaseSink::request_stop() noexcept {
   std::lock_guard lock(mutex_);
   stopped_ = true;
 }
 
-void FramePool::resume() noexcept {
+void DirectLeaseSink::resume() noexcept {
   std::lock_guard lock(mutex_);
   stopped_ = false;
 }
 
-FramePoolCounters FramePool::counters() const {
-  FramePoolCounters result;
+LeaseSinkCounters DirectLeaseSink::counters() const {
+  LeaseSinkCounters result;
   result.published = published_.load(std::memory_order_relaxed);
   result.exhausted = exhausted_.load(std::memory_order_relaxed);
   result.capacity_failures = capacity_failures_.load(std::memory_order_relaxed);
@@ -78,7 +80,7 @@ FramePoolCounters FramePool::counters() const {
   return result;
 }
 
-detail::ReserveStatus FramePool::reserve(detail::DirectReservation& reservation) {
+detail::ReserveStatus DirectLeaseSink::reserve(detail::DirectReservation& reservation) {
   std::uint32_t slot = 0;
   {
     std::lock_guard lock(mutex_);
@@ -88,8 +90,8 @@ detail::ReserveStatus FramePool::reserve(detail::DirectReservation& reservation)
     free_.pop_back();
     states_[slot] = SlotState::Reserved;
   }
-  // Ask the consumer outside the pool lock: the first acquire of a size may wait for the Host
-  // pool, and a frame release must not wait behind it. No storage is a full pool.
+  // Ask the consumer outside the sink lock: the first acquire of a size may wait for the Host
+  // pool, and a frame release must not wait behind it. No storage is a full set.
   auto bytes = storage_(static_cast<std::size_t>(slot_bytes_));
   if (!bytes) {
     std::lock_guard lock(mutex_);
@@ -108,8 +110,8 @@ detail::ReserveStatus FramePool::reserve(detail::DirectReservation& reservation)
   return detail::ReserveStatus::Reserved;
 }
 
-void FramePool::publish(const detail::DirectReservation& reservation, const Frame& metadata,
-                        std::size_t used_bytes) {
+void DirectLeaseSink::publish(const detail::DirectReservation& reservation, const Frame& metadata,
+                              std::size_t used_bytes) {
   const auto slot = static_cast<std::uint32_t>(reservation.ticket);
   SharedFrameFn callback;
   std::shared_ptr<std::uint8_t> storage;
@@ -136,8 +138,8 @@ void FramePool::publish(const detail::DirectReservation& reservation, const Fram
   if (callback) callback(SharedFrame{std::move(lease)});
 }
 
-void FramePool::cancel(const detail::DirectReservation& reservation,
-                       detail::CancelCause) noexcept {
+void DirectLeaseSink::cancel(const detail::DirectReservation& reservation,
+                             detail::CancelCause) noexcept {
   const auto slot = static_cast<std::uint32_t>(reservation.ticket);
   std::shared_ptr<std::uint8_t> storage;
   std::lock_guard lock(mutex_);
@@ -147,7 +149,7 @@ void FramePool::cancel(const detail::DirectReservation& reservation,
   free_.push_back(slot);
 }
 
-void FramePool::release(std::uint32_t slot) noexcept {
+void DirectLeaseSink::release(std::uint32_t slot) noexcept {
   std::lock_guard lock(mutex_);
   if (slot >= slot_count_ || states_[slot] != SlotState::Held) return;
   states_[slot] = SlotState::Free;
@@ -155,7 +157,7 @@ void FramePool::release(std::uint32_t slot) noexcept {
   free_.push_back(slot);
 }
 
-void FramePool::note_slot_exhausted() noexcept {
+void DirectLeaseSink::note_slot_exhausted() noexcept {
   const auto dropped = exhausted_.fetch_add(1, std::memory_order_relaxed) + 1;
   if (dropped == 1 || dropped % 100 == 0) {
     stage_log_warning("frame slot exhausted: dropped=%llu slots=%u",
@@ -163,19 +165,19 @@ void FramePool::note_slot_exhausted() noexcept {
   }
 }
 
-void FramePool::note_fallback(detail::FallbackReason reason, const Frame&) noexcept {
+void DirectLeaseSink::note_fallback(detail::FallbackReason reason, const Frame&) noexcept {
   const auto count = fallbacks_.fetch_add(1, std::memory_order_relaxed) + 1;
   if (count == 1)
     stage_log("frame layout uses the owned path: reason=%u", static_cast<unsigned>(reason));
 }
 
-detail::FallbackReason FramePool::metadata_gate(const Frame&) const noexcept {
+detail::FallbackReason DirectLeaseSink::metadata_gate(const Frame&) const noexcept {
   // In-process metadata is not serialized, so no transport size limit applies.
   return detail::FallbackReason::None;
 }
 
-void FramePool::report_capacity_failure(const Frame& metadata, std::size_t required,
-                                        std::size_t available) noexcept {
+void DirectLeaseSink::report_capacity_failure(const Frame& metadata, std::size_t required,
+                                              std::size_t available) noexcept {
   const auto count = capacity_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
   if (count == 1 || count % 100 == 0) {
     report("frame does not fit its slot: frame=" + std::to_string(metadata.frame_id)
@@ -184,7 +186,7 @@ void FramePool::report_capacity_failure(const Frame& metadata, std::size_t requi
   }
 }
 
-void FramePool::report(std::string_view message) noexcept {
+void DirectLeaseSink::report(std::string_view message) noexcept {
   try {
     ErrorFn callback;
     {

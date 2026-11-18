@@ -1,6 +1,6 @@
 #pragma once
 
-/** @file FramePool.h @brief Consumer-process slot pool behind the pinned direct acquisition path. */
+/** @file DirectLeaseSink.h @brief Consumer-process in-flight lease set behind the pinned direct acquisition path. */
 
 #include "Internal/DirectFrameSink.h"
 #include "OneGenTypes.h"
@@ -18,11 +18,11 @@
 
 namespace onegen::producer {
 
-class FramePool;
+class DirectLeaseSink;
 
 /**
  * @brief One published slot. The bytes stay valid and immutable while any reference to this
- *        lease is alive; releasing the last reference returns the slot to its pool.
+ *        lease is alive; releasing the last reference returns the slot to the sink.
  */
 class FrameLease {
 public:
@@ -35,12 +35,12 @@ public:
   [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept { return bytes_; }
 
 private:
-  friend class FramePool;
-  FrameLease(std::shared_ptr<FramePool> pool, std::uint32_t slot,
+  friend class DirectLeaseSink;
+  FrameLease(std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
              std::span<const std::uint8_t> bytes, Frame metadata,
              std::shared_ptr<std::uint8_t> storage) noexcept;
-  std::shared_ptr<FramePool> pool_;
-  // Consumer-provided bytes behind bytes(); empty when the pool owns the slot memory.
+  std::shared_ptr<DirectLeaseSink> sink_;
+  // Consumer-provided bytes behind bytes(); the lease keeps this storage alive.
   std::shared_ptr<std::uint8_t> storage_;
   std::uint32_t slot_ = 0;
   std::span<const std::uint8_t> bytes_;
@@ -52,8 +52,8 @@ struct SharedFrame {
   std::shared_ptr<const FrameLease> lease;
 };
 
-/** @brief Counters for diagnostics; all values are cumulative for the pool. */
-struct FramePoolCounters {
+/** @brief Counters for diagnostics; all values are cumulative for the sink. */
+struct LeaseSinkCounters {
   std::uint64_t published = 0;
   std::uint64_t exhausted = 0;
   std::uint64_t capacity_failures = 0;
@@ -63,18 +63,19 @@ struct FramePoolCounters {
 };
 
 /**
- * @brief In-flight lease bound behind the pinned direct sink.
+ * @brief Bounded in-flight lease set that is also the pinned direct acquisition sink.
  *
- * The pool owns no frame memory: every reservation takes its bytes from the consumer provider
- * and an empty result is a full pool.
+ * This is not a plugin-owned frame pool: it owns no frame memory. Every reservation takes its
+ * bytes from the consumer's provided storage and an empty result is a full set. The GenTL
+ * announced buffers are owned by Camera::Impl independently of this sink.
  *
  * reserve/publish/cancel run on the acquisition thread. A published slot is handed to the
  * frame callback as a FrameLease and returns to the free list when the last reference drops,
- * from any thread. A full pool makes the acquisition loop requeue the GenTL buffer and count
+ * from any thread. A full set makes the acquisition loop requeue the GenTL buffer and count
  * one exhausted frame; it never waits for a consumer.
  */
-class FramePool final : public detail::DirectFrameSink,
-                        public std::enable_shared_from_this<FramePool> {
+class DirectLeaseSink final : public detail::DirectFrameSink,
+                              public std::enable_shared_from_this<DirectLeaseSink> {
 public:
   using SharedFrameFn = std::function<void(const SharedFrame&)>;
   using ErrorFn = std::function<void(std::string_view)>;
@@ -83,21 +84,21 @@ public:
    * @brief Storage for one frame: returns at least `bytes` writable bytes, or empty.
    *
    * Called on the acquisition thread. A provider may wait for its Host pool on the first
-   * acquire of a size; an empty result counts as a full pool: the GenTL buffer is requeued and
+   * acquire of a size; an empty result counts as a full set: the GenTL buffer is requeued and
    * the frame is dropped.
    */
   using FrameStorage = std::function<std::shared_ptr<std::uint8_t>(std::size_t bytes)>;
 
   /**
    * @brief Creates a bounded lease set over consumer storage; returns null with error when the
-   *        request is empty. The pool allocates no frame memory itself: the slot count only
+   *        request is empty. The sink allocates no frame memory itself: the slot count only
    *        bounds how many frames are held at once.
    */
-  static std::shared_ptr<FramePool> create(std::uint32_t slots, std::uint64_t slot_bytes,
-                                           std::string& error, FrameStorage storage);
-  ~FramePool() override;
-  FramePool(const FramePool&) = delete;
-  FramePool& operator=(const FramePool&) = delete;
+  static std::shared_ptr<DirectLeaseSink> create(std::uint32_t slots, std::uint64_t slot_bytes,
+                                                 std::string& error, FrameStorage storage);
+  ~DirectLeaseSink() override;
+  DirectLeaseSink(const DirectLeaseSink&) = delete;
+  DirectLeaseSink& operator=(const DirectLeaseSink&) = delete;
 
   void set_frame_callback(SharedFrameFn callback);
   void set_error_callback(ErrorFn callback);
@@ -107,7 +108,7 @@ public:
 
   [[nodiscard]] std::uint32_t slot_count() const noexcept { return slot_count_; }
   [[nodiscard]] std::uint64_t slot_bytes() const noexcept { return slot_bytes_; }
-  [[nodiscard]] FramePoolCounters counters() const;
+  [[nodiscard]] LeaseSinkCounters counters() const;
   /** @brief Frames dropped because every slot was in use; lock-free for diagnostics. */
   [[nodiscard]] std::uint64_t exhausted() const noexcept {
     return exhausted_.load(std::memory_order_relaxed);
@@ -127,7 +128,7 @@ public:
 
 private:
   friend class FrameLease;
-  FramePool(std::uint32_t slots, std::uint64_t slot_bytes) noexcept;
+  DirectLeaseSink(std::uint32_t slots, std::uint64_t slot_bytes) noexcept;
   void release(std::uint32_t slot) noexcept;
   void report(std::string_view message) noexcept;
 
@@ -136,7 +137,7 @@ private:
   const std::uint32_t slot_count_;
   const std::uint64_t slot_bytes_;
   FrameStorage storage_;
-  // Bytes of a reserved slot while the pool takes its storage from the consumer.
+  // Bytes of a reserved slot while the sink takes its storage from the consumer.
   std::vector<std::shared_ptr<std::uint8_t>> reserved_;
   mutable std::mutex mutex_;
   std::vector<SlotState> states_;

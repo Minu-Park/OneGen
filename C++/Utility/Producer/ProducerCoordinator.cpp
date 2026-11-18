@@ -172,14 +172,14 @@ void Lease::close() {
   {
     std::lock_guard lock(producer_->mutex);
     try {
-      if (pool_) pool_->request_stop();
+      if (sink_) sink_->request_stop();
       camera_->stop();
     } catch (...) { failure = std::current_exception(); }
     detail::set_direct_frame_sink(*camera_, {});
-    if (pool_) {
-      pool_->set_frame_callback({});
-      pool_->set_error_callback({});
-      pool_.reset();
+    if (sink_) {
+      sink_->set_frame_callback({});
+      sink_->set_error_callback({});
+      sink_.reset();
     }
     try { camera_->close(); } catch (...) { if (!failure) failure = std::current_exception(); }
     camera_->set_frame_callback({});
@@ -346,9 +346,9 @@ void Lease::grab_one(const FrameFn& deliver) {
 void Lease::live() {
   std::lock_guard lock(producer_->mutex);
   auto& opened = camera();
-  if (pool_) {
-    detail::set_direct_frame_sink(opened, pool_);
-    pool_->resume();
+  if (sink_) {
+    detail::set_direct_frame_sink(opened, sink_);
+    sink_->resume();
   } else {
     detail::set_direct_frame_sink(opened, {});
   }
@@ -363,7 +363,7 @@ void Lease::trigger() {
 void Lease::stop() {
   std::lock_guard lock(producer_->mutex);
   auto& opened = camera();
-  if (pool_) pool_->request_stop();
+  if (sink_) sink_->request_stop();
   opened.stop();
 }
 
@@ -374,7 +374,7 @@ void Lease::set_frame_callback(FrameFn callback) {
 
 void Lease::set_shared_frame_callback(SharedFrameFn callback) {
   std::lock_guard lock(producer_->mutex);
-  if (pool_) pool_->set_frame_callback(std::move(callback));
+  if (sink_) sink_->set_frame_callback(std::move(callback));
 }
 
 std::uint64_t Lease::payload_size() {
@@ -382,20 +382,20 @@ std::uint64_t Lease::payload_size() {
   return camera().payload_size();
 }
 
-bool Lease::create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes,
-                              std::string& error, FramePool::FrameStorage storage) {
+bool Lease::attach_lease_sink(std::uint32_t slot_count, std::uint64_t slot_bytes,
+                              std::string& error, DirectLeaseSink::FrameStorage storage) {
   std::lock_guard lock(producer_->mutex);
   if (closed_.load()) {
     error = "Device lease is closed.";
     return false;
   }
-  if (pool_) {
-    error = "A frame pool is already attached.";
+  if (sink_) {
+    error = "A lease sink is already attached.";
     return false;
   }
-  auto pool = FramePool::create(slot_count, slot_bytes, error, std::move(storage));
-  if (!pool) return false;
-  pool->set_error_callback([callbacks = callbacks_](std::string_view message) {
+  auto sink = DirectLeaseSink::create(slot_count, slot_bytes, error, std::move(storage));
+  if (!sink) return false;
+  sink->set_error_callback([callbacks = callbacks_](std::string_view message) {
     ErrorFn callback;
     {
       std::lock_guard callback_lock(callbacks->mutex);
@@ -403,22 +403,22 @@ bool Lease::create_frame_pool(std::uint32_t slot_count, std::uint64_t slot_bytes
     }
     if (callback) callback(message);
   });
-  pool_ = std::move(pool);
+  sink_ = std::move(sink);
   return true;
 }
 
-void Lease::destroy_frame_pool() {
+void Lease::detach_lease_sink() {
   std::lock_guard lock(producer_->mutex);
-  if (!pool_) return;
+  if (!sink_) return;
   if (!closed_.load()) detail::set_direct_frame_sink(*camera_, {});
-  pool_->set_frame_callback({});
-  pool_->set_error_callback({});
-  pool_.reset();
+  sink_->set_frame_callback({});
+  sink_->set_error_callback({});
+  sink_.reset();
 }
 
-std::shared_ptr<const FramePool> Lease::frame_pool() const {
+std::shared_ptr<const DirectLeaseSink> Lease::lease_sink() const {
   std::lock_guard lock(producer_->mutex);
-  return pool_;
+  return sink_;
 }
 
 void Lease::set_error_callback(ErrorFn callback) {
