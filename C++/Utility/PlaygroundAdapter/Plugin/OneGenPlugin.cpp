@@ -20,7 +20,7 @@
 namespace {
 
 /** @brief Translates module-owned scan outcomes into copied consumer diagnostics. */
-GenTLDiscoverySnapshot consumerStatus(const onegen::producer::StartupDiscovery::Status& status) {
+DeviceDiscoverySnapshot consumerStatus(const onegen::producer::StartupDiscovery::Status& status) {
   using Phase = onegen::producer::StartupDiscovery::Phase;
   GenTLDiscoveryPhase phase = GenTLDiscoveryPhase::Waiting;
   switch (status.phase) {
@@ -41,8 +41,8 @@ void logDiscoveryState(const onegen::producer::StartupDiscovery::Status& before,
   const auto old_state = consumerStatus(before);
   const auto state = consumerStatus(after);
   qDebug().noquote() << QStringLiteral("[GenTL] consumer=onegen scan=%1 %2 -> %3 reason=%4")
-      .arg(state.generation).arg(QLatin1String(GenTLDiscoveryState::name(old_state.phase)))
-      .arg(QLatin1String(GenTLDiscoveryState::name(state.phase)), state.detail);
+      .arg(state.generation).arg(QLatin1String(DeviceDiscoveryState::name(old_state.phase)))
+      .arg(QLatin1String(DeviceDiscoveryState::name(state.phase)), state.detail);
 }
 
 std::vector<onegen::DeviceInfo> discover(
@@ -415,7 +415,7 @@ private:
   std::shared_ptr<onegen::producer::StartupDiscovery> startup_;
   /** @brief Discovery result retained for the session opened from this plugin instance. */
   std::vector<onegen::DeviceInfo> discovered_devices_;
-  GenTLDiscoveryState discovery_state_;
+  DeviceDiscoveryState discovery_state_;
   bool shutting_down_ = false;
   bool producers_configured_ = false;
 };
