@@ -4,6 +4,7 @@
 
 - Ship the package icon from this repository (`C++/Utility/PlaygroundAdapter/Package/icon.png`) instead of the SDK-installed Resources brand asset. Include `DeviceRuntime/Contract/DevicePluginSession.h` from the contract include root; the SDK no longer installs a `PlaygroundWidget` header path or vendor icons.
 
+- Declare `runtime.genTLExternalProducers` in the package manifest and implement the transport-neutral `IDeviceRuntimeDiscovery/1.0` capability in place of the four deleted ABI-7.0 `IDevicePluginGenTL*` interfaces. Apply & Rescan, disabled paths, retry and per-CTI discovery status keep their existing behavior.
 - Document the widget-free, worker-only current state in the README and retire `docs/IN_PROCESS_PRODUCERS.md` to a short module-owned historical pointer. Playground's device runtime contract is authoritative; the plugin creates no session widget or dock and the Host device panel owns the session UI.
 
 - Clarify the README layout section: producer coordination and the frame pool are module-internal code that runs inside the Playground device worker, with no in-process Host path.
