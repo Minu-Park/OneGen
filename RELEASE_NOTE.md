@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Declare device panel presentation in package session metadata.
+
 - Ship the package icon from this repository (`C++/Utility/PlaygroundAdapter/Package/icon.png`) instead of the SDK-installed Resources brand asset. Include `DeviceRuntime/Contract/DevicePluginSession.h` from the contract include root; the SDK no longer installs a `PlaygroundWidget` header path or vendor icons.
 
 - Rename `FramePool` to `DirectLeaseSink` and the `Lease` attachment API to `attach_lease_sink`, `detach_lease_sink` and `lease_sink`. This is not a plugin-owned frame pool: it owns no frame memory, leases the consumer's provided storage for the pinned direct copy, and bounds in-flight frames while the camera owns the GenTL announced buffers. Drop accounting and diagnostics are unchanged.
