@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Gate first-frame input metadata and conversion details through the consumer-controlled acquisition diagnostic category.
+
 - Declare device panel presentation in package session metadata.
 
 - Ship the package icon from this repository (`C++/Utility/PlaygroundAdapter/Package/icon.png`) instead of the SDK-installed Resources brand asset. Include `DeviceRuntime/Contract/DevicePluginSession.h` from the contract include root; the SDK no longer installs a `PlaygroundWidget` header path or vendor icons.

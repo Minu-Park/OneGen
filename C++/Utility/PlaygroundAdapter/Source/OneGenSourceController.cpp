@@ -24,8 +24,28 @@
 #include <QUuid>
 
 namespace {
-// Host Debug enables diagnostics.* debug output; per-run detail dumps stay behind it.
 Q_LOGGING_CATEGORY(onegenSourceDiagnosticLog, "diagnostics.OneGen", QtInfoMsg)
+Q_LOGGING_CATEGORY(onegenAcquisitionDetailLog, "playground.device.acquisition.details", QtInfoMsg)
+
+void logFirstAcquisitionInput(const onegen::Frame& source, std::size_t bytes, bool direct)
+{
+  if (!onegenAcquisitionDetailLog().isDebugEnabled()) return;
+  qCDebug(onegenAcquisitionDetailLog).noquote() << QStringLiteral(
+      "[GenICam] first input: direct=%1 frame=%2 payloadType=%3 PFNC=0x%4 width=%5 height=%6 "
+      "stride=%7 bytes=%8 parts=%9 chunks=%10 scan3d=%11")
+      .arg(direct).arg(source.frame_id).arg(source.payload_type).arg(QString::number(source.pixel_format, 16))
+      .arg(source.width).arg(source.height).arg(source.stride).arg(bytes).arg(source.parts.size())
+      .arg(source.chunks.size()).arg(source.scan3d_geometry.has_value());
+  constexpr std::size_t maximumLoggedParts = 16;
+  const auto count = std::min(source.parts.size(), maximumLoggedParts);
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto& part = source.parts[i];
+    qCDebug(onegenAcquisitionDetailLog).noquote() << QStringLiteral(
+        "[GenICam] first input part: ordinal=%1 type=%2 PFNC=0x%3 width=%4 height=%5 stride=%6 bytes=%7")
+        .arg(i).arg(part.data_type).arg(QString::number(part.data_format, 16))
+        .arg(part.width).arg(part.height).arg(part.stride).arg(part.payload.size());
+  }
+}
 
 // Upper bound on frames in flight per source. The Host pool is the real slot bound; this only
 // sizes the lease bookkeeping and never allocates frame memory.
@@ -746,31 +766,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
   try {
     const auto sequence = sequence_.fetch_add(1, std::memory_order_relaxed);
     const bool firstFrame = received_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
-    if (firstFrame) {
-      qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral("[GenICam] first frame received: camera=%1 frame=%2 payloadType=%3 PFNC=0x%4 %5x%6 bytes=%7 parts=%8 scan3d=%9")
-          .arg(QString::fromStdString(sourceName)).arg(source.frame_id).arg(source.payload_type)
-          .arg(QString::number(source.pixel_format, 16)).arg(source.width).arg(source.height)
-          .arg(source.payload.size()).arg(source.parts.size()).arg(source.scan3d_geometry.has_value());
-      qCDebug(onegenSourceDiagnosticLog) << "[GenICam] first frame chunk count:" << source.chunks.size()
-              << "(presence does not establish Scan3d chunk overrides)";
-      if (source.scan3d_geometry) {
-        const auto& g = *source.scan3d_geometry;
-        qCDebug(onegenSourceDiagnosticLog).noquote() << "[GenICam] effective Scan3d: mode=" << QString::fromStdString(g.output_mode)
-            << "system=" << QString::fromStdString(g.coordinate_system)
-            << "unit=" << QString::fromStdString(g.distance_unit);
-        for (std::size_t axis = 0; axis < 3; ++axis)
-          qCDebug(onegenSourceDiagnosticLog) << "[GenICam] effective Scan3d axis:" << axis
-              << "calibrated=" << g.calibrated_axes[axis] << "scale=" << g.scale[axis]
-              << "offset=" << g.offset[axis] << "invalidEnabled=" << g.invalid_enabled[axis]
-              << "invalidValue=" << g.invalid_value[axis];
-      }
-      std::size_t partIndex = 0;
-      for (const auto& part : source.parts)
-        qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral("[GenICam] first frame part: type=%1 PFNC=0x%2 %3x%4 stride=%5 bytes=%6 source=%7 region=%8 purpose=%9")
-            .arg(part.data_type).arg(QString::number(part.data_format, 16)).arg(part.width).arg(part.height)
-            .arg(part.stride).arg(part.payload.size()).arg(part.source_id).arg(part.region_id).arg(part.purpose_id)
-            << "partIndex=" << partIndex++;
-    }
+    if (firstFrame) logFirstAcquisitionInput(source, source.payload.size(), false);
     if (source.buffer_info.incomplete) {
       incomplete_frames_.fetch_add(1, std::memory_order_relaxed);
       const auto diagnostic = source.buffer_info.diagnostic.empty()
@@ -836,7 +832,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
           << "sequence=" << sequence << "frameId=" << source.frame_id;
       return;
     }
-    if (firstConverted) qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral("[GenICam] first frame converted: images=%1 ranges=%2 pointClouds=%3; forwarding to presentation")
+    if (firstConverted) qCDebug(onegenAcquisitionDetailLog).noquote() << QStringLiteral("[GenICam] first frame converted: images=%1 ranges=%2 pointClouds=%3; forwarding to presentation")
         .arg(frame.payload.images.size()).arg(frame.payload.ranges.size()).arg(frame.payload.pointClouds.size());
     const auto consumerStarted = frameTrace ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
@@ -872,13 +868,7 @@ void OneGenSourceController::deliverShared(
     const auto bytes = shared.lease->bytes();
     const auto sequence = sequence_.fetch_add(1, std::memory_order_relaxed);
     const bool firstFrame = received_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
-    if (firstFrame) {
-      qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral(
-          "[GenICam] first direct frame received: camera=%1 frame=%2 bytes=%3")
-          .arg(QString::fromStdString(sourceName))
-          .arg(static_cast<qulonglong>(source.frame_id))
-          .arg(static_cast<qulonglong>(bytes.size()));
-    }
+    if (firstFrame) logFirstAcquisitionInput(source, bytes.size(), true);
     GraphicsImageStorage imageStorage;
     {
       std::lock_guard lock(mutex_);

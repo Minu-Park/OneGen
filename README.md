@@ -49,6 +49,8 @@ CMake retains discovered package directories in its cache.
 
 ## Runtime
 
+In the consumer adapter, optional first-frame diagnostics use the `playground.device.acquisition.details` Qt DEBUG category. When disabled, the adapter skips descriptor formatting and part iteration. When enabled, it logs the input layout and up to 16 part descriptors without pixel data or device names. Incomplete frames and rejected conversions remain operational observations. `ONEGEN_FRAME_TRACE` controls the separate development timing trace.
+
 The consumer package declares on-demand discovery. Loading its metadata does not
 load producers. Explicit session discovery starts one shared scan and waits for
 the first camera or scan completion, with cooperative caller cancellation.
