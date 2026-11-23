@@ -340,7 +340,10 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
     add_test(NAME onegen_source_controller_planar_rejection_test
       COMMAND onegen_source_controller_test singleWithIncompletePlanarGroupKeepsImage -o -,txt)
-    set_tests_properties(onegen_source_controller_planar_rejection_test PROPERTIES TIMEOUT 60
+    add_test(NAME onegen_source_controller_live_planar_rejection_test
+      COMMAND onegen_source_controller_test liveSamplesPlanarRejectionAndResetsOnRestart -o -,txt)
+    set_tests_properties(onegen_source_controller_planar_rejection_test
+      onegen_source_controller_live_planar_rejection_test PROPERTIES TIMEOUT 60
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ONEGEN_SYNTHETIC_SCENARIO=PlanarPartial;QT_LOGGING_RULES=playground.device.acquisition.details.debug=false"
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
   endif()

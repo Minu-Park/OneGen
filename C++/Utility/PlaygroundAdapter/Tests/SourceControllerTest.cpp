@@ -248,6 +248,7 @@ private slots:
     void liveSamplesRejectedDirectImagesAndResetsOnRestart();
     void firstInputDetailsFollowCategory();
     void singleWithIncompletePlanarGroupKeepsImage();
+    void liveSamplesPlanarRejectionAndResetsOnRestart();
     void unwritableModeRefusesSingleAndLive();
     void severalCamerasShareOneInterface();
     void explicitInterfaceStaysOpenUntilDisconnect();
@@ -552,6 +553,44 @@ void OneGenSourceControllerTests::singleWithIncompletePlanarGroupKeepsImage()
         QVERIFY(observation.frameRetained);
         QVERIFY(observation.imageRetained);
         QVERIFY(!observation.rangeRetained);
+    }
+    disconnect();
+}
+
+void OneGenSourceControllerTests::liveSamplesPlanarRejectionAndResetsOnRestart()
+{
+    if (qgetenv("ONEGEN_SYNTHETIC_SCENARIO") != "PlanarPartial")
+        QSKIP("This case uses the synthetic multipart image with a missing coordinate axis.");
+    connectTarget();
+    std::uint64_t firstSequence = 0;
+    for (const std::size_t minimumSamples : {3U, 1U}) {
+        _frames.store(0);
+        QCOMPARE(invoke([&](auto done) {
+            return _controller->requestLiveStart(_connectionId.toStdString(), done);
+        }).error, DeviceConnectionError::None);
+        const auto sampled = waitFor([minimumSamples] {
+            std::lock_guard lock(imageRejectionMutex);
+            return planarRejections.size() >= minimumSamples;
+        }, 10000);
+        QCOMPARE(invoke([&](auto done) {
+            return _controller->requestLiveStop(_connectionId.toStdString(), done);
+        }).error, DeviceConnectionError::None);
+        QVERIFY(sampled);
+        std::vector<DevicePlanarRejectionObservation> observations;
+        {
+            std::lock_guard lock(imageRejectionMutex);
+            observations.swap(planarRejections);
+        }
+        const auto delivered = static_cast<std::uint64_t>(_frames.load());
+        QCOMPARE(observations.size(), std::size_t{1} + static_cast<std::size_t>(delivered / 100));
+        for (std::size_t index = 0; index < observations.size(); ++index) {
+            QCOMPARE(observations[index].reason, DevicePlanarRejection::MissingAxis);
+            QVERIFY(observations[index].imageRetained);
+            QVERIFY(!observations[index].rangeRetained);
+            const auto offset = index == 0 ? 0 : index * 100 - 1;
+            QCOMPARE(observations[index].frameSequence, firstSequence + offset);
+        }
+        firstSequence += delivered;
     }
     disconnect();
 }

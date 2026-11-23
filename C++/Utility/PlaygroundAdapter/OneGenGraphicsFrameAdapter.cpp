@@ -665,6 +665,35 @@ struct PlanarRangeAssembly
   std::vector<std::size_t> used_auxiliary_indices;
 };
 
+constexpr std::array<std::array<std::uint64_t, 4>, 6> planarFormats{{
+    {0x010800af, 0x010800b0, 0x010800b1, 0x021800b3},
+    {0x011000b6, 0x011000b7, 0x011000b8, 0x023000ba},
+    {0x012000bd, 0x012000be, 0x012000bf, 0x026000c1},
+    {0x01400126, 0x01400127, 0x01400128, 0x02c0012a},
+    {0x010a00d5, 0x010a00d6, 0x010a00d7, 0x021e00dc},
+    {0x010c00d8, 0x010c00d9, 0x010c00da, 0x022400df},
+}};
+
+const std::array<std::uint64_t, 4>* planarFamily(std::uint64_t format)
+{
+  for (const auto& family : planarFormats)
+    if (std::find(family.begin(), family.begin() + 3, format) != family.begin() + 3)
+      return &family;
+  return nullptr;
+}
+
+bool samePlanarSource(const onegen::Frame::Part& first, const onegen::Frame::Part& second)
+{
+  return is3dPart(second.data_type) && first.source_id == second.source_id
+      && first.region_id == second.region_id;
+}
+
+bool samePlanarLayout(const onegen::Frame::Part& first, const onegen::Frame::Part& second)
+{
+  return first.format_namespace == second.format_namespace && first.width == second.width
+      && first.height == second.height;
+}
+
 std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
     const GraphicsImageStorage& storage, std::optional<OneGenPlanarRejection>* rejection)
 {
@@ -672,26 +701,27 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
   for (std::size_t base_index = 0; base_index < source.parts.size(); ++base_index) {
     const auto& a = source.parts[base_index];
     if (!is3dPart(a.data_type)) continue;
-    std::array<std::uint64_t, 3> formats{};
-    switch (a.data_format) {
-      case 0x010800af: formats = {0x010800b0, 0x010800b1, 0x021800b3}; break;
-      case 0x011000b6: formats = {0x011000b7, 0x011000b8, 0x023000ba}; break;
-      case 0x012000bd: formats = {0x012000be, 0x012000bf, 0x026000c1}; break;
-      case 0x01400126: formats = {0x01400127, 0x01400128, 0x02c0012a}; break;
-      case 0x010a00d5: formats = {0x010a00d6, 0x010a00d7, 0x021e00dc}; break;
-      case 0x010c00d8: formats = {0x010c00d9, 0x010c00da, 0x022400df}; break;
-      default: continue;
+    const auto* family = planarFamily(a.data_format);
+    if (!family) continue;
+    const auto& formats = *family;
+    const bool primaryAxis = a.data_format == formats[0];
+    if (!primaryAxis) {
+      if (!rejection || *rejection) continue;
+      // Let a valid A anchor keep its existing assembly path, even when B or C arrives first.
+      if (std::any_of(source.parts.begin(), source.parts.end(), [&](const auto& part) {
+        return part.data_format == formats[0] && samePlanarSource(a, part) && samePlanarLayout(a, part);
+      })) continue;
     }
     std::array<const onegen::Frame::Part*, 3> planes{};
     std::array<std::size_t, 3> plane_indices{};
     const auto axisFor = [&](const onegen::Frame::Part& part) {
-      if (part.data_format == a.data_format) return 0;
-      if (part.data_format == formats[0]) return 1;
-      if (part.data_format == formats[1]) return 2;
+      if (part.data_format == formats[0]) return 0;
+      if (part.data_format == formats[1]) return 1;
+      if (part.data_format == formats[2]) return 2;
       return -1;
     };
     const auto sameGroup = [&](const onegen::Frame::Part& part) {
-      return is3dPart(part.data_type) && part.source_id == a.source_id && part.region_id == a.region_id;
+      return samePlanarSource(a, part);
     };
     const auto sameShape = [&](const onegen::Frame::Part& part) {
       return part.width == a.width && part.height == a.height;
@@ -750,10 +780,10 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
       plane_indices[axis] = part_index;
     }
     if (ambiguous || !planes[0] || !planes[1] || !planes[2]) {
-      record(ambiguous ? Reason::DuplicateAxis : Reason::MissingAxis);
+      record(!planes[0] || !ambiguous ? Reason::MissingAxis : Reason::DuplicateAxis);
       continue;
     }
-    const auto layout = onegen::coordinate_format(formats[2]);
+    const auto layout = onegen::coordinate_format(formats[3]);
     const auto row_bytes = onegen::coordinate_row_bytes(
         {1, layout.sample_bits, false, layout.floating, layout.packed}, a.width);
     if (!row_bytes || !a.height) {
@@ -765,7 +795,7 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
     joined.height = a.height;
     joined.data_type = kPart3dImage;
     joined.stride = row_bytes;
-    joined.data_format = formats[2];
+    joined.data_format = formats[3];
     joined.format_namespace = a.format_namespace;
     joined.source_id = a.source_id;
     joined.region_id = a.region_id;
@@ -818,8 +848,20 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   if (!source.parts.empty()) {
     GraphicsFrame result;
     std::string droppedParts;
+    bool representedByPlanarEvidence = false;
     const auto dropped = [&](std::size_t index, const std::string& reason) {
       const auto& part = source.parts[index];
+      if (planar_rejection && *planar_rejection) {
+        const auto& evidence = **planar_rejection;
+        const auto& anchor = source.parts[evidence.anchorPart];
+        const bool describesMismatches = evidence.reason == OneGenPlanarRejection::Reason::MissingAxis
+            || evidence.reason == OneGenPlanarRejection::Reason::DuplicateAxis;
+        if (samePlanarSource(anchor, part) && planarFamily(anchor.data_format) == planarFamily(part.data_format)
+            && (describesMismatches || samePlanarLayout(anchor, part))) {
+          representedByPlanarEvidence = true;
+          return;
+        }
+      }
       std::ostringstream detail;
       detail << "part=" << index << " type=" << part.data_type << " PFNC=0x" << std::hex
           << part.data_format << std::dec << " namespace=" << part.format_namespace
@@ -921,6 +963,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       *rejection_reason = "multipart payload has no supported image or range data; " + droppedParts;
       return std::nullopt;
     }
+    if (representedByPlanarEvidence) return std::nullopt;
     return reject("multipart payload has no supported image or range data");
   }
   using Conversion = OneGenImageRejection::Conversion;

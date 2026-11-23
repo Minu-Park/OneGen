@@ -916,7 +916,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
                                       : std::chrono::steady_clock::time_point{};
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
-      if (planar || (observation && reportImageRejection(*observation, source, sequence, source.payload.size(), false, single)))
+      if ((planar && rejectionReason.empty()) || (observation && reportImageRejection(*observation, source, sequence, source.payload.size(), false, single)))
         return;
       {
         const auto message = QStringLiteral(
@@ -938,9 +938,9 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
       return;
     }
     const bool firstConverted = converted_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
-    if (!rejectionReason.empty()) {
+    if (planar || !rejectionReason.empty()) {
       partial_frames_.fetch_add(1, std::memory_order_relaxed);
-      if (!planar) qWarning().noquote() << "[GenICam] frame retained with rejected parts: camera="
+      if (!rejectionReason.empty()) qWarning().noquote() << "[GenICam] frame retained with rejected parts: camera="
           << QString::fromStdString(sourceName) << "sequence=" << sequence
           << "frameId=" << source.frame_id << QString::fromStdString(rejectionReason);
     }
@@ -1010,7 +1010,7 @@ void OneGenSourceController::deliverShared(
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
       const auto readableBytes = bytes.empty() ? source.payload.size() : bytes.size();
-      if (planar || (observation && reportImageRejection(*observation, source, sequence, readableBytes, true, false)))
+      if ((planar && rejectionReason.empty()) || (observation && reportImageRejection(*observation, source, sequence, readableBytes, true, false)))
         return;
       qWarning().noquote() << QStringLiteral(
           "[GenICam] direct frame rejected: camera=%1 sequence=%2 frame=%3 reason=%4")
@@ -1021,6 +1021,12 @@ void OneGenSourceController::deliverShared(
       return;
     }
     converted_frames_.fetch_add(1, std::memory_order_relaxed);
+    if (planar || !rejectionReason.empty()) {
+      partial_frames_.fetch_add(1, std::memory_order_relaxed);
+      if (!rejectionReason.empty()) qWarning().noquote() << "[GenICam] direct frame retained with rejected parts: camera="
+          << QString::fromStdString(sourceName) << "sequence=" << sequence
+          << "frameId=" << source.frame_id << QString::fromStdString(rejectionReason);
+    }
     payload->metadata.sourceName = sourceName;
     SessionFrame frame;
     frame.payload = std::move(*payload);

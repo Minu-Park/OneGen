@@ -591,6 +591,12 @@ int main()
       assert(planarRejection->shapeMismatchAxes == 0 && planarRejection->namespaceMismatchAxes == 0);
       coordinates.parts[1].source_id = 0;
 
+      coordinates.parts.erase(coordinates.parts.begin());
+      assert(!inspectPlanar());
+      assert(planarRejection && planarRejection->reason == PlanarReason::MissingAxis);
+      assert(planarRejection->anchorPart == 0 && planarRejection->matchedAxes == 0b110U);
+      coordinates.parts = firstPlanarGroup;
+
       ++coordinates.parts[1].width;
       ++coordinates.parts[1].format_namespace;
       assert(!inspectPlanar());
@@ -627,6 +633,15 @@ int main()
       const auto partial = inspectPlanar();
       assert(partial && partial->hasImage() && !partial->hasRangeFrame());
       assert(planarRejection && planarRejection->reason == PlanarReason::TruncatedPlane);
+
+      auto unusableImage = survivingImage;
+      unusableImage.payload.clear();
+      coordinates.parts.push_back(std::move(unusableImage));
+      std::string otherRejections;
+      const auto mixed = oneGenGraphicsFrame(coordinates, 43, &otherRejections, {}, {}, {}, nullptr, &planarRejection);
+      assert(mixed && mixed->hasImage() && planarRejection);
+      assert(otherRejections.find("part=4 ") != std::string::npos);
+      assert(otherRejections.find("part=1 ") == std::string::npos);
 
       coordinates.parts = firstPlanarGroup;
       assert(inspectPlanar()->hasRangeFrame());
