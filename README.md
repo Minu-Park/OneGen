@@ -51,6 +51,8 @@ CMake retains discovered package directories in its cache.
 
 In the consumer adapter, optional first-frame diagnostics use the `playground.device.acquisition.details` Qt DEBUG category. When disabled, the adapter skips descriptor formatting and part iteration. When enabled, it logs the input layout and up to 16 part descriptors without pixel data or device names. Incomplete frames and rejected conversions remain operational observations. `ONEGEN_FRAME_TRACE` controls the separate development timing trace.
 
+The first-frame layout reports whether Scan3d geometry is present. The log excludes raw Scan3d configuration and calibration values and producer-supplied source, region and purpose IDs. Part ordinals identify entries within the bounded input summary.
+
 The optional image rejection sink reports the conversion and failed rule for a single 2D input, including short stride, truncated data and refused destination storage. It carries the numeric format and input layout in bytes. Each rejected Single reports its reason. Live reports the first and every hundredth occurrence of each reason per source during a run. These observations are independent of the detail category. Multipart and range diagnostics continue through their existing paths.
 
 The consumer package declares on-demand discovery. Loading its metadata does not

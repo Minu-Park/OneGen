@@ -14,6 +14,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QScopeGuard>
 #include <QTest>
 #include <QThread>
 
@@ -41,6 +42,16 @@ void rememberImageRejection(const DeviceImageRejectionObservation& observation) 
         std::lock_guard lock(imageRejectionMutex);
         imageRejections.push_back(observation);
     } catch (...) {}
+}
+
+std::atomic<int> firstInputLogs{0};
+std::atomic<int> firstConversionLogs{0};
+
+void countAcquisitionDetails(QtMsgType type, const QMessageLogContext& context, const QString& message)
+{
+    if (type != QtDebugMsg || QLatin1String(context.category) != QLatin1String("playground.device.acquisition.details")) return;
+    if (message.startsWith(QLatin1String("[GenICam] first input:"))) ++firstInputLogs;
+    if (message.startsWith(QLatin1String("[GenICam] first frame converted:"))) ++firstConversionLogs;
 }
 
 bool waitFor(const std::function<bool()>& predicate, const int timeoutMs)
@@ -217,6 +228,7 @@ private slots:
     void initTestCase();
     void singleAndLiveFollowTheSelectedAction();
     void singleWithUnusableImageReportsAssemblyFailure();
+    void firstInputDetailsFollowCategory();
     void unwritableModeRefusesSingleAndLive();
     void severalCamerasShareOneInterface();
     void explicitInterfaceStaysOpenUntilDisconnect();
@@ -431,6 +443,28 @@ void OneGenSourceControllerTests::singleWithUnusableImageReportsAssemblyFailure(
         QCOMPARE(imageRejections.front().width, std::uint32_t{64});
         QVERIFY(imageRejections.front().readableBytes > 0);
     }
+    disconnect();
+}
+
+void OneGenSourceControllerTests::firstInputDetailsFollowCategory()
+{
+    const auto expected = qgetenv("ONEGEN_TEST_ACQUISITION_DETAILS");
+    if (expected != "on" && expected != "off")
+        QSKIP("This case runs with an explicit acquisition detail category rule.");
+    connectTarget();
+    _frames.store(0);
+    firstInputLogs.store(0);
+    firstConversionLogs.store(0);
+    const auto single = [&] {
+        const auto previous = qInstallMessageHandler(countAcquisitionDetails);
+        const auto restore = qScopeGuard([previous] { qInstallMessageHandler(previous); });
+        return invoke([&](auto done) { return _controller->requestSingle(_connectionId.toStdString(), done); });
+    }();
+    QCOMPARE(single.error, DeviceConnectionError::None);
+    QCOMPARE(_frames.load(), 1);
+    const int expectedLogs = expected == "on" ? 1 : 0;
+    QCOMPARE(firstInputLogs.load(), expectedLogs);
+    QCOMPARE(firstConversionLogs.load(), expectedLogs);
     disconnect();
 }
 

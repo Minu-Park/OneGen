@@ -314,6 +314,18 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     set_tests_properties(onegen_source_controller_test PROPERTIES TIMEOUT 300
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+    foreach(_details IN ITEMS on off)
+      if(_details STREQUAL "on")
+        set(_details_rule true)
+      else()
+        set(_details_rule false)
+      endif()
+      add_test(NAME onegen_source_controller_details_${_details}
+        COMMAND onegen_source_controller_test firstInputDetailsFollowCategory -o -,txt)
+      set_tests_properties(onegen_source_controller_details_${_details} PROPERTIES TIMEOUT 60
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ONEGEN_TEST_ACQUISITION_DETAILS=${_details};QT_LOGGING_RULES=playground.device.acquisition.details.debug=${_details_rule}"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+    endforeach()
     add_test(NAME onegen_source_controller_unwritable_test COMMAND onegen_source_controller_test -o -,txt)
     set_tests_properties(onegen_source_controller_unwritable_test PROPERTIES TIMEOUT 300
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ONEGEN_SYNTHETIC_SCENARIO=M15;ONEGEN_TEST_ACQ_MODE=unwritable"
