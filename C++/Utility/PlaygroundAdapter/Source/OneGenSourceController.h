@@ -3,6 +3,7 @@
 #include "DeviceRuntime/Contract/FrameStorage.h"
 #include "DeviceRuntime/Contract/AbstractSourceController.h"
 #include "DeviceRuntime/Contract/DeviceDiagnostics.h"
+#include "DeviceRuntime/Contract/DeviceImageDiagnostics.h"
 #include "engine/GraphicsFrameAdapter.h"
 #include "DeviceRuntime/Contract/DeviceConnectionControl.h"
 #include "DeviceRuntime/Contract/DeviceParameterControl.h"
@@ -15,6 +16,7 @@
 #include <functional>
 #include <thread>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -35,6 +37,8 @@ class DirectLeaseSink;
 }
 }
 
+struct OneGenImageRejection;
+
 /** @brief Reports a refused acquisition-mode write before any acquisition effect. */
 class OneGenAcquisitionModeRefused : public std::runtime_error {
 public:
@@ -50,7 +54,8 @@ public:
   /** @brief Applies to this controller and its camera controllers from their next Live start. */
   void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
   using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
-  explicit OneGenSourceController(QObject* parent = nullptr);
+  explicit OneGenSourceController(QObject* parent = nullptr,
+      DeviceImageRejectionSink imageRejectionSink = nullptr, std::uint32_t imageSourceIndex = 0);
   ~OneGenSourceController() override;
 
   /** Returns a stable camera controller whose frames share the consumer's source topology. */
@@ -165,8 +170,10 @@ signals:
 
 private:
   friend class FeatureTreeTests;
-  void deliver(const onegen::Frame& source, const std::string& sourceName);
+  void deliver(const onegen::Frame& source, const std::string& sourceName, bool single = false);
   void deliverShared(const onegen::producer::SharedFrame& source, const std::string& sourceName);
+  bool reportImageRejection(const OneGenImageRejection& evidence, const onegen::Frame& source,
+      std::uint64_t sequence, std::size_t readableBytes, bool directInput, bool single) noexcept;
   void bindLease();
   /** @brief Frames dropped for lack of a free slot since the last start. */
   std::uint64_t droppedFrames() const;
@@ -188,6 +195,10 @@ private:
   FrameConsumer consumer_;
   // A child counts delivery in the parent forwarding callback, after the final consumer returns.
   bool forwarded_by_parent_ = false;
+  const DeviceImageRejectionSink image_rejection_sink_;
+  const std::uint32_t image_source_index_;
+  std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(DeviceImageRejection::NoImage) + 1>
+      image_rejection_counts_{};
   std::atomic<bool> grabbing_{false};
   std::atomic<std::uint64_t> sequence_{0};
   std::atomic<std::uint64_t> rejected_frames_{0};

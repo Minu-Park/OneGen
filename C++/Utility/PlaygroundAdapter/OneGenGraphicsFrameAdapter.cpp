@@ -715,9 +715,11 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
 std::optional<GraphicsFrame> oneGenGraphicsFrame(
     const onegen::Frame& source, const std::uint64_t sequence,
     std::string* rejection_reason, std::span<const std::uint8_t> image_payload,
-    std::shared_ptr<const void> payload_owner, GraphicsImageStorage image_storage)
+    std::shared_ptr<const void> payload_owner, GraphicsImageStorage image_storage,
+    std::optional<OneGenImageRejection>* image_rejection)
 {
   if (rejection_reason) rejection_reason->clear();
+  if (image_rejection) image_rejection->reset();
   const auto imageBytes = image_payload.empty()
       ? std::span<const std::uint8_t>(source.payload) : image_payload;
   const auto reject = [rejection_reason](const char* reason) {
@@ -832,11 +834,24 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     }
     return reject("multipart payload has no supported image or range data");
   }
+  using Conversion = OneGenImageRejection::Conversion;
+  const auto rejectImage = [&](const char* message, std::optional<GraphicsImageFailure> failure,
+                               Conversion conversion = Conversion::None,
+                               std::uint64_t stride = 0, std::uint64_t minimum = 0) {
+    if (image_rejection) {
+      const auto requiredStride = std::max(stride, minimum);
+      const auto requiredBytes = requiredStride
+          && source.height <= (std::numeric_limits<std::uint64_t>::max)() / requiredStride
+          ? requiredStride * source.height : 0;
+      *image_rejection = OneGenImageRejection{failure, conversion, stride, minimum, requiredBytes};
+    }
+    return reject(message);
+  };
   if (source.payload_type != 0 && source.payload_type != 1
       && source.payload_type != 4 && source.payload_type != kPayloadJpeg)
-    return reject("payload type does not describe a supported image");
+    return rejectImage("payload type does not describe a supported image", GraphicsImageFailure::UnsupportedFormat);
   if (source.payload_type == 4 && !source.buffer_info.image_present)
-    return reject("chunk payload contains no image");
+    return rejectImage("chunk payload contains no image", std::nullopt);
   const auto coordinateLayout = onegen::coordinate_format(source.pixel_format);
   if (coordinateLayout.components || source.pixel_format == kConfidence32f) {
     const auto row_bytes = coordinateLayout.components
@@ -891,30 +906,35 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   }
   const auto format = source.payload_type == kPayloadJpeg
       ? GraphicsImagePixelFormat::Jpeg : pixelFormat(source.pixel_format);
-  if (format == GraphicsImagePixelFormat::Unknown) return reject("unknown PFNC pixel format");
-  if (imageBytes.empty()) return reject("empty payload");
+  if (format == GraphicsImagePixelFormat::Unknown)
+    return rejectImage("unknown PFNC pixel format", GraphicsImageFailure::UnsupportedFormat);
+  if (imageBytes.empty()) return rejectImage("empty payload", GraphicsImageFailure::MissingBytes);
   if (source.width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
       || source.height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()))
-    return reject("image dimensions exceed the supported integer range");
+    return rejectImage("image dimensions exceed the supported integer range", GraphicsImageFailure::InvalidDimensions);
 
   if (source.pixel_endianness == 2 && !isByteOrdered(format)) {
     const auto size_bits = static_cast<unsigned>((source.pixel_format >> 16U) & 0xffU);
     if (size_bits == 10 || size_bits == 12 || size_bits == 14)
-      return reject("big-endian packed pixels are unsupported");
+      return rejectImage("big-endian packed pixels are unsupported", GraphicsImageFailure::UnsupportedConversion);
   }
 
   const auto minimum = GraphicsImageValidation::minimumRowBytes(
       format, static_cast<int>(source.width));
   const auto stride = source.stride ? source.stride : minimum;
   if (stride > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
-    return reject("stride exceeds the supported integer range");
+    return rejectImage("stride exceeds the supported integer range", GraphicsImageFailure::InvalidStride,
+        Conversion::None, stride, minimum);
 
   const bool byteSwap = source.pixel_endianness == 2 && !isByteOrdered(format);
+  Conversion conversion = Conversion::Copy;
   std::shared_ptr<const std::uint8_t> storage;
   if (payload_owner && !byteSwap) {
+    conversion = Conversion::Borrow;
     storage = std::shared_ptr<const std::uint8_t>(
         imageBytes.data(), [owner = std::move(payload_owner)](const std::uint8_t*) {});
   } else if (format == GraphicsImagePixelFormat::Jpeg) {
+    conversion = Conversion::JpegCopy;
     auto owned = std::make_shared<std::vector<std::uint8_t>>(
         imageBytes.begin(), imageBytes.end());
     storage = std::shared_ptr<const std::uint8_t>(owned, owned->data());
@@ -933,6 +953,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     if (byteSwap) {
       const auto size_bits = static_cast<unsigned>((source.pixel_format >> 16U) & 0xffU);
       if (size_bits == 32 || size_bits % 16U == 0) {
+        conversion = Conversion::SwapByteOrder;
         writerSource.operation = GraphicsImageWriterOperation::SwapByteOrder;
         const auto wordBits = size_bits == 32 ? 32U : 16U;
         if (graphicsImagePixelFormatInfo(format).componentBits != wordBits)
@@ -944,8 +965,17 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     } else {
       writerSource.operation = GraphicsImageWriterOperation::Copy;
     }
-    auto written = writeGraphicsImage(writerSource, image_storage);
-    if (!written.isValid()) return reject("invalid image layout or insufficient payload bytes");
+    GraphicsImageFailure failure = GraphicsImageFailure::None;
+    auto written = writeGraphicsImageWithFailure(writerSource, image_storage, image_rejection ? &failure : nullptr);
+    if (!written.isValid()) {
+      if (failure != GraphicsImageFailure::None) {
+        const auto writerMinimum = GraphicsImageValidation::minimumRowBytes(
+            writerSource.pixelFormat, writerSource.width);
+        return rejectImage("invalid image layout or insufficient payload bytes", failure,
+            conversion, stride ? stride : writerMinimum, writerMinimum);
+      }
+      return reject("invalid image layout or insufficient payload bytes");
+    }
     storage = std::move(written.storage);
   }
   GraphicsImage image;
@@ -964,7 +994,19 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
           && image.declaredMonoSourceBits > 0 && image.declaredMonoSourceBits < 16)
       ? GraphicsImageBitAlignment::LeastSignificant : GraphicsImageBitAlignment::Packed;
   image.frameSequence = sequence;
-  if (!image.isValid()) return reject("invalid image layout or insufficient payload bytes");
+  if (!image.isValid()) {
+    if (image_rejection) {
+      const auto failure = GraphicsImageValidation::layoutFailure(
+          image.pixelFormat, image.width, image.height, image.stride, image.size);
+      if (failure != GraphicsImageFailure::None) {
+        const auto rowBytes = format == GraphicsImagePixelFormat::Jpeg ? 0 : minimum;
+        const auto effectiveStride = format == GraphicsImagePixelFormat::Jpeg ? 0 : stride;
+        return rejectImage("invalid image layout or insufficient payload bytes", failure,
+            conversion, effectiveStride, rowBytes);
+      }
+    }
+    return reject("invalid image layout or insufficient payload bytes");
+  }
 
   GraphicsFrame frame;
   frame.addImage("image", std::move(image), "Image");

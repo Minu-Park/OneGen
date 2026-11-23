@@ -32,6 +32,17 @@
 
 namespace {
 
+std::mutex imageRejectionMutex;
+std::vector<DeviceImageRejectionObservation> imageRejections;
+
+void rememberImageRejection(const DeviceImageRejectionObservation& observation) noexcept
+{
+    try {
+        std::lock_guard lock(imageRejectionMutex);
+        imageRejections.push_back(observation);
+    } catch (...) {}
+}
+
 bool waitFor(const std::function<bool()>& predicate, const int timeoutMs)
 {
     QElapsedTimer timer;
@@ -205,6 +216,7 @@ class OneGenSourceControllerTests final : public QObject {
 private slots:
     void initTestCase();
     void singleAndLiveFollowTheSelectedAction();
+    void singleWithUnusableImageReportsAssemblyFailure();
     void unwritableModeRefusesSingleAndLive();
     void severalCamerasShareOneInterface();
     void explicitInterfaceStaysOpenUntilDisconnect();
@@ -243,7 +255,7 @@ void OneGenSourceControllerTests::initTestCase()
 {
     _coordinator = std::make_shared<onegen::producer::Coordinator>();
     QVERIFY(_coordinator->set_producer_files({ONEGEN_TEST_PRODUCER}));
-    _controller = std::make_unique<OneGenSourceController>();
+    _controller = std::make_unique<OneGenSourceController>(nullptr, &rememberImageRejection);
     _controller->configureControl(_coordinator, {});
     _controller->setFrameConsumer([this](SessionFrame&&, unsigned) { _frames.fetch_add(1); });
 }
@@ -397,6 +409,28 @@ void OneGenSourceControllerTests::singleAndLiveFollowTheSelectedAction()
         return _controller->requestLiveStop(_connectionId.toStdString(), done);
     }).error, DeviceConnectionError::None);
 
+    disconnect();
+}
+
+void OneGenSourceControllerTests::singleWithUnusableImageReportsAssemblyFailure()
+{
+    if (!qEnvironmentVariableIsSet("ONEGEN_TEST_IMAGE_REJECTION"))
+        QSKIP("This case uses the synthetic big-endian packed image.");
+    connectTarget();
+    _frames.store(0);
+    const auto single = invoke([&](auto done) {
+        return _controller->requestSingle(_connectionId.toStdString(), done);
+    });
+    QCOMPARE(single.error, DeviceConnectionError::BackendFailure);
+    QCOMPARE(_frames.load(), 0);
+    {
+        std::lock_guard lock(imageRejectionMutex);
+        QCOMPARE(imageRejections.size(), std::size_t{1});
+        QCOMPARE(imageRejections.front().reason, DeviceImageRejection::UnsupportedConversion);
+        QCOMPARE(imageRejections.front().pixelFormat, std::uint64_t{0x010a0046});
+        QCOMPARE(imageRejections.front().width, std::uint32_t{64});
+        QVERIFY(imageRejections.front().readableBytes > 0);
+    }
     disconnect();
 }
 

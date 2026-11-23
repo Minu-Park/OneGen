@@ -64,10 +64,45 @@ std::optional<std::uint64_t> directSlotBytes(onegen::producer::Lease& lease, std
   return std::nullopt;
 }
 
+std::optional<DeviceImageRejection> deviceImageRejection(const OneGenImageRejection& rejection) noexcept
+{
+  if (!rejection.failure) return DeviceImageRejection::NoImage;
+  switch (*rejection.failure) {
+  case GraphicsImageFailure::MissingBytes: return DeviceImageRejection::MissingBytes;
+  case GraphicsImageFailure::InvalidDimensions: return DeviceImageRejection::InvalidDimensions;
+  case GraphicsImageFailure::UnsupportedFormat: return DeviceImageRejection::UnsupportedFormat;
+  case GraphicsImageFailure::InvalidStride: return DeviceImageRejection::InvalidStride;
+  case GraphicsImageFailure::StrideBelowMinimum: return DeviceImageRejection::StrideBelowMinimum;
+  case GraphicsImageFailure::ExtentOverflow: return DeviceImageRejection::ExtentOverflow;
+  case GraphicsImageFailure::TruncatedBytes: return DeviceImageRejection::TruncatedBytes;
+  case GraphicsImageFailure::OddWidth: return DeviceImageRejection::OddWidth;
+  case GraphicsImageFailure::UnsupportedConversion: return DeviceImageRejection::UnsupportedConversion;
+  case GraphicsImageFailure::StorageRefused: return DeviceImageRejection::StorageRefused;
+  case GraphicsImageFailure::None:
+  case GraphicsImageFailure::ExcessBytes: return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+DeviceImageConversion deviceImageConversion(OneGenImageRejection::Conversion conversion) noexcept
+{
+  using Conversion = OneGenImageRejection::Conversion;
+  switch (conversion) {
+  case Conversion::None: return DeviceImageConversion::None;
+  case Conversion::Borrow: return DeviceImageConversion::Borrow;
+  case Conversion::Copy: return DeviceImageConversion::Copy;
+  case Conversion::SwapByteOrder: return DeviceImageConversion::SwapByteOrder;
+  case Conversion::JpegCopy: return DeviceImageConversion::JpegCopy;
+  }
+  return DeviceImageConversion::None;
+}
+
 } // namespace
 
-OneGenSourceController::OneGenSourceController(QObject* parent)
-    : AbstractSourceController(parent) {}
+OneGenSourceController::OneGenSourceController(QObject* parent, DeviceImageRejectionSink imageRejectionSink,
+    std::uint32_t imageSourceIndex)
+    : AbstractSourceController(parent), image_rejection_sink_(imageRejectionSink),
+      image_source_index_(imageSourceIndex) {}
 
 OneGenSourceController::~OneGenSourceController()
 {
@@ -302,7 +337,7 @@ OneGenSourceController* OneGenSourceController::cameraController(const std::stri
     std::lock_guard lock(mutex_);
     if (const auto found = children_.find(id); found != children_.end()) return found->second.controller.get();
     const auto index = next_source_index_++;
-    auto child = std::make_unique<OneGenSourceController>();
+    auto child = std::make_unique<OneGenSourceController>(nullptr, image_rejection_sink_, index);
     connect(child.get(), &AbstractSourceController::diagnosticAcquisitionChanged, this,
         [this, id](bool active, const QString&) { emit diagnosticAcquisitionChanged(active, QString::fromStdString(id)); },
         Qt::DirectConnection);
@@ -576,6 +611,7 @@ void OneGenSourceController::start()
   rejected_frames_.store(0, std::memory_order_relaxed);
   incomplete_frames_.store(0, std::memory_order_relaxed);
   partial_frames_.store(0, std::memory_order_relaxed);
+  for (auto& count : image_rejection_counts_) count.store(0, std::memory_order_relaxed);
   {
     std::lock_guard lock(mutex_);
     exhausted_baseline_.store(lease_sink_ ? lease_sink_->exhausted() : 0, std::memory_order_relaxed);
@@ -749,7 +785,7 @@ void OneGenSourceController::grabOne(const QString& diagnosticDirectory)
   } diagnosticEnd{this};
   lease->grab_one(
       [this, sourceName, diagnosticDirectory](const onegen::Frame& source) {
-        deliver(source, sourceName);
+        deliver(source, sourceName, true);
         onegen::diagnostics::delivered(source, diagnosticDirectory);
       });
 }
@@ -761,7 +797,36 @@ void OneGenSourceController::trigger()
   if (lease) lease->trigger();
 }
 
-void OneGenSourceController::deliver(const onegen::Frame& source, const std::string& sourceName)
+bool OneGenSourceController::reportImageRejection(const OneGenImageRejection& evidence,
+    const onegen::Frame& source, std::uint64_t sequence, std::size_t readableBytes,
+    bool directInput, bool single) noexcept
+{
+  const auto reason = deviceImageRejection(evidence);
+  if (!reason) return false;
+  if (!single) {
+    auto& counter = image_rejection_counts_[static_cast<std::size_t>(*reason)];
+    const auto count = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count != 1 && count % 100 != 0) return true;
+  }
+  DeviceImageRejectionObservation observation;
+  observation.reason = *reason;
+  observation.conversion = deviceImageConversion(evidence.conversion);
+  observation.sourceIndex = forwarded_by_parent_ ? image_source_index_ : source.stream_index;
+  observation.width = source.width;
+  observation.height = source.height;
+  observation.directInput = directInput;
+  observation.frameSequence = sequence;
+  observation.pixelFormat = source.pixel_format;
+  observation.reportedStride = source.stride;
+  observation.effectiveStride = evidence.effectiveStride;
+  observation.minimumRowBytes = evidence.minimumRowBytes;
+  observation.readableBytes = readableBytes;
+  observation.requiredBytes = evidence.requiredBytes;
+  image_rejection_sink_(observation);
+  return true;
+}
+
+void OneGenSourceController::deliver(const onegen::Frame& source, const std::string& sourceName, bool single)
 {
   try {
     const auto sequence = sequence_.fetch_add(1, std::memory_order_relaxed);
@@ -786,12 +851,15 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
       imageStorage = frameStorageFunction(frame_storage_);
     }
     std::string rejectionReason;
+    std::optional<OneGenImageRejection> observation;
     auto payload = oneGenGraphicsFrame(source, sequence, &rejectionReason, {}, {},
-        std::move(imageStorage));
+        std::move(imageStorage), image_rejection_sink_ ? &observation : nullptr);
     const auto converted = frameTrace ? std::chrono::steady_clock::now()
                                       : std::chrono::steady_clock::time_point{};
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      if (observation && reportImageRejection(*observation, source, sequence, source.payload.size(), false, single))
+        return;
       {
         const auto message = QStringLiteral(
             "Frame rejected: %1; PFNC 0x%2, %3x%4, stride %5, payload %6 bytes, "
@@ -875,10 +943,15 @@ void OneGenSourceController::deliverShared(
       imageStorage = frameStorageFunction(frame_storage_);
     }
     std::string rejectionReason;
+    std::optional<OneGenImageRejection> observation;
     auto payload = oneGenGraphicsFrame(
-        source, sequence, &rejectionReason, bytes, shared.lease, std::move(imageStorage));
+        source, sequence, &rejectionReason, bytes, shared.lease, std::move(imageStorage),
+        image_rejection_sink_ ? &observation : nullptr);
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      const auto readableBytes = bytes.empty() ? source.payload.size() : bytes.size();
+      if (observation && reportImageRejection(*observation, source, sequence, readableBytes, true, false))
+        return;
       qWarning().noquote() << QStringLiteral(
           "[GenICam] direct frame rejected: camera=%1 sequence=%2 frame=%3 reason=%4")
           .arg(QString::fromStdString(sourceName))

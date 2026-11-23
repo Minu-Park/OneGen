@@ -318,5 +318,10 @@ if(ONEGEN_BUILD_PLAYGROUND_PLUGIN)
     set_tests_properties(onegen_source_controller_unwritable_test PROPERTIES TIMEOUT 300
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ONEGEN_SYNTHETIC_SCENARIO=M15;ONEGEN_TEST_ACQ_MODE=unwritable"
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
+    add_test(NAME onegen_source_controller_image_rejection_test
+      COMMAND onegen_source_controller_test singleWithUnusableImageReportsAssemblyFailure -o -,txt)
+    set_tests_properties(onegen_source_controller_image_rejection_test PROPERTIES TIMEOUT 60
+      ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ONEGEN_TEST_IMAGE_REJECTION=1;ONEGEN_SYNTHETIC_FORMAT=0x010a0046;ONEGEN_SYNTHETIC_ENDIAN=2;QT_LOGGING_RULES=playground.device.acquisition.details.debug=false"
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:${_onegen_core_runtime_dir}")
   endif()
 endif()

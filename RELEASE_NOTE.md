@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report observed 2D assembly failures with their conversion and input layout through the optional consumer diagnostic sink.
 - Gate first-frame input metadata and conversion details through the consumer-controlled acquisition diagnostic category.
 
 - Declare device panel presentation in package session metadata.
