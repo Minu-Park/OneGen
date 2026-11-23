@@ -50,6 +50,7 @@ enum class Scenario {
   M13,
   M14,
   M15,
+  PlanarPartial,
 };
 
 Scenario loadScenario() {
@@ -71,6 +72,7 @@ Scenario loadScenario() {
   if (name == "M13") return Scenario::M13;
   if (name == "M14") return Scenario::M14;
   if (name == "M15") return Scenario::M15;
+  if (name == "PlanarPartial") return Scenario::PlanarPartial;
   return Scenario::Default;
 }
 
@@ -141,6 +143,7 @@ struct ChunkData {
 struct PartData {
   std::size_t offset = 0;
   std::size_t size = 0;
+  std::size_t data_type = PART_DATATYPE_2D_IMAGE;
   std::uint64_t data_format = mono8;
   std::uint64_t format_namespace = 0;
   std::uint64_t source_id = 10;
@@ -798,6 +801,23 @@ void fillFrame(BufferData& buffer, std::uint64_t frame) {
         buffer.image_present = false;
         buffer.pixel_endianness = 0;
       }
+      break;
+    }
+    case Scenario::PlanarPartial: {
+      base(32, 4, mono8, PAYLOAD_TYPE_MULTI_PART, 384, 384);
+      PartData image;
+      image.width = 32;
+      image.height = 4;
+      image.size = 128;
+      PartData a = image;
+      a.offset = 128;
+      a.data_type = PART_DATATYPE_3D_PLANE_TRIPLANAR;
+      a.data_format = 0x010800af;
+      PartData b = a;
+      b.offset = 256;
+      b.data_format = 0x010800b0;
+      buffer.parts = {image, a, b};
+      buffer.image_present = false;
       break;
     }
     default:
@@ -1715,7 +1735,7 @@ TEST_EXPORT GC_ERROR GC_CALLTYPE DSGetBufferPartInfo(DS_HANDLE stream, BUFFER_HA
       return give(type, out, size, INFO_DATATYPE_PTR,
                   static_cast<void*>(value.storage.data() + part.offset));
     case BUFFER_PART_INFO_DATA_SIZE: return give(type, out, size, INFO_DATATYPE_SIZET, part.size);
-    case BUFFER_PART_INFO_DATA_TYPE: return give(type, out, size, INFO_DATATYPE_SIZET, std::size_t{PART_DATATYPE_2D_IMAGE});
+    case BUFFER_PART_INFO_DATA_TYPE: return give(type, out, size, INFO_DATATYPE_SIZET, part.data_type);
     case BUFFER_PART_INFO_DATA_FORMAT: return give(type, out, size, INFO_DATATYPE_UINT64, part.data_format);
     case BUFFER_PART_INFO_DATA_FORMAT_NAMESPACE:
       return give(type, out, size, INFO_DATATYPE_UINT64, part.format_namespace);

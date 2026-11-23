@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Expose the failed planar multipart assembly rule and affected input metadata to frame adapter callers.
+- Report the first failed planar multipart assembly rule, affected input metadata and surviving resources through the optional consumer sink.
 - Report observed 2D assembly failures with their conversion and input layout through the optional consumer diagnostic sink.
 - Verify that Live direct-input assembly rejections report the first failure and every hundredth failure per acquisition, including after restart.
 - Gate first-frame input metadata and conversion details through the consumer-controlled acquisition diagnostic category. Limit the output to layout fields and part ordinals, with Scan3d geometry reported as present or absent.

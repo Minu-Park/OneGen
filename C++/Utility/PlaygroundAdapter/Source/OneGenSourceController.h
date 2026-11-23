@@ -38,6 +38,7 @@ class DirectLeaseSink;
 }
 
 struct OneGenImageRejection;
+struct OneGenPlanarRejection;
 
 /** @brief Reports a refused acquisition-mode write before any acquisition effect. */
 class OneGenAcquisitionModeRefused : public std::runtime_error {
@@ -55,7 +56,8 @@ public:
   void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
   using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
   explicit OneGenSourceController(QObject* parent = nullptr,
-      DeviceImageRejectionSink imageRejectionSink = nullptr, std::uint32_t imageSourceIndex = 0);
+      DeviceImageRejectionSink imageRejectionSink = nullptr,
+      DevicePlanarRejectionSink planarRejectionSink = nullptr, std::uint32_t imageSourceIndex = 0);
   ~OneGenSourceController() override;
 
   /** Returns a stable camera controller whose frames share the consumer's source topology. */
@@ -174,6 +176,8 @@ private:
   void deliverShared(const onegen::producer::SharedFrame& source, const std::string& sourceName);
   bool reportImageRejection(const OneGenImageRejection& evidence, const onegen::Frame& source,
       std::uint64_t sequence, std::size_t readableBytes, bool directInput, bool single) noexcept;
+  void reportPlanarRejection(const OneGenPlanarRejection& evidence, const onegen::Frame& source,
+      std::uint64_t sequence, const std::optional<GraphicsFrame>& output, bool single) noexcept;
   void bindLease();
   /** @brief Frames dropped for lack of a free slot since the last start. */
   std::uint64_t droppedFrames() const;
@@ -196,9 +200,12 @@ private:
   // A child counts delivery in the parent forwarding callback, after the final consumer returns.
   bool forwarded_by_parent_ = false;
   const DeviceImageRejectionSink image_rejection_sink_;
+  const DevicePlanarRejectionSink planar_rejection_sink_;
   const std::uint32_t image_source_index_;
   std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(DeviceImageRejection::NoImage) + 1>
       image_rejection_counts_{};
+  std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(DevicePlanarRejection::RangeStorageMisaligned) + 1>
+      planar_rejection_counts_{};
   std::atomic<bool> grabbing_{false};
   std::atomic<std::uint64_t> sequence_{0};
   std::atomic<std::uint64_t> rejected_frames_{0};

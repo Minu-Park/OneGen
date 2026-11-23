@@ -97,9 +97,10 @@ public:
   OneGenPluginSession(std::shared_ptr<onegen::producer::Coordinator> coordinator,
                       std::vector<onegen::DeviceInfo> devices,
                       DeviceImageRejectionSink imageRejectionSink,
+                      DevicePlanarRejectionSink planarRejectionSink,
                       std::function<void(OneGenSourceController*)> registerController)
       : coordinator_(std::move(coordinator)), devices_(std::move(devices)),
-        controller_(std::make_unique<OneGenSourceController>(nullptr, imageRejectionSink)) {
+        controller_(std::make_unique<OneGenSourceController>(nullptr, imageRejectionSink, planarRejectionSink)) {
     registerController(controller_.get());
     controller_->configureControl(coordinator_, devices_);
   }
@@ -125,10 +126,12 @@ private:
 } // namespace
 
 class OneGenPlugin final : public QObject, public IDeviceRuntime, public IDevicePluginSettings,
-    public IDevicePluginResourceClaimsReceiver, public IDeviceRuntimeDiscovery, public IDeviceImageDiagnostics {
+    public IDevicePluginResourceClaimsReceiver, public IDeviceRuntimeDiscovery,
+    public IDeviceImageDiagnostics, public IDevicePlanarDiagnostics {
   Q_OBJECT
   Q_PLUGIN_METADATA(IID PlaygroundDeviceRuntime_iid)
-  Q_INTERFACES(IDeviceRuntime IDevicePluginSettings IDevicePluginResourceClaimsReceiver IDeviceRuntimeDiscovery IDeviceImageDiagnostics)
+  Q_INTERFACES(IDeviceRuntime IDevicePluginSettings IDevicePluginResourceClaimsReceiver
+               IDeviceRuntimeDiscovery IDeviceImageDiagnostics IDevicePlanarDiagnostics)
 public:
   /** Producers run in the hosting process; their diagnostics go to its Qt log. */
   OneGenPlugin() { onegen::qt::installLogSink(); }
@@ -137,6 +140,8 @@ public:
   void setSettingsFile(const QString&) override {}
   /** @brief Receives the sink on the runtime owner thread before creating sessions. */
   void setImageRejectionSink(DeviceImageRejectionSink sink) noexcept override { image_rejection_sink_ = sink; }
+  /** @brief Receives the planar sink on the runtime owner thread before creating sessions. */
+  void setPlanarRejectionSink(DevicePlanarRejectionSink sink) noexcept override { planar_rejection_sink_ = sink; }
   /** Retains the host service used to claim a Siso board before its Interface opens. */
   void setResourceClaims(IDevicePluginResourceClaims* claims) override {
     claims_.store(claims, std::memory_order_release);
@@ -229,7 +234,7 @@ public:
       std::vector<onegen::DeviceInfo> devices;
       { std::lock_guard lock(mutex_); devices = discovered_devices_; }
       return std::make_unique<OneGenPluginSession>(
-          producer_coordinator, std::move(devices), image_rejection_sink_,
+          producer_coordinator, std::move(devices), image_rejection_sink_, planar_rejection_sink_,
           [this](OneGenSourceController* controller) {
             std::lock_guard lock(mutex_);
             controllers_.push_back(controller);
@@ -415,6 +420,7 @@ private:
   mutable std::mutex mutex_;
   std::atomic<IDevicePluginResourceClaims*> claims_{nullptr};
   DeviceImageRejectionSink image_rejection_sink_ = nullptr;
+  DevicePlanarRejectionSink planar_rejection_sink_ = nullptr;
   std::shared_ptr<onegen::producer::Coordinator> coordinator_;
   std::shared_ptr<onegen::producer::StartupDiscovery> startup_;
   /** @brief Discovery result retained for the session opened from this plugin instance. */

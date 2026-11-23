@@ -100,9 +100,9 @@ DeviceImageConversion deviceImageConversion(OneGenImageRejection::Conversion con
 } // namespace
 
 OneGenSourceController::OneGenSourceController(QObject* parent, DeviceImageRejectionSink imageRejectionSink,
-    std::uint32_t imageSourceIndex)
+    DevicePlanarRejectionSink planarRejectionSink, std::uint32_t imageSourceIndex)
     : AbstractSourceController(parent), image_rejection_sink_(imageRejectionSink),
-      image_source_index_(imageSourceIndex) {}
+      planar_rejection_sink_(planarRejectionSink), image_source_index_(imageSourceIndex) {}
 
 OneGenSourceController::~OneGenSourceController()
 {
@@ -337,7 +337,7 @@ OneGenSourceController* OneGenSourceController::cameraController(const std::stri
     std::lock_guard lock(mutex_);
     if (const auto found = children_.find(id); found != children_.end()) return found->second.controller.get();
     const auto index = next_source_index_++;
-    auto child = std::make_unique<OneGenSourceController>(nullptr, image_rejection_sink_, index);
+    auto child = std::make_unique<OneGenSourceController>(nullptr, image_rejection_sink_, planar_rejection_sink_, index);
     connect(child.get(), &AbstractSourceController::diagnosticAcquisitionChanged, this,
         [this, id](bool active, const QString&) { emit diagnosticAcquisitionChanged(active, QString::fromStdString(id)); },
         Qt::DirectConnection);
@@ -612,6 +612,7 @@ void OneGenSourceController::start()
   incomplete_frames_.store(0, std::memory_order_relaxed);
   partial_frames_.store(0, std::memory_order_relaxed);
   for (auto& count : image_rejection_counts_) count.store(0, std::memory_order_relaxed);
+  for (auto& count : planar_rejection_counts_) count.store(0, std::memory_order_relaxed);
   {
     std::lock_guard lock(mutex_);
     exhausted_baseline_.store(lease_sink_ ? lease_sink_->exhausted() : 0, std::memory_order_relaxed);
@@ -826,6 +827,60 @@ bool OneGenSourceController::reportImageRejection(const OneGenImageRejection& ev
   return true;
 }
 
+void OneGenSourceController::reportPlanarRejection(const OneGenPlanarRejection& evidence,
+    const onegen::Frame& source, std::uint64_t sequence, const std::optional<GraphicsFrame>& output,
+    bool single) noexcept
+{
+  using Reason = OneGenPlanarRejection::Reason;
+  DevicePlanarRejectionObservation observation;
+  switch (evidence.reason) {
+    case Reason::MissingAxis: observation.reason = DevicePlanarRejection::MissingAxis; break;
+    case Reason::DuplicateAxis: observation.reason = DevicePlanarRejection::DuplicateAxis; break;
+    case Reason::InvalidLayout: observation.reason = DevicePlanarRejection::InvalidLayout; break;
+    case Reason::StrideBelowMinimum: observation.reason = DevicePlanarRejection::StrideBelowMinimum; break;
+    case Reason::TruncatedPlane: observation.reason = DevicePlanarRejection::TruncatedPlane; break;
+    case Reason::JoinedRangeRejected: observation.reason = DevicePlanarRejection::JoinedRangeRejected; break;
+    case Reason::MissingCalibration: observation.reason = DevicePlanarRejection::MissingCalibration; break;
+    case Reason::InvalidCalibration: observation.reason = DevicePlanarRejection::InvalidCalibration; break;
+    case Reason::UnsupportedGeometry: observation.reason = DevicePlanarRejection::UnsupportedGeometry; break;
+    case Reason::UnsupportedUnit: observation.reason = DevicePlanarRejection::UnsupportedUnit; break;
+    case Reason::AuxiliaryLayoutRejected: observation.reason = DevicePlanarRejection::AuxiliaryLayoutRejected; break;
+    case Reason::RangeInvalidDimensions: observation.reason = DevicePlanarRejection::RangeInvalidDimensions; break;
+    case Reason::RangeSizeLimitExceeded: observation.reason = DevicePlanarRejection::RangeSizeLimitExceeded; break;
+    case Reason::RangeStorageRefused: observation.reason = DevicePlanarRejection::RangeStorageRefused; break;
+    case Reason::RangeStorageMisaligned: observation.reason = DevicePlanarRejection::RangeStorageMisaligned; break;
+  }
+  if (source.parts.size() > DevicePlanarRejectionObservation::noPart) return;
+  if (!single) {
+    auto& counter = planar_rejection_counts_[static_cast<std::size_t>(observation.reason)];
+    const auto count = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count != 1 && count % 100 != 0) return;
+  }
+  const auto& part = source.parts[evidence.affectedPart.value_or(evidence.anchorPart)];
+  observation.sourceIndex = forwarded_by_parent_ ? image_source_index_ : source.stream_index;
+  observation.partCount = static_cast<std::uint32_t>(source.parts.size());
+  observation.anchorPart = static_cast<std::uint32_t>(evidence.anchorPart);
+  if (evidence.affectedPart) observation.affectedPart = static_cast<std::uint32_t>(*evidence.affectedPart);
+  observation.width = part.width;
+  observation.height = part.height;
+  observation.matchedAxes = static_cast<std::uint8_t>(evidence.matchedAxes);
+  observation.duplicateAxes = static_cast<std::uint8_t>(evidence.duplicateAxes);
+  observation.namespaceMismatchAxes = static_cast<std::uint8_t>(evidence.namespaceMismatchAxes);
+  observation.shapeMismatchAxes = static_cast<std::uint8_t>(evidence.shapeMismatchAxes);
+  observation.frameRetained = output.has_value();
+  observation.imageRetained = output && output->hasImage();
+  observation.rangeRetained = output && output->hasRangeFrame();
+  observation.frameSequence = sequence;
+  observation.pixelFormat = part.data_format;
+  observation.reportedStride = evidence.reportedStride;
+  observation.effectiveStride = evidence.effectiveStride;
+  observation.minimumRowBytes = evidence.minimumRowBytes;
+  observation.readableBytes = evidence.readableBytes;
+  observation.requiredBytes = evidence.requiredBytes;
+  observation.requestedStorageBytes = evidence.requestedStorageBytes;
+  planar_rejection_sink_(observation);
+}
+
 void OneGenSourceController::deliver(const onegen::Frame& source, const std::string& sourceName, bool single)
 {
   try {
@@ -852,13 +907,16 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     }
     std::string rejectionReason;
     std::optional<OneGenImageRejection> observation;
+    std::optional<OneGenPlanarRejection> planar;
     auto payload = oneGenGraphicsFrame(source, sequence, &rejectionReason, {}, {},
-        std::move(imageStorage), image_rejection_sink_ ? &observation : nullptr);
+        std::move(imageStorage), image_rejection_sink_ ? &observation : nullptr,
+        planar_rejection_sink_ ? &planar : nullptr);
+    if (planar) reportPlanarRejection(*planar, source, sequence, payload, single);
     const auto converted = frameTrace ? std::chrono::steady_clock::now()
                                       : std::chrono::steady_clock::time_point{};
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
-      if (observation && reportImageRejection(*observation, source, sequence, source.payload.size(), false, single))
+      if (planar || (observation && reportImageRejection(*observation, source, sequence, source.payload.size(), false, single)))
         return;
       {
         const auto message = QStringLiteral(
@@ -882,7 +940,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     const bool firstConverted = converted_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
     if (!rejectionReason.empty()) {
       partial_frames_.fetch_add(1, std::memory_order_relaxed);
-      qWarning().noquote() << "[GenICam] frame retained with rejected parts: camera="
+      if (!planar) qWarning().noquote() << "[GenICam] frame retained with rejected parts: camera="
           << QString::fromStdString(sourceName) << "sequence=" << sequence
           << "frameId=" << source.frame_id << QString::fromStdString(rejectionReason);
     }
@@ -944,13 +1002,15 @@ void OneGenSourceController::deliverShared(
     }
     std::string rejectionReason;
     std::optional<OneGenImageRejection> observation;
+    std::optional<OneGenPlanarRejection> planar;
     auto payload = oneGenGraphicsFrame(
         source, sequence, &rejectionReason, bytes, shared.lease, std::move(imageStorage),
-        image_rejection_sink_ ? &observation : nullptr);
+        image_rejection_sink_ ? &observation : nullptr, planar_rejection_sink_ ? &planar : nullptr);
+    if (planar) reportPlanarRejection(*planar, source, sequence, payload, false);
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
       const auto readableBytes = bytes.empty() ? source.payload.size() : bytes.size();
-      if (observation && reportImageRejection(*observation, source, sequence, readableBytes, true, false))
+      if (planar || (observation && reportImageRejection(*observation, source, sequence, readableBytes, true, false)))
         return;
       qWarning().noquote() << QStringLiteral(
           "[GenICam] direct frame rejected: camera=%1 sequence=%2 frame=%3 reason=%4")

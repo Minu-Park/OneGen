@@ -35,6 +35,7 @@ namespace {
 
 std::mutex imageRejectionMutex;
 std::vector<DeviceImageRejectionObservation> imageRejections;
+std::vector<DevicePlanarRejectionObservation> planarRejections;
 
 class TestFrameStorage final : public IFrameStorageProvider {
 public:
@@ -49,6 +50,14 @@ void rememberImageRejection(const DeviceImageRejectionObservation& observation) 
     try {
         std::lock_guard lock(imageRejectionMutex);
         imageRejections.push_back(observation);
+    } catch (...) {}
+}
+
+void rememberPlanarRejection(const DevicePlanarRejectionObservation& observation) noexcept
+{
+    try {
+        std::lock_guard lock(imageRejectionMutex);
+        planarRejections.push_back(observation);
     } catch (...) {}
 }
 
@@ -238,6 +247,7 @@ private slots:
     void singleWithUnusableImageReportsAssemblyFailure();
     void liveSamplesRejectedDirectImagesAndResetsOnRestart();
     void firstInputDetailsFollowCategory();
+    void singleWithIncompletePlanarGroupKeepsImage();
     void unwritableModeRefusesSingleAndLive();
     void severalCamerasShareOneInterface();
     void explicitInterfaceStaysOpenUntilDisconnect();
@@ -276,7 +286,7 @@ void OneGenSourceControllerTests::initTestCase()
 {
     _coordinator = std::make_shared<onegen::producer::Coordinator>();
     QVERIFY(_coordinator->set_producer_files({ONEGEN_TEST_PRODUCER}));
-    _controller = std::make_unique<OneGenSourceController>(nullptr, &rememberImageRejection);
+    _controller = std::make_unique<OneGenSourceController>(nullptr, &rememberImageRejection, &rememberPlanarRejection);
     _controller->configureControl(_coordinator, {});
     _controller->setFrameConsumer([this](SessionFrame&&, unsigned) { _frames.fetch_add(1); });
 }
@@ -517,6 +527,32 @@ void OneGenSourceControllerTests::firstInputDetailsFollowCategory()
     const int expectedLogs = expected == "on" ? 1 : 0;
     QCOMPARE(firstInputLogs.load(), expectedLogs);
     QCOMPARE(firstConversionLogs.load(), expectedLogs);
+    disconnect();
+}
+
+void OneGenSourceControllerTests::singleWithIncompletePlanarGroupKeepsImage()
+{
+    if (qgetenv("ONEGEN_SYNTHETIC_SCENARIO") != "PlanarPartial")
+        QSKIP("This case uses the synthetic multipart image with a missing coordinate axis.");
+    connectTarget();
+    _frames.store(0);
+    const auto single = invoke([&](auto done) {
+        return _controller->requestSingle(_connectionId.toStdString(), done);
+    });
+    QCOMPARE(single.error, DeviceConnectionError::None);
+    QCOMPARE(_frames.load(), 1);
+    {
+        std::lock_guard lock(imageRejectionMutex);
+        QCOMPARE(planarRejections.size(), std::size_t{1});
+        const auto& observation = planarRejections.front();
+        QCOMPARE(observation.reason, DevicePlanarRejection::MissingAxis);
+        QCOMPARE(observation.partCount, std::uint32_t{3});
+        QCOMPARE(observation.anchorPart, std::uint32_t{1});
+        QCOMPARE(observation.matchedAxes, std::uint8_t{3});
+        QVERIFY(observation.frameRetained);
+        QVERIFY(observation.imageRetained);
+        QVERIFY(!observation.rangeRetained);
+    }
     disconnect();
 }
 
