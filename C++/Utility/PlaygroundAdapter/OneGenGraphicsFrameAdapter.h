@@ -30,7 +30,9 @@ struct OneGenImageRejection {
 struct OneGenPlanarRejection {
     enum class Reason {
         MissingAxis, DuplicateAxis, InvalidLayout, StrideBelowMinimum,
-        TruncatedPlane, JoinedRangeRejected
+        TruncatedPlane, JoinedRangeRejected, MissingCalibration, InvalidCalibration,
+        UnsupportedGeometry, UnsupportedUnit, AuxiliaryLayoutRejected,
+        RangeInvalidDimensions, RangeSizeLimitExceeded, RangeStorageRefused, RangeStorageMisaligned
     };
     Reason reason = Reason::MissingAxis;
     std::size_t anchorPart = 0;
@@ -44,6 +46,7 @@ struct OneGenPlanarRejection {
     std::size_t minimumRowBytes = 0;
     std::size_t readableBytes = 0;
     std::size_t requiredBytes = 0; ///< Zero when the extent does not fit.
+    std::size_t requestedStorageBytes = 0; ///< Destination size for a rejected range writer.
 };
 
 /** @brief Converts PFNC data and optionally describes a single 2D or planar assembly rejection. */

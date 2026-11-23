@@ -631,6 +631,15 @@ int main()
       coordinates.parts = firstPlanarGroup;
       assert(inspectPlanar()->hasRangeFrame());
       assert(!planarRejection);
+      auto missingCalibration = coordinates;
+      missingCalibration.scan3d_geometry.reset();
+      (void)oneGenGraphicsFrame(missingCalibration, 44, nullptr, {}, {}, {}, nullptr, &planarRejection);
+      assert(planarRejection && planarRejection->reason == PlanarReason::MissingCalibration);
+      assert(planarRejection->matchedAxes == 0b111U && !planarRejection->affectedPart);
+
+      assert(!oneGenGraphicsFrame(coordinates, 45, nullptr, {}, {}, refuse, nullptr, &planarRejection));
+      assert(planarRejection && planarRejection->reason == PlanarReason::RangeStorageRefused);
+      assert(planarRejection->requestedStorageBytes >= 4 * sizeof(float));
     }
     if (layout.components == 3) {
       coordinates.parts = {coordinatePart};

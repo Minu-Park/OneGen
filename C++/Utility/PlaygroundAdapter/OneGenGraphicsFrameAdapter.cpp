@@ -360,14 +360,23 @@ bool writeAuxiliary(const AuxiliaryPart& source, GraphicsRangeFrameWriter& write
   }
   return copyScalarPart<std::uint16_t>(part, values, raw, endianness);
 }
+struct RangeRejection {
+  OneGenPlanarRejection::Reason reason = OneGenPlanarRejection::Reason::JoinedRangeRejected;
+  std::size_t requestedStorageBytes = 0;
+};
+
 std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
                                      const onegen::Frame& source,
                                      const AuxiliaryPlan& auxiliary,
                                      const GraphicsImageStorage& storage,
-                                     std::string* diagnostic = nullptr)
+                                     std::string* diagnostic = nullptr,
+                                     RangeRejection* evidence = nullptr)
 {
-  const auto reject = [diagnostic](const std::string& reason) {
+  using Reason = OneGenPlanarRejection::Reason;
+  const auto reject = [diagnostic, evidence](const std::string& reason,
+      Reason failedRule = Reason::JoinedRangeRejected) {
     if (diagnostic) *diagnostic = reason;
+    if (evidence) evidence->reason = failedRule;
     return std::optional<RangeFrame>{};
   };
   const auto layout = onegen::coordinate_format(part.data_format);
@@ -387,7 +396,7 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   onegen::Frame::Scan3dGeometry pixelGridPreview;
   const bool pixelGridPreviewActive = !source.scan3d_geometry && layout.components == 1;
   if (pixelGridPreviewActive) pixelGridPreview.output_mode = "UncalibratedC";
-  if (!source.scan3d_geometry && !pixelGridPreviewActive) return reject("multi-axis coordinates require Scan3d calibration");
+  if (!source.scan3d_geometry && !pixelGridPreviewActive) return reject("multi-axis coordinates require Scan3d calibration", Reason::MissingCalibration);
   const auto& geometry = pixelGridPreviewActive ? pixelGridPreview : *source.scan3d_geometry;
   const auto mode = geometry.output_mode;
   const bool native = mode == "UncalibratedC";
@@ -395,25 +404,25 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   if (layout.components == 1) {
     if (!mode.empty() && mode != "CalibratedC" && mode != "RectifiedC"
         && mode != "DisparityC" && !native)
-      return reject("unsupported scalar Scan3dOutputMode=" + mode);
+      return reject("unsupported scalar Scan3dOutputMode=" + mode, Reason::UnsupportedGeometry);
   } else if (layout.components == 2) {
-    if (mode != "CalibratedAC" && mode != "RectifiedAC") return reject("unsupported AC Scan3dOutputMode=" + mode);
+    if (mode != "CalibratedAC" && mode != "RectifiedAC") return reject("unsupported AC Scan3dOutputMode=" + mode, Reason::UnsupportedGeometry);
   } else if (!mode.empty() && mode != "CalibratedABC_Grid" && mode != "CalibratedABC_PointCloud") {
-    return reject("unsupported ABC Scan3dOutputMode=" + mode);
+    return reject("unsupported ABC Scan3dOutputMode=" + mode, Reason::UnsupportedGeometry);
   }
   if (!native && !system.empty() && system != "Cartesian" && system != "Spherical"
       && system != "Cylindrical")
-    return reject("unsupported Scan3dCoordinateSystem=" + system);
+    return reject("unsupported Scan3dCoordinateSystem=" + system, Reason::UnsupportedGeometry);
   if ((system == "Spherical" || system == "Cylindrical") && layout.components == 1
       && mode != "RectifiedC")
-    return reject("scalar angular coordinates require RectifiedC");
+    return reject("scalar angular coordinates require RectifiedC", Reason::UnsupportedGeometry);
   if (mode == "DisparityC" && (!std::isfinite(geometry.focal_length)
       || !std::isfinite(geometry.baseline) || geometry.focal_length == 0 || geometry.baseline == 0))
-    return reject("DisparityC requires finite nonzero focal length and baseline");
+    return reject("DisparityC requires finite nonzero focal length and baseline", Reason::InvalidCalibration);
   const bool full_axes = layout.components > 1 || mode == "RectifiedC";
   for (std::size_t axis = full_axes ? 0 : 2; axis < 3; ++axis)
     if (!native && (!geometry.calibrated_axes[axis] || !std::isfinite(geometry.scale[axis])
-        || !std::isfinite(geometry.offset[axis]))) return reject("missing or invalid calibration for axis=" + std::to_string(axis));
+        || !std::isfinite(geometry.offset[axis]))) return reject("missing or invalid calibration for axis=" + std::to_string(axis), Reason::InvalidCalibration);
   const bool disparity = mode == "DisparityC";
   const bool polar = system == "Spherical" || system == "Cylindrical";
   const bool project = disparity && std::isfinite(geometry.principal_u)
@@ -444,8 +453,22 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   frameLayout.channels.confidenceRaw = auxiliary.confidence_raw;
   frameLayout.channels.confidenceValidMask = auxiliary.confidence_mask;
   GraphicsRangeFrameWriter writer(frameLayout, storage);
-  if (!writer.isValid())
-    return reject("provided storage refused the range frame or its layout is unsupported");
+  if (!writer.isValid()) {
+    if (evidence) evidence->requestedStorageBytes = writer.blockBytes();
+    switch (writer.failure()) {
+    case GraphicsRangeFrameWriterFailure::InvalidDimensions:
+      return reject("invalid range writer dimensions", Reason::RangeInvalidDimensions);
+    case GraphicsRangeFrameWriterFailure::SizeLimitExceeded:
+      return reject("range writer size limit exceeded", Reason::RangeSizeLimitExceeded);
+    case GraphicsRangeFrameWriterFailure::StorageRefused:
+      return reject("provided storage refused the range frame", Reason::RangeStorageRefused);
+    case GraphicsRangeFrameWriterFailure::MisalignedStorage:
+      return reject("range destination storage alignment is invalid", Reason::RangeStorageMisaligned);
+    case GraphicsRangeFrameWriterFailure::None:
+      break;
+    }
+    return reject("range writer did not produce a valid destination");
+  }
 
   float* const zValues = writer.zData();
   float* const xValues = writer.xData();
@@ -469,7 +492,7 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
     else if (unit == "nanometer" || unit == "nm") lengthUnit = GraphicsLengthUnit::Nanometer;
     else if (unit == "meter" || unit == "m") { lengthUnit = GraphicsLengthUnit::Millimeter; unit_scale = 1000; }
     else if (unit == "inch" || unit == "in") { lengthUnit = GraphicsLengthUnit::Millimeter; unit_scale = 25.4; }
-    else return reject("unsupported Scan3dDistanceUnit=" + geometry.distance_unit);
+    else return reject("unsupported Scan3dDistanceUnit=" + geometry.distance_unit, Reason::UnsupportedUnit);
   }
   if (layout.components > 1) {
     xyCoordinateMode = RangeFrameXYCoordinateMode::ExplicitXY;
@@ -605,7 +628,7 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   }
   for (const auto& auxiliaryPart : auxiliary.parts) {
     if (!writeAuxiliary(auxiliaryPart, writer, source.pixel_endianness))
-      return reject("auxiliary channel payload is unsupported");
+      return reject("auxiliary channel payload is unsupported", Reason::AuxiliaryLayoutRejected);
   }
 
   RangeFrame range = writer.takeFrame();
@@ -675,11 +698,12 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
     };
     using Reason = OneGenPlanarRejection::Reason;
     const auto record = [&](Reason reason, std::optional<std::size_t> affectedAxis = std::nullopt,
-                            std::size_t minimum = 0) {
+                            std::size_t minimum = 0, std::size_t requestedStorage = 0) {
       if (!rejection || *rejection) return;
       OneGenPlanarRejection evidence;
       evidence.reason = reason;
       evidence.anchorPart = base_index;
+      evidence.requestedStorageBytes = requestedStorage;
       for (std::size_t axis = 0; axis < planes.size(); ++axis)
         if (planes[axis]) evidence.matchedAxes |= 1U << axis;
       if (reason == Reason::MissingAxis || reason == Reason::DuplicateAxis) {
@@ -761,11 +785,13 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
     }
     if (!valid) continue;
     const auto auxiliary = planAuxiliary(source, a, a.width, a.height);
-    if (auto range = rangeFrame(joined, source, auxiliary, storage)) {
+    RangeRejection rangeEvidence;
+    if (auto range = rangeFrame(joined, source, auxiliary, storage, nullptr,
+                                rejection && !*rejection ? &rangeEvidence : nullptr)) {
       assemblies.push_back({std::move(*range), base_index, plane_indices,
                             auxiliary.used_indices});
     } else {
-      record(Reason::JoinedRangeRejected);
+      record(rangeEvidence.reason, std::nullopt, 0, rangeEvidence.requestedStorageBytes);
     }
   }
   return assemblies;
