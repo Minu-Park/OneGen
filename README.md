@@ -55,6 +55,8 @@ The first-frame layout reports whether Scan3d geometry is present. The log exclu
 
 The optional image rejection sink reports the conversion and failed rule for a single 2D input, including short stride, truncated data and refused destination storage. It carries the numeric format and input layout in bytes. Each rejected Single reports its reason. Live reports the first and every hundredth occurrence of each reason per source during a run. These observations are independent of the detail category. Multipart and range diagnostics continue through their existing paths.
 
+The frame adapter can also return the first failed planar A/B/C assembly to its caller. It identifies matching and duplicate axes, same-group namespace or shape mismatches, and the failing part ordinal and byte extent for stride and truncation errors. A different source or region is a separate group. A valid image or other range in the frame can still be returned alongside this evidence. The adapter collects these fields only on rejection when requested.
+
 The consumer package declares on-demand discovery. Loading its metadata does not
 load producers. Explicit session discovery starts one shared scan and waits for
 the first camera or scan completion, with cooperative caller cancellation.

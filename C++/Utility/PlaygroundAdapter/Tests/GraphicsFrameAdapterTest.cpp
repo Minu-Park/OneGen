@@ -578,11 +578,59 @@ int main()
       assert(multiplePlanar->ranges[0].descriptor.groupId == "0:0");
       assert(multiplePlanar->ranges[1].descriptor.groupId == "0:1");
       coordinates.parts.resize(firstPlanarGroup.size());
+
+      using PlanarReason = OneGenPlanarRejection::Reason;
+      std::optional<OneGenPlanarRejection> planarRejection;
+      const auto inspectPlanar = [&] {
+        return oneGenGraphicsFrame(coordinates, 43, nullptr, {}, {}, {}, nullptr, &planarRejection);
+      };
       coordinates.parts[1].source_id = 9;
-      assert(!oneGenGraphicsFrame(coordinates, 43));
+      assert(!inspectPlanar());
+      assert(planarRejection && planarRejection->reason == PlanarReason::MissingAxis);
+      assert(planarRejection->anchorPart == 0 && planarRejection->matchedAxes == 0b101U);
+      assert(planarRejection->shapeMismatchAxes == 0 && planarRejection->namespaceMismatchAxes == 0);
       coordinates.parts[1].source_id = 0;
+
+      ++coordinates.parts[1].width;
+      ++coordinates.parts[1].format_namespace;
+      assert(!inspectPlanar());
+      assert(planarRejection && planarRejection->reason == PlanarReason::MissingAxis);
+      assert(planarRejection->matchedAxes == 0b101U && planarRejection->shapeMismatchAxes == 0b010U);
+      assert(planarRejection->namespaceMismatchAxes == 0b010U);
+      coordinates.parts = firstPlanarGroup;
+
       coordinates.parts.push_back(coordinates.parts.front());
-      assert(!oneGenGraphicsFrame(coordinates, 44));
+      assert(!inspectPlanar());
+      assert(planarRejection && planarRejection->reason == PlanarReason::DuplicateAxis);
+      assert(planarRejection->duplicateAxes == 0b001U && planarRejection->affectedPart == 3);
+      coordinates.parts.pop_back();
+
+      coordinates.parts[1].stride = 2 * layout.bytes - 1;
+      assert(!inspectPlanar());
+      assert(planarRejection && planarRejection->reason == PlanarReason::StrideBelowMinimum);
+      assert(planarRejection->affectedPart == 1);
+      assert(planarRejection->minimumRowBytes == 2 * layout.bytes);
+      assert(planarRejection->requiredBytes == 4 * layout.bytes);
+      coordinates.parts = firstPlanarGroup;
+
+      coordinates.parts[1].payload.pop_back();
+      assert(!inspectPlanar());
+      assert(planarRejection && planarRejection->reason == PlanarReason::TruncatedPlane);
+      assert(planarRejection->affectedPart == 1 && planarRejection->readableBytes == planeSize - 1);
+      assert(planarRejection->requiredBytes == planeSize);
+
+      onegen::Frame::Part survivingImage;
+      survivingImage.width = 2; survivingImage.height = 2; survivingImage.stride = 2;
+      survivingImage.data_type = 1; survivingImage.data_format = 0x01080001;
+      survivingImage.payload = {1, 2, 3, 4};
+      coordinates.parts.push_back(survivingImage);
+      const auto partial = inspectPlanar();
+      assert(partial && partial->hasImage() && !partial->hasRangeFrame());
+      assert(planarRejection && planarRejection->reason == PlanarReason::TruncatedPlane);
+
+      coordinates.parts = firstPlanarGroup;
+      assert(inspectPlanar()->hasRangeFrame());
+      assert(!planarRejection);
     }
     if (layout.components == 3) {
       coordinates.parts = {coordinatePart};

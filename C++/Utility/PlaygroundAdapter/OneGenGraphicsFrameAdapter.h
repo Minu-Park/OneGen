@@ -7,6 +7,7 @@
 #include "OneGenTypes.h"
 
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <span>
@@ -22,11 +23,35 @@ struct OneGenImageRejection {
     std::uint64_t requiredBytes;
 };
 
-/** @brief Converts PFNC data and supplies optional typed evidence for a rejected single 2D image. */
+/** @brief First failed assembly for a multipart A/B/C group.
+ * Axis masks use bits 0, 1 and 2 for A, B and C. Mismatches describe same-source,
+ * same-region candidates excluded by metadata checks.
+ */
+struct OneGenPlanarRejection {
+    enum class Reason {
+        MissingAxis, DuplicateAxis, InvalidLayout, StrideBelowMinimum,
+        TruncatedPlane, JoinedRangeRejected
+    };
+    Reason reason = Reason::MissingAxis;
+    std::size_t anchorPart = 0;
+    std::optional<std::size_t> affectedPart;
+    unsigned matchedAxes = 0;
+    unsigned duplicateAxes = 0;
+    unsigned namespaceMismatchAxes = 0;
+    unsigned shapeMismatchAxes = 0;
+    std::size_t reportedStride = 0;
+    std::size_t effectiveStride = 0;
+    std::size_t minimumRowBytes = 0;
+    std::size_t readableBytes = 0;
+    std::size_t requiredBytes = 0; ///< Zero when the extent does not fit.
+};
+
+/** @brief Converts PFNC data and optionally describes a single 2D or planar assembly rejection. */
 [[nodiscard]] std::optional<GraphicsFrame> oneGenGraphicsFrame(
     const onegen::Frame& source, std::uint64_t sequence,
     std::string* rejection_reason = nullptr,
     std::span<const std::uint8_t> image_payload = {},
     std::shared_ptr<const void> payload_owner = {},
     GraphicsImageStorage image_storage = {},
-    std::optional<OneGenImageRejection>* image_rejection = nullptr);
+    std::optional<OneGenImageRejection>* image_rejection = nullptr,
+    std::optional<OneGenPlanarRejection>* planar_rejection = nullptr);

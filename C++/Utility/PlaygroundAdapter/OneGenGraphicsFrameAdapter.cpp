@@ -643,7 +643,7 @@ struct PlanarRangeAssembly
 };
 
 std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
-                                                   const GraphicsImageStorage& storage)
+    const GraphicsImageStorage& storage, std::optional<OneGenPlanarRejection>* rejection)
 {
   std::vector<PlanarRangeAssembly> assemblies;
   for (std::size_t base_index = 0; base_index < source.parts.size(); ++base_index) {
@@ -661,24 +661,81 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
     }
     std::array<const onegen::Frame::Part*, 3> planes{};
     std::array<std::size_t, 3> plane_indices{};
+    const auto axisFor = [&](const onegen::Frame::Part& part) {
+      if (part.data_format == a.data_format) return 0;
+      if (part.data_format == formats[0]) return 1;
+      if (part.data_format == formats[1]) return 2;
+      return -1;
+    };
+    const auto sameGroup = [&](const onegen::Frame::Part& part) {
+      return is3dPart(part.data_type) && part.source_id == a.source_id && part.region_id == a.region_id;
+    };
+    const auto sameShape = [&](const onegen::Frame::Part& part) {
+      return part.width == a.width && part.height == a.height;
+    };
+    using Reason = OneGenPlanarRejection::Reason;
+    const auto record = [&](Reason reason, std::optional<std::size_t> affectedAxis = std::nullopt,
+                            std::size_t minimum = 0) {
+      if (!rejection || *rejection) return;
+      OneGenPlanarRejection evidence;
+      evidence.reason = reason;
+      evidence.anchorPart = base_index;
+      for (std::size_t axis = 0; axis < planes.size(); ++axis)
+        if (planes[axis]) evidence.matchedAxes |= 1U << axis;
+      if (reason == Reason::MissingAxis || reason == Reason::DuplicateAxis) {
+        unsigned seenAxes = 0;
+        for (std::size_t i = 0; i < source.parts.size(); ++i) {
+          const auto& part = source.parts[i];
+          if (!sameGroup(part)) continue;
+          const auto axis = axisFor(part);
+          if (axis < 0) continue;
+          const unsigned bit = 1U << axis;
+          const bool namespaceMatches = part.format_namespace == a.format_namespace;
+          const bool shapeMatches = sameShape(part);
+          if (!namespaceMatches) evidence.namespaceMismatchAxes |= bit;
+          if (!shapeMatches) evidence.shapeMismatchAxes |= bit;
+          if (!namespaceMatches || !shapeMatches) continue;
+          if (seenAxes & bit) {
+            if (!evidence.affectedPart) evidence.affectedPart = i;
+            evidence.duplicateAxes |= bit;
+          }
+          seenAxes |= bit;
+        }
+      }
+      if (affectedAxis) {
+        const auto& plane = *planes[*affectedAxis];
+        evidence.affectedPart = plane_indices[*affectedAxis];
+        evidence.reportedStride = plane.stride;
+        evidence.effectiveStride = plane.stride ? plane.stride : minimum;
+        evidence.minimumRowBytes = minimum;
+        evidence.readableBytes = plane.payload.size();
+        const auto requiredStride = std::max(evidence.effectiveStride, minimum);
+        if (plane.height <= (std::numeric_limits<std::size_t>::max)() / requiredStride)
+          evidence.requiredBytes = requiredStride * plane.height;
+      }
+      *rejection = evidence;
+    };
     bool ambiguous = false;
     for (std::size_t part_index = 0; part_index < source.parts.size(); ++part_index) {
       const auto& part = source.parts[part_index];
-      if (!is3dPart(part.data_type) || part.source_id != a.source_id
-          || part.region_id != a.region_id || part.format_namespace != a.format_namespace
-          || part.width != a.width || part.height != a.height) continue;
-      const auto axis = part.data_format == a.data_format ? 0
-          : (part.data_format == formats[0] ? 1 : (part.data_format == formats[1] ? 2 : -1));
+      if (!sameGroup(part) || part.format_namespace != a.format_namespace || !sameShape(part)) continue;
+      const auto axis = axisFor(part);
       if (axis < 0) continue;
       if (planes[axis]) ambiguous = true;
       planes[axis] = &part;
       plane_indices[axis] = part_index;
     }
-    if (ambiguous || !planes[0] || !planes[1] || !planes[2]) continue;
+    if (ambiguous || !planes[0] || !planes[1] || !planes[2]) {
+      record(ambiguous ? Reason::DuplicateAxis : Reason::MissingAxis);
+      continue;
+    }
     const auto layout = onegen::coordinate_format(formats[2]);
     const auto row_bytes = onegen::coordinate_row_bytes(
         {1, layout.sample_bits, false, layout.floating, layout.packed}, a.width);
-    if (!row_bytes || !a.height) continue;
+    if (!row_bytes || !a.height) {
+      record(Reason::InvalidLayout);
+      continue;
+    }
     onegen::Frame::Part joined;
     joined.width = a.width;
     joined.height = a.height;
@@ -689,9 +746,11 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
     joined.source_id = a.source_id;
     joined.region_id = a.region_id;
     bool valid = true;
-    for (const auto* plane : planes) {
+    for (std::size_t axis = 0; axis < planes.size(); ++axis) {
+      const auto* plane = planes[axis];
       const auto stride = plane->stride ? plane->stride : row_bytes;
       if (stride < row_bytes || plane->height > plane->payload.size() / stride) {
+        record(stride < row_bytes ? Reason::StrideBelowMinimum : Reason::TruncatedPlane, axis, row_bytes);
         valid = false;
         break;
       }
@@ -705,6 +764,8 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
     if (auto range = rangeFrame(joined, source, auxiliary, storage)) {
       assemblies.push_back({std::move(*range), base_index, plane_indices,
                             auxiliary.used_indices});
+    } else {
+      record(Reason::JoinedRangeRejected);
     }
   }
   return assemblies;
@@ -716,10 +777,12 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     const onegen::Frame& source, const std::uint64_t sequence,
     std::string* rejection_reason, std::span<const std::uint8_t> image_payload,
     std::shared_ptr<const void> payload_owner, GraphicsImageStorage image_storage,
-    std::optional<OneGenImageRejection>* image_rejection)
+    std::optional<OneGenImageRejection>* image_rejection,
+    std::optional<OneGenPlanarRejection>* planar_rejection)
 {
   if (rejection_reason) rejection_reason->clear();
   if (image_rejection) image_rejection->reset();
+  if (planar_rejection) planar_rejection->reset();
   const auto imageBytes = image_payload.empty()
       ? std::span<const std::uint8_t>(source.payload) : image_payload;
   const auto reject = [rejection_reason](const char* reason) {
@@ -743,7 +806,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     std::vector<const onegen::Frame::Part*> selected_parts;
     std::vector<bool> consumed_parts(source.parts.size(), false);
     std::vector<bool> confidence_used(source.parts.size(), false);
-    for (auto& assembly : planarPartsRanges(source, image_storage)) {
+    for (auto& assembly : planarPartsRanges(source, image_storage, planar_rejection)) {
       const auto& selected = source.parts[assembly.selected_index];
       const auto group = std::to_string(selected.source_id) + ":"
           + std::to_string(selected.region_id);
