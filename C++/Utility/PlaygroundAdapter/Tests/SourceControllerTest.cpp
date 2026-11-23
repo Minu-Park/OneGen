@@ -36,6 +36,14 @@ namespace {
 std::mutex imageRejectionMutex;
 std::vector<DeviceImageRejectionObservation> imageRejections;
 
+class TestFrameStorage final : public IFrameStorageProvider {
+public:
+    std::shared_ptr<std::uint8_t> acquire(std::size_t bytes) override
+    {
+        return {new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>{}};
+    }
+};
+
 void rememberImageRejection(const DeviceImageRejectionObservation& observation) noexcept
 {
     try {
@@ -228,6 +236,7 @@ private slots:
     void initTestCase();
     void singleAndLiveFollowTheSelectedAction();
     void singleWithUnusableImageReportsAssemblyFailure();
+    void liveSamplesRejectedDirectImagesAndResetsOnRestart();
     void firstInputDetailsFollowCategory();
     void unwritableModeRefusesSingleAndLive();
     void severalCamerasShareOneInterface();
@@ -444,6 +453,49 @@ void OneGenSourceControllerTests::singleWithUnusableImageReportsAssemblyFailure(
         QVERIFY(imageRejections.front().readableBytes > 0);
     }
     disconnect();
+}
+
+void OneGenSourceControllerTests::liveSamplesRejectedDirectImagesAndResetsOnRestart()
+{
+    if (!qEnvironmentVariableIsSet("ONEGEN_TEST_IMAGE_REJECTION"))
+        QSKIP("This case uses the synthetic big-endian packed image.");
+    _controller->setFrameStorageProvider(std::make_shared<TestFrameStorage>());
+    connectTarget();
+
+    std::uint64_t firstSequence = 0;
+    for (const std::size_t minimumSamples : {3U, 1U}) {
+        QCOMPARE(invoke([&](auto done) {
+            return _controller->requestLiveStart(_connectionId.toStdString(), done);
+        }).error, DeviceConnectionError::None);
+        const auto sampled = waitFor([minimumSamples] {
+            std::lock_guard lock(imageRejectionMutex);
+            return imageRejections.size() >= minimumSamples;
+        }, 10000);
+        QCOMPARE(invoke([&](auto done) {
+            return _controller->requestLiveStop(_connectionId.toStdString(), done);
+        }).error, DeviceConnectionError::None);
+        QVERIFY(sampled);
+
+        std::vector<DeviceImageRejectionObservation> observations;
+        {
+            std::lock_guard lock(imageRejectionMutex);
+            observations.swap(imageRejections);
+        }
+        const auto stats = _controller->runtimeDiagnostics(observations.front().sourceIndex);
+        QCOMPARE(stats.delivered, std::uint64_t{0});
+        QCOMPARE(_frames.load(), 0);
+        QCOMPARE(observations.size(), std::size_t{1} + static_cast<std::size_t>(stats.failed / 100));
+        for (std::size_t index = 0; index < observations.size(); ++index) {
+            const auto& observation = observations[index];
+            QCOMPARE(observation.reason, DeviceImageRejection::UnsupportedConversion);
+            QVERIFY(observation.directInput);
+            const auto offset = index == 0 ? 0 : index * 100 - 1;
+            QCOMPARE(observation.frameSequence, firstSequence + offset);
+        }
+        firstSequence += stats.failed;
+    }
+    disconnect();
+    _controller->setFrameStorageProvider({});
 }
 
 void OneGenSourceControllerTests::firstInputDetailsFollowCategory()
