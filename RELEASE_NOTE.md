@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Gate first-frame input metadata and conversion details through the consumer-controlled acquisition diagnostic category.
+- Gate first-frame input metadata and conversion details through the consumer-controlled acquisition diagnostic category. Limit the output to layout fields and part ordinals, with Scan3d geometry reported as present or absent.
 
 - Declare device panel presentation in package session metadata.
 
