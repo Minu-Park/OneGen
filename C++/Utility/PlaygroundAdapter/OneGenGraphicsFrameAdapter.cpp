@@ -705,13 +705,7 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
     if (!family) continue;
     const auto& formats = *family;
     const bool primaryAxis = a.data_format == formats[0];
-    if (!primaryAxis) {
-      if (!rejection || *rejection) continue;
-      // Let a valid A anchor keep its existing assembly path, even when B or C arrives first.
-      if (std::any_of(source.parts.begin(), source.parts.end(), [&](const auto& part) {
-        return part.data_format == formats[0] && samePlanarSource(a, part) && samePlanarLayout(a, part);
-      })) continue;
-    }
+    if (!primaryAxis && (!rejection || *rejection)) continue;
     std::array<const onegen::Frame::Part*, 3> planes{};
     std::array<std::size_t, 3> plane_indices{};
     const auto axisFor = [&](const onegen::Frame::Part& part) {
@@ -779,6 +773,8 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
       planes[axis] = &part;
       plane_indices[axis] = part_index;
     }
+    // Without an A anchor, only matching B and C imply a planar group.
+    if (!primaryAxis && (planes[0] || !planes[1] || !planes[2])) continue;
     if (ambiguous || !planes[0] || !planes[1] || !planes[2]) {
       record(!planes[0] || !ambiguous ? Reason::MissingAxis : Reason::DuplicateAxis);
       continue;

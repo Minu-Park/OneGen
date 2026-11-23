@@ -330,14 +330,18 @@ int main()
   c16.data_format = 0x011000b8;
   c16.payload = {6, 0, 0, 0};
   c16Frame.parts.push_back(c16);
-  const auto c16Scene = oneGenGraphicsFrame(c16Frame, 15);
-  assert(c16Scene && c16Scene->hasRangeFrame());
+  std::optional<OneGenPlanarRejection> standalonePlanarRejection;
+  const auto c16Scene = oneGenGraphicsFrame(
+      c16Frame, 15, &rejectionReason, {}, {}, {}, nullptr, &standalonePlanarRejection);
+  assert(c16Scene && c16Scene->hasRangeFrame()
+      && rejectionReason.empty() && !standalonePlanarRejection);
   assert(c16Scene->ranges.front().payload.xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid);
   for (const auto type : {6U, 7U, 8U}) {
     auto planarC = c16Frame;
     planarC.parts.front().data_type = type;
-    const auto plane = oneGenGraphicsFrame(planarC, 15, &rejectionReason);
-    assert(plane && plane->hasRangeFrame() && rejectionReason.empty());
+    const auto plane = oneGenGraphicsFrame(
+        planarC, 15, &rejectionReason, {}, {}, {}, nullptr, &standalonePlanarRejection);
+    assert(plane && plane->hasRangeFrame() && rejectionReason.empty() && !standalonePlanarRejection);
   }
   RecordingStorage c16Storage;
   const auto c16Stored = oneGenGraphicsFrame(c16Frame, 15, nullptr, {}, {}, c16Storage.function());
@@ -355,7 +359,9 @@ int main()
   assert(c16BigEndianScene->ranges.front().payload.rangeRaw[0] == 6U);
   auto missingCalibration = c16Frame;
   missingCalibration.scan3d_geometry->calibrated_axes[2] = false;
-  assert(!oneGenGraphicsFrame(missingCalibration, 15, &rejectionReason));
+  assert(!oneGenGraphicsFrame(
+      missingCalibration, 15, &rejectionReason, {}, {}, {}, nullptr, &standalonePlanarRejection));
+  assert(!standalonePlanarRejection);
   assert(rejectionReason.find("part=0") != std::string::npos
       && rejectionReason.find("PFNC=0x11000b8") != std::string::npos
       && rejectionReason.find("axis=2") != std::string::npos);
