@@ -546,7 +546,7 @@ void OneGenSourceController::configureFrameStorage(
   // The sink owns no memory: each reservation takes its slot from the Host provider. Its slot
   // count only bounds how many frames may be in flight.
   if (!lease.attach_lease_sink(kMaximumInFlightFrames, *payload, error,
-          frameStorageFunction(provider))) {
+          [provider](std::size_t bytes) { return provider->acquire(bytes); })) {
     throw std::runtime_error(error);
   }
   lease.set_shared_frame_callback(
@@ -900,17 +900,17 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     const bool frameTrace = onegen::frame_trace_enabled();
     const auto conversionStarted = frameTrace ? std::chrono::steady_clock::now()
                                               : std::chrono::steady_clock::time_point{};
-    GraphicsImageStorage imageStorage;
+    GraphicsFrameContext imageStorage = GraphicsFrameContext::local();
     {
       std::lock_guard lock(mutex_);
-      imageStorage = frameStorageFunction(frame_storage_);
+      imageStorage = frameStorageContext(frame_storage_);
     }
     std::string rejectionReason;
     std::optional<OneGenImageRejection> observation;
     std::optional<OneGenPlanarRejection> planar;
     auto payload = oneGenGraphicsFrame(source, sequence, &rejectionReason, {}, {},
         std::move(imageStorage), image_rejection_sink_ ? &observation : nullptr,
-        planar_rejection_sink_ ? &planar : nullptr);
+        planar_rejection_sink_ ? &planar : nullptr, sourceName);
     if (planar) reportPlanarRejection(*planar, source, sequence, payload, single);
     const auto converted = frameTrace ? std::chrono::steady_clock::now()
                                       : std::chrono::steady_clock::time_point{};
@@ -944,7 +944,6 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
           << QString::fromStdString(sourceName) << "sequence=" << sequence
           << "frameId=" << source.frame_id << QString::fromStdString(rejectionReason);
     }
-    payload->metadata.sourceName = sourceName;
     SessionFrame frame;
     frame.payload = std::move(*payload);
     frame.frameSeq = sequence;
@@ -959,7 +958,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
       return;
     }
     if (firstConverted) qCDebug(onegenAcquisitionDetailLog).noquote() << QStringLiteral("[GenICam] first frame converted: images=%1 ranges=%2 pointClouds=%3; forwarding to presentation")
-        .arg(frame.payload.images.size()).arg(frame.payload.ranges.size()).arg(frame.payload.pointClouds.size());
+        .arg(frame.payload.images().size()).arg(frame.payload.ranges().size()).arg(frame.payload.pointClouds().size());
     const auto consumerStarted = frameTrace ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
     consumer(std::move(frame), source.stream_index);
@@ -995,17 +994,17 @@ void OneGenSourceController::deliverShared(
     const auto sequence = sequence_.fetch_add(1, std::memory_order_relaxed);
     const bool firstFrame = received_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
     if (firstFrame) logFirstAcquisitionInput(source, bytes.size(), true);
-    GraphicsImageStorage imageStorage;
+    GraphicsFrameContext imageStorage = GraphicsFrameContext::local();
     {
       std::lock_guard lock(mutex_);
-      imageStorage = frameStorageFunction(frame_storage_);
+      imageStorage = frameStorageContext(frame_storage_);
     }
     std::string rejectionReason;
     std::optional<OneGenImageRejection> observation;
     std::optional<OneGenPlanarRejection> planar;
     auto payload = oneGenGraphicsFrame(
         source, sequence, &rejectionReason, bytes, shared.lease, std::move(imageStorage),
-        image_rejection_sink_ ? &observation : nullptr, planar_rejection_sink_ ? &planar : nullptr);
+        image_rejection_sink_ ? &observation : nullptr, planar_rejection_sink_ ? &planar : nullptr, sourceName);
     if (planar) reportPlanarRejection(*planar, source, sequence, payload, false);
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
@@ -1027,7 +1026,6 @@ void OneGenSourceController::deliverShared(
           << QString::fromStdString(sourceName) << "sequence=" << sequence
           << "frameId=" << source.frame_id << QString::fromStdString(rejectionReason);
     }
-    payload->metadata.sourceName = sourceName;
     SessionFrame frame;
     frame.payload = std::move(*payload);
     frame.frameSeq = sequence;

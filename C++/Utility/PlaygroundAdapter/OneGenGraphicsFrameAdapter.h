@@ -55,6 +55,7 @@ struct OneGenPlanarRejection {
     std::string* rejection_reason = nullptr,
     std::span<const std::uint8_t> image_payload = {},
     std::shared_ptr<const void> payload_owner = {},
-    GraphicsImageStorage image_storage = {},
+    GraphicsFrameContext image_storage = GraphicsFrameContext::local(),
     std::optional<OneGenImageRejection>* image_rejection = nullptr,
-    std::optional<OneGenPlanarRejection>* planar_rejection = nullptr);
+    std::optional<OneGenPlanarRejection>* planar_rejection = nullptr,
+    const std::string& source_name = {});

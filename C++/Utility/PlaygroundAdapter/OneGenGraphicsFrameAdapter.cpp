@@ -368,7 +368,7 @@ struct RangeRejection {
 std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
                                      const onegen::Frame& source,
                                      const AuxiliaryPlan& auxiliary,
-                                     const GraphicsImageStorage& storage,
+                                     GraphicsFrameBuilder& builder,
                                      std::string* diagnostic = nullptr,
                                      RangeRejection* evidence = nullptr)
 {
@@ -452,7 +452,7 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
   frameLayout.channels.confidence = auxiliary.confidence;
   frameLayout.channels.confidenceRaw = auxiliary.confidence_raw;
   frameLayout.channels.confidenceValidMask = auxiliary.confidence_mask;
-  GraphicsRangeFrameWriter writer(frameLayout, storage);
+  GraphicsRangeFrameWriter writer(builder, frameLayout);
   if (!writer.isValid()) {
     if (evidence) evidence->requestedStorageBytes = writer.blockBytes();
     switch (writer.failure()) {
@@ -695,7 +695,7 @@ bool samePlanarLayout(const onegen::Frame::Part& first, const onegen::Frame::Par
 }
 
 std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
-    const GraphicsImageStorage& storage, std::optional<OneGenPlanarRejection>* rejection)
+    GraphicsFrameBuilder& builder, std::optional<OneGenPlanarRejection>* rejection)
 {
   std::vector<PlanarRangeAssembly> assemblies;
   for (std::size_t base_index = 0; base_index < source.parts.size(); ++base_index) {
@@ -812,7 +812,7 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
     if (!valid) continue;
     const auto auxiliary = planAuxiliary(source, a, a.width, a.height);
     RangeRejection rangeEvidence;
-    if (auto range = rangeFrame(joined, source, auxiliary, storage, nullptr,
+    if (auto range = rangeFrame(joined, source, auxiliary, builder, nullptr,
                                 rejection && !*rejection ? &rangeEvidence : nullptr)) {
       assemblies.push_back({std::move(*range), base_index, plane_indices,
                             auxiliary.used_indices});
@@ -825,12 +825,12 @@ std::vector<PlanarRangeAssembly> planarPartsRanges(const onegen::Frame& source,
 
 } // namespace
 
-std::optional<GraphicsFrame> oneGenGraphicsFrame(
-    const onegen::Frame& source, const std::uint64_t sequence,
+static std::optional<GraphicsFrameContent> buildOneGenContent(
+    GraphicsFrameBuilder& builder, const onegen::Frame& source, const std::uint64_t sequence,
     std::string* rejection_reason, std::span<const std::uint8_t> image_payload,
-    std::shared_ptr<const void> payload_owner, GraphicsImageStorage image_storage,
+    std::shared_ptr<const void> payload_owner, GraphicsFrameContext image_storage,
     std::optional<OneGenImageRejection>* image_rejection,
-    std::optional<OneGenPlanarRejection>* planar_rejection)
+    std::optional<OneGenPlanarRejection>* planar_rejection, const std::string& source_name)
 {
   if (rejection_reason) rejection_reason->clear();
   if (image_rejection) image_rejection->reset();
@@ -839,10 +839,10 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       ? std::span<const std::uint8_t>(source.payload) : image_payload;
   const auto reject = [rejection_reason](const char* reason) {
     if (rejection_reason) *rejection_reason = reason;
-    return std::optional<GraphicsFrame>{};
+    return std::optional<GraphicsFrameContent>{};
   };
   if (!source.parts.empty()) {
-    GraphicsFrame result;
+    GraphicsFrameContent result;
     std::string droppedParts;
     bool representedByPlanarEvidence = false;
     const auto dropped = [&](std::size_t index, const std::string& reason) {
@@ -870,7 +870,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     std::vector<const onegen::Frame::Part*> selected_parts;
     std::vector<bool> consumed_parts(source.parts.size(), false);
     std::vector<bool> confidence_used(source.parts.size(), false);
-    for (auto& assembly : planarPartsRanges(source, image_storage, planar_rejection)) {
+    for (auto& assembly : planarPartsRanges(source, builder, planar_rejection)) {
       const auto& selected = source.parts[assembly.selected_index];
       const auto group = std::to_string(selected.source_id) + ":"
           + std::to_string(selected.region_id);
@@ -886,7 +886,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       if (!consumed_parts[index]) {
         std::string rangeDiagnostic;
         const auto auxiliary = planAuxiliary(source, part, part.width, part.height);
-        if (auto range = rangeFrame(part, source, auxiliary, image_storage, &rangeDiagnostic)) {
+        if (auto range = rangeFrame(part, source, auxiliary, builder, &rangeDiagnostic)) {
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
           result.addRange("range." + group + "." + std::to_string(index),
                           std::move(*range), "Range", group);
@@ -899,8 +899,8 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       }
       if (part.data_type == kPart2dImage && !onegen::coordinate_format(part.data_format).components) {
         std::string imageDiagnostic;
-        auto imageFrame = oneGenGraphicsFrame(partFrame(part, source), sequence, &imageDiagnostic,
-            {}, {}, image_storage);
+        auto imageFrame = buildOneGenContent(builder, partFrame(part, source), sequence, &imageDiagnostic,
+            {}, {}, image_storage, nullptr, nullptr, {});
         if (imageFrame && !imageFrame->images.empty()) {
           auto image = std::move(imageFrame->images.front());
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
@@ -934,8 +934,8 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       for (std::size_t index = 0; index < source.parts.size(); ++index) {
         const auto& part = source.parts[index];
         if (part.data_format != kConfidence32f) continue;
-        auto preview = oneGenGraphicsFrame(
-            partFrame(part, source), sequence, rejection_reason, {}, {}, image_storage);
+        auto preview = buildOneGenContent(
+            builder, partFrame(part, source), sequence, rejection_reason, {}, {}, image_storage, nullptr, nullptr, {});
         if (preview && !preview->ranges.empty()) {
           auto range = std::move(preview->ranges.front());
           const auto group = std::to_string(part.source_id) + ":"
@@ -951,6 +951,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     for (std::size_t index = 0; index < source.parts.size(); ++index)
       if (source.parts[index].data_type == kPartConfidence && !confidence_used[index])
         dropped(index, "confidence part has no matching range or a supported auxiliary layout");
+    result.metadata.sourceName = source_name;
     result.metadata.frameIndex = sequence;
     if (source.frame_id) result.metadata.frameId = std::to_string(source.frame_id);
     if (rejection_reason) *rejection_reason = droppedParts;
@@ -996,7 +997,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     part.stride = source.stride ? source.stride : row_bytes;
     part.data_format = source.pixel_format;
     part.data_type = kPart3dImage;
-    GraphicsFrame frame;
+    GraphicsFrameContent frame;
     if (source.pixel_format == kConfidence32f) {
       // Reuse the native scalar preview contract; confidence is not depth.
       if (source.pixel_endianness > 2
@@ -1007,7 +1008,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       layout.width = static_cast<int>(part.width);
       layout.height = static_cast<int>(part.height);
       layout.channels.validMask = true;
-      GraphicsRangeFrameWriter writer(layout, image_storage);
+      GraphicsRangeFrameWriter writer(builder, layout);
       if (!writer.isValid()
           || !copyScalarPart<float>(part, writer.zData(), nullptr, source.pixel_endianness))
         return reject("invalid floating confidence layout or byte order");
@@ -1024,13 +1025,14 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       frame.addRange("confidence", std::move(preview), "Confidence");
     } else {
       std::string diagnostic;
-      if (auto range = rangeFrame(part, source, {}, image_storage, &diagnostic)) frame.addRange("range", std::move(*range), "Range");
+      if (auto range = rangeFrame(part, source, {}, builder, &diagnostic)) frame.addRange("range", std::move(*range), "Range");
       else return reject(diagnostic.c_str());
     }
+    frame.metadata.sourceName = source_name;
     frame.metadata.frameIndex = sequence;
     if (source.frame_id) frame.metadata.frameId = std::to_string(source.frame_id);
-    return frame.isValid() ? std::optional<GraphicsFrame>(std::move(frame))
-                           : reject("invalid coordinate layout or missing Scan3d calibration");
+    if (!frame.isValid()) return reject("invalid coordinate layout or missing Scan3d calibration");
+    return frame;
   }
   const auto format = source.payload_type == kPayloadJpeg
       ? GraphicsImagePixelFormat::Jpeg : pixelFormat(source.pixel_format);
@@ -1056,16 +1058,17 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
 
   const bool byteSwap = source.pixel_endianness == 2 && !isByteOrdered(format);
   Conversion conversion = Conversion::Copy;
-  std::shared_ptr<const std::uint8_t> storage;
+  GraphicsSpan<std::uint8_t> storage;
   if (payload_owner && !byteSwap) {
     conversion = Conversion::Borrow;
-    storage = std::shared_ptr<const std::uint8_t>(
-        imageBytes.data(), [owner = std::move(payload_owner)](const std::uint8_t*) {});
+    auto borrowed = builder.borrow(std::move(payload_owner), imageBytes.data(), imageBytes.size(), GraphicsBorrow::Immutable);
+    if (!borrowed) return reject("image storage refused");
+    storage = std::move(borrowed).value();
   } else if (format == GraphicsImagePixelFormat::Jpeg) {
     conversion = Conversion::JpegCopy;
-    auto owned = std::make_shared<std::vector<std::uint8_t>>(
-        imageBytes.begin(), imageBytes.end());
-    storage = std::shared_ptr<const std::uint8_t>(owned, owned->data());
+    auto copied = builder.copy(imageBytes.data(), imageBytes.size());
+    if (!copied) return reject("image storage refused");
+    storage = std::move(copied).value();
   } else {
     GraphicsImageWriterSource writerSource;
     writerSource.data = imageBytes.data();
@@ -1094,7 +1097,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       writerSource.operation = GraphicsImageWriterOperation::Copy;
     }
     GraphicsImageFailure failure = GraphicsImageFailure::None;
-    auto written = writeGraphicsImageWithFailure(writerSource, image_storage, image_rejection ? &failure : nullptr);
+    auto written = writeGraphicsImageWithFailure(builder, writerSource, image_rejection ? &failure : nullptr);
     if (!written.isValid()) {
       if (failure != GraphicsImageFailure::None) {
         const auto writerMinimum = GraphicsImageValidation::minimumRowBytes(
@@ -1104,11 +1107,10 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       }
       return reject("invalid image layout or insufficient payload bytes");
     }
-    storage = std::move(written.storage);
+    storage = std::move(written.pixels);
   }
   GraphicsImage image;
-  image.storage = storage;
-  image.size = imageBytes.size();
+  image.pixels = std::move(storage);
   image.width = static_cast<int>(source.width);
   image.height = static_cast<int>(source.height);
   image.stride = static_cast<int>(stride);
@@ -1125,7 +1127,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
   if (!image.isValid()) {
     if (image_rejection) {
       const auto failure = GraphicsImageValidation::layoutFailure(
-          image.pixelFormat, image.width, image.height, image.stride, image.size);
+          image.pixelFormat, image.width, image.height, image.stride, image.pixels.size());
       if (failure != GraphicsImageFailure::None) {
         const auto rowBytes = format == GraphicsImagePixelFormat::Jpeg ? 0 : minimum;
         const auto effectiveStride = format == GraphicsImagePixelFormat::Jpeg ? 0 : stride;
@@ -1136,9 +1138,29 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     return reject("invalid image layout or insufficient payload bytes");
   }
 
-  GraphicsFrame frame;
+  GraphicsFrameContent frame;
   frame.addImage("image", std::move(image), "Image");
+  frame.metadata.sourceName = source_name;
   frame.metadata.frameIndex = sequence;
   if (source.frame_id) frame.metadata.frameId = std::to_string(source.frame_id);
   return frame;
+}
+
+std::optional<GraphicsFrame> oneGenGraphicsFrame(
+    const onegen::Frame& source, std::uint64_t sequence, std::string* rejection_reason,
+    std::span<const std::uint8_t> image_payload, std::shared_ptr<const void> payload_owner,
+    GraphicsFrameContext image_storage, std::optional<OneGenImageRejection>* image_rejection,
+    std::optional<OneGenPlanarRejection>* planar_rejection, const std::string& source_name)
+{
+  GraphicsFrameBuilder builder(image_storage);
+  auto content = buildOneGenContent(builder, source, sequence, rejection_reason, image_payload,
+      std::move(payload_owner), image_storage, image_rejection, planar_rejection, source_name);
+  if (!content) return std::nullopt;
+  builder.content() = std::move(*content);
+  auto published = std::move(builder).publish();
+  if (!published) {
+    if (rejection_reason) *rejection_reason = "frame publication failed";
+    return std::nullopt;
+  }
+  return std::move(published).value();
 }
