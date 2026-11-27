@@ -88,6 +88,9 @@ public:
   void set_shared_frame_callback(SharedFrameFn cb);
   /** @brief Bytes one frame slot must hold for the current stream configuration. */
   std::uint64_t payload_size();
+  /** @brief Attaches the next live()'s lease sink bound over a consumer destination provider. */
+  bool attach_lease_sink(std::uint32_t slot_count, std::uint64_t slot_bytes, std::string& error,
+                         DirectLeaseSink::DestinationProvider provider);
   /** @brief Attaches the next live()'s lease sink bound over consumer-provided frame storage. */
   bool attach_lease_sink(std::uint32_t slot_count, std::uint64_t slot_bytes, std::string& error,
                          DirectLeaseSink::FrameStorage storage);

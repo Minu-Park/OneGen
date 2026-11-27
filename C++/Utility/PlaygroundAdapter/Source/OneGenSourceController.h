@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DeviceRuntime/Contract/FrameStorage.h"
+#include "DeviceRuntime/Contract/FrameContextClient.h"
 #include "DeviceRuntime/Contract/AbstractSourceController.h"
 #include "DeviceRuntime/Contract/DeviceDiagnostics.h"
 #include "DeviceRuntime/Contract/DeviceImageDiagnostics.h"
@@ -48,12 +48,12 @@ public:
 
 /** Owns OneGen live acquisition and delivers SessionFrame values synchronously. */
 class OneGenSourceController final : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl,
-                                     public IFrameStorageClient, public IToolProvider {
+                                     public IFrameContextClient, public IToolProvider {
   Q_OBJECT
-  Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient IToolProvider)
+  Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameContextClient IToolProvider)
 public:
-  /** @brief Applies to this controller and its camera controllers from their next Live start. */
-  void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
+  /** @brief Applies to this controller and its camera controllers from their next Single/Live start. */
+  void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source) override;
   using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
   explicit OneGenSourceController(QObject* parent = nullptr,
       DeviceImageRejectionSink imageRejectionSink = nullptr,
@@ -172,20 +172,37 @@ signals:
 
 private:
   friend class FeatureTreeTests;
+  struct ContextSourceState {
+    std::shared_ptr<GraphicsFrameContextSource> source;
+    mutable std::mutex mutex;
+    GraphicsFrameError stickyError = GraphicsFrameError::None;
+    std::string stickyMessage;
+  };
+  struct DirectRunRecord {
+    std::shared_ptr<ContextSourceState> sourceState;
+    GraphicsFrameCallbackGate::Token gateToken;
+    std::string sourceName;
+  };
+  struct DirectDestinationState;
   void deliver(const onegen::Frame& source, const std::string& sourceName, bool single = false);
-  void deliverShared(const onegen::producer::SharedFrame& source, const std::string& sourceName);
+  void deliverDirect(const onegen::producer::SharedFrame& source);
+  std::shared_ptr<ContextSourceState> activeContextSource(std::string* error = nullptr) const;
+  void recordStickyContextFailure(const std::shared_ptr<ContextSourceState>& state,
+      GraphicsFrameError error, const std::string& message);
   bool reportImageRejection(const OneGenImageRejection& evidence, const onegen::Frame& source,
       std::uint64_t sequence, std::size_t readableBytes, bool directInput, bool single) noexcept;
   void reportPlanarRejection(const OneGenPlanarRejection& evidence, const onegen::Frame& source,
       std::uint64_t sequence, const std::optional<GraphicsFrame>& output, bool single) noexcept;
   void bindLease();
-  /** @brief Frames dropped for lack of a free slot since the last start. */
+  /** @brief Frames dropped for lack of a free slot or ready credit since the last start. */
   std::uint64_t droppedFrames() const;
-  /** @brief Attaches the Host-storage lease sink bound while the caller holds direct_lease_mutex_. */
-  void configureFrameStorage(onegen::producer::Lease& lease, const std::string& sourceName);
+  /** @brief Attaches the context-backed direct lease sink while caller holds direct_lease_mutex_. */
+  void configureDirectSink(onegen::producer::Lease& lease, const std::string& sourceName);
   mutable std::mutex mutex_;
-  std::shared_ptr<IFrameStorageProvider> frame_storage_;
-  /** @brief Serializes frame-storage attachment with lease replacement without callbacks under mutex_. */
+  std::shared_ptr<ContextSourceState> context_source_;
+  std::shared_ptr<const DirectRunRecord> active_direct_run_;
+  std::string last_single_failure_;
+  /** @brief Serializes direct sink attachment with lease replacement without callbacks under mutex_. */
   std::mutex direct_lease_mutex_;
   struct Child { unsigned int index; std::string label; std::unique_ptr<OneGenSourceController> controller; };
   std::map<std::string, Child> children_;

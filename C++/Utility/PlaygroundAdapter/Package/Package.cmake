@@ -1,7 +1,7 @@
 # Device-owned Playground plugin identity.
 set(PLAYGROUND_PLUGIN_ID "onegen")
 set(PLAYGROUND_PLUGIN_VERSION "0.5.0")
-# Host-provided frame storage (IFrameStorageClient) and the image writer first ship in Core 0.7.0.
+# Host-provided frame context (IFrameContextClient) and the image writer first ship in Core 0.7.0.
 set(PLAYGROUND_PLUGIN_MINIMUM_CORE_VERSION "0.7.0")
 set(PLAYGROUND_PLUGIN_DISPLAY_NAME "GenICam")
 # Optional presentation metadata; consumers must export it to manifests/catalogs.

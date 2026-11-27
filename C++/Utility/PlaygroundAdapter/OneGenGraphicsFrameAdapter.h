@@ -3,6 +3,8 @@
 /** @file OneGenGraphicsFrameAdapter.h @brief Converts owned OneGen frames to GraphicsFrame. */
 
 #include "engine/GraphicsFrame.h"
+#include "engine/GraphicsFrameBuilder.h"
+#include "engine/GraphicsFrameContext.h"
 #include "engine/GraphicsImageWriter.h"
 #include "OneGenTypes.h"
 
@@ -49,13 +51,20 @@ struct OneGenPlanarRejection {
     std::size_t requestedStorageBytes = 0; ///< Destination size for a rejected range writer.
 };
 
-/** @brief Converts PFNC data and optionally describes a single 2D or planar assembly rejection. */
+/** @brief Converts owned PFNC data using @p context_source and optionally describes rejections. */
 [[nodiscard]] std::optional<GraphicsFrame> oneGenGraphicsFrame(
     const onegen::Frame& source, std::uint64_t sequence,
+    GraphicsFrameContextSource& context_source,
     std::string* rejection_reason = nullptr,
-    std::span<const std::uint8_t> image_payload = {},
-    std::shared_ptr<const void> payload_owner = {},
-    GraphicsFrameContext image_storage = GraphicsFrameContext::local(),
     std::optional<OneGenImageRejection>* image_rejection = nullptr,
     std::optional<OneGenPlanarRejection>* planar_rejection = nullptr,
+    const std::string& source_name = {},
+    GraphicsFrameError* storage_error = nullptr);
+
+/** @brief Completes a zero-copy live direct 2D frame from an already-reserved write region. */
+[[nodiscard]] std::optional<GraphicsFrame> oneGenBuildDirectImageFrame(
+    const onegen::Frame& source, std::uint64_t sequence,
+    GraphicsFrameBuilder& builder, GraphicsWriteRegion<std::uint8_t> region,
+    std::size_t used_bytes, std::string* rejection_reason = nullptr,
+    std::optional<OneGenImageRejection>* image_rejection = nullptr,
     const std::string& source_name = {});

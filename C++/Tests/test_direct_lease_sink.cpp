@@ -31,7 +31,10 @@ int main() {
   std::string error;
   assert(!DirectLeaseSink::create(0, 64, error, storage) && !error.empty());
   error.clear();
-  assert(!DirectLeaseSink::create(3, 64, error, {}) && !error.empty());
+  assert(!DirectLeaseSink::create(3, 64, error, DirectLeaseSink::FrameStorage{}) && !error.empty());
+  error.clear();
+  assert(!DirectLeaseSink::create(3, 64, error, DirectLeaseSink::DestinationProvider{})
+      && !error.empty());
 
   error.clear();
   auto sink = DirectLeaseSink::create(3, 64, error, storage);
@@ -142,6 +145,58 @@ int main() {
     assert(outstanding == 1 && leases[0]->bytes()[0] == 0x5a);
     leases.clear();
     assert(outstanding == 0);
+  }
+
+  // DestinationProvider reservation: opaque owner is freed immediately on cancel(), transferred
+  // cleanly through FrameLease on publish(), and Refused stops the sink without returning Busy.
+  {
+    int aliveOwners = 0;
+    bool busy = false;
+    bool refuse = false;
+    auto provider = [&](std::size_t bytes) -> DirectLeaseSink::DestinationReservation {
+      if (refuse) return {DirectLeaseSink::DestinationStatus::Refused, {}, {}};
+      if (busy) return {DirectLeaseSink::DestinationStatus::Busy, {}, {}};
+      auto buf = std::shared_ptr<std::uint8_t>(new std::uint8_t[bytes],
+          [&aliveOwners](std::uint8_t* ptr) {
+            --aliveOwners;
+            delete[] ptr;
+          });
+      ++aliveOwners;
+      auto* raw = buf.get();
+      return {DirectLeaseSink::DestinationStatus::Reserved,
+              std::span<std::uint8_t>(raw, bytes), std::move(buf)};
+    };
+    std::string destError;
+    auto sink2 = DirectLeaseSink::create(2, 64, destError, provider);
+    assert(sink2 && destError.empty());
+    std::shared_ptr<const onegen::producer::FrameLease> publishedLease;
+    sink2->set_frame_callback([&](const SharedFrame& f) { publishedLease = f.lease; });
+
+    auto cancelled = reserve(*sink2);
+    assert(aliveOwners == 1);
+    sink2->cancel(cancelled, d::CancelCause::Fallback);
+    cancelled.owner.reset();
+    assert(aliveOwners == 0 && sink2->counters().held == 0);
+
+    auto res = reserve(*sink2);
+    assert(aliveOwners == 1);
+    std::memset(res.destination.data(), 0x3c, 24);
+    sink2->publish(res, metadata, 24);
+    res.owner.reset();
+    assert(publishedLease && publishedLease->owner() && publishedLease->bytes().size() == 24);
+    assert(publishedLease->bytes()[0] == 0x3c && aliveOwners == 1);
+    publishedLease.reset();
+    assert(aliveOwners == 0 && sink2->counters().held == 0);
+
+    busy = true;
+    d::DirectReservation busyRes;
+    assert(sink2->reserve(busyRes) == d::ReserveStatus::Busy);
+    busy = false;
+
+    refuse = true;
+    d::DirectReservation refusedRes;
+    assert(sink2->reserve(refusedRes) == d::ReserveStatus::Refused);
+    assert(sink2->reserve(refusedRes) == d::ReserveStatus::Stopped);
   }
 
   std::cout << "Frame lease accounting and consumer storage passed.\n";

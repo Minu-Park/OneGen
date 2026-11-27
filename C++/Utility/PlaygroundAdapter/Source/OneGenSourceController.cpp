@@ -4,6 +4,8 @@
 #include "ProducerCoordinator.h"
 #include "OneGenGraphicsFrameAdapter.h"
 #include "DeviceRuntime/Contract/SessionFrame.h"
+#include "engine/GraphicsFrameBuilder.h"
+#include "engine/GraphicsWriteRegion.h"
 #include "Internal/FrameTrace.h"
 
 #include <QDebug>
@@ -97,7 +99,49 @@ DeviceImageConversion deviceImageConversion(OneGenImageRejection::Conversion con
   return DeviceImageConversion::None;
 }
 
+std::string contextErrorMessage(GraphicsFrameError error)
+{
+  switch (error) {
+  case GraphicsFrameError::None: return "Frame storage failed.";
+  case GraphicsFrameError::InvalidInput: return "Frame storage request is invalid.";
+  case GraphicsFrameError::Capacity: return "Frame storage admission failed: frame size exceeds capacity.";
+  case GraphicsFrameError::Allocation: return "Frame storage allocation failed.";
+  case GraphicsFrameError::Disconnected: return "Frame storage session is disconnected.";
+  case GraphicsFrameError::StaleGeneration: return "Frame storage grant expired.";
+  case GraphicsFrameError::UnsealedWrite: return "Frame write region remained open.";
+  case GraphicsFrameError::ClassNotPrepared: return "Frame storage class is not prepared.";
+  case GraphicsFrameError::NoReadyCredit: return "Frame storage has no ready credit.";
+  case GraphicsFrameError::ClassRefused: return "Frame storage admission failed: class refused by host.";
+  }
+  return "Frame storage allocation failed.";
+}
+
 } // namespace
+
+struct OneGenSourceController::DirectDestinationState {
+  std::shared_ptr<const DirectRunRecord> run;
+  std::optional<GraphicsFrameContext> context;
+  std::optional<GraphicsFrameBuilder> builder;
+  GraphicsWriteRegion<std::uint8_t> region;
+
+  DirectDestinationState(std::shared_ptr<const DirectRunRecord> runIn,
+                         GraphicsFrameContext contextIn)
+      : run(std::move(runIn))
+      , context(std::move(contextIn))
+      , builder(*context)
+  {
+  }
+
+  ~DirectDestinationState()
+  {
+    // Destroy write region before builder, and builder before context.
+    if (region.isOpen()) {
+      GraphicsWriteRegion<std::uint8_t> abandoned = std::move(region);
+    }
+    builder.reset();
+    context.reset();
+  }
+};
 
 OneGenSourceController::OneGenSourceController(QObject* parent, DeviceImageRejectionSink imageRejectionSink,
     DevicePlanarRejectionSink planarRejectionSink, std::uint32_t imageSourceIndex)
@@ -342,7 +386,7 @@ OneGenSourceController* OneGenSourceController::cameraController(const std::stri
         [this, id](bool active, const QString&) { emit diagnosticAcquisitionChanged(active, QString::fromStdString(id)); },
         Qt::DirectConnection);
     child->forwarded_by_parent_ = true;
-    child->setFrameStorageProvider(frame_storage_);
+    child->setFrameContextSource(context_source_ ? context_source_->source : nullptr);
     child->setFrameConsumer([this, index, childPtr = child.get()](SessionFrame&& frame, unsigned int) {
       FrameConsumer consumer;
       { std::lock_guard lock(mutex_); consumer = consumer_; }
@@ -411,6 +455,7 @@ void OneGenSourceController::setLease(onegen::producer::Lease* lease)
     lease_->detach_lease_sink();
   }
   lease_sink_.reset();
+  active_direct_run_.reset();
   lock.unlock();
   // Frame callbacks never acquire direct_lease_mutex_; holding it across the gate
   // drain prevents start from attaching a lease sink to the lease being replaced.
@@ -487,53 +532,100 @@ void OneGenSourceController::bindLease()
   });
 }
 
-void OneGenSourceController::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
+void OneGenSourceController::setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
 {
+  std::shared_ptr<ContextSourceState> nextState;
+  if (source) {
+    nextState = std::make_shared<ContextSourceState>();
+    nextState->source = source;
+  }
   std::vector<OneGenSourceController*> children;
   {
     std::lock_guard lock(mutex_);
-    frame_storage_ = provider;
+    context_source_ = std::move(nextState);
+    last_single_failure_.clear();
     for (const auto& child : children_) children.push_back(child.second.controller.get());
   }
-  for (auto* child : children) child->setFrameStorageProvider(provider);
+  for (auto* child : children) child->setFrameContextSource(source);
 }
 
-void OneGenSourceController::configureFrameStorage(
+std::shared_ptr<OneGenSourceController::ContextSourceState>
+OneGenSourceController::activeContextSource(std::string* error) const
+{
+  std::shared_ptr<ContextSourceState> state;
+  {
+    std::lock_guard lock(mutex_);
+    state = context_source_;
+  }
+  if (!state || !state->source) {
+    if (error) *error = "Frame context source is not configured.";
+    return {};
+  }
+  {
+    std::lock_guard stateLock(state->mutex);
+    if (state->stickyError != GraphicsFrameError::None) {
+      if (error) *error = state->stickyMessage.empty()
+          ? contextErrorMessage(state->stickyError) : state->stickyMessage;
+      return {};
+    }
+  }
+  return state;
+}
+
+void OneGenSourceController::recordStickyContextFailure(
+    const std::shared_ptr<ContextSourceState>& state,
+    GraphicsFrameError error, const std::string& message)
+{
+  if (!state || (error != GraphicsFrameError::ClassRefused && error != GraphicsFrameError::Capacity))
+    return;
+  std::lock_guard stateLock(state->mutex);
+  if (state->stickyError == GraphicsFrameError::None) {
+    state->stickyError = error;
+    state->stickyMessage = message.empty() ? contextErrorMessage(error) : message;
+  }
+}
+
+void OneGenSourceController::configureDirectSink(
     onegen::producer::Lease& lease, const std::string& sourceName)
 {
-  std::shared_ptr<IFrameStorageProvider> provider;
   GraphicsFrameCallbackGate::Token token;
   {
     std::lock_guard lock(mutex_);
-    provider = frame_storage_;
     if (callback_gate_) token = callback_gate_->token();
   }
   if (!token) throw std::runtime_error("Frame delivery is not bound to a consumer.");
 
-  // Without a consumer provider there is no frame storage to write into. The owned path still
-  // delivers every frame, but direct frames have no destination and must not allocate one.
-  if (!provider) {
+  std::string sourceError;
+  auto sourceState = activeContextSource(&sourceError);
+  if (!sourceState) {
     lease.detach_lease_sink();
     std::lock_guard lock(mutex_);
     lease_sink_.reset();
-    return;
+    active_direct_run_.reset();
+    throw std::runtime_error(sourceError);
   }
+
   std::string error;
   const auto payload = directSlotBytes(lease, error);
   if (!payload || *payload == 0) {
-    // The direct path cannot copy into the Host pool without a known slot size; the owned path
-    // still writes every image through the same provider.
+    // Non-image / dynamic payload layouts without a fixed stream payload size use the owned
+    // conversion path, which still calls beginFrame(plannedBytes) for every delivered frame.
     lease.detach_lease_sink();
     std::lock_guard lock(mutex_);
     lease_sink_.reset();
+    active_direct_run_.reset();
     qWarning().noquote() << QStringLiteral(
         "[GenICam] direct frame path unavailable: camera=%1 reason=%2")
         .arg(QString::fromStdString(sourceName), QString::fromStdString(error));
     return;
   }
+
+  auto runRecord = std::make_shared<const DirectRunRecord>(
+      DirectRunRecord{std::move(sourceState), token, sourceName});
   std::shared_ptr<const onegen::producer::DirectLeaseSink> attached;
   {
     std::lock_guard lock(mutex_);
+    active_direct_run_ = runRecord;
     attached = lease_sink_;
   }
   if (attached && attached->slot_bytes() == *payload) return;
@@ -543,23 +635,79 @@ void OneGenSourceController::configureFrameStorage(
     std::lock_guard lock(mutex_);
     lease_sink_.reset();
   }
-  // The sink owns no memory: each reservation takes its slot from the Host provider. Its slot
-  // count only bounds how many frames may be in flight.
-  if (!lease.attach_lease_sink(kMaximumInFlightFrames, *payload, error,
-          [provider](std::size_t bytes) { return provider->acquire(bytes); })) {
+
+  auto destinationProvider = [this](std::size_t bytes) -> onegen::producer::DirectLeaseSink::DestinationReservation {
+    using DestinationReservation = onegen::producer::DirectLeaseSink::DestinationReservation;
+    using DestinationStatus = onegen::producer::DirectLeaseSink::DestinationStatus;
+    std::shared_ptr<const DirectRunRecord> run;
+    {
+      std::lock_guard lock(mutex_);
+      run = active_direct_run_;
+    }
+    if (!run || !run->sourceState || !run->sourceState->source) {
+      return {DestinationStatus::Refused, {}, {}};
+    }
+    {
+      std::lock_guard stateLock(run->sourceState->mutex);
+      if (run->sourceState->stickyError != GraphicsFrameError::None) {
+        return {DestinationStatus::Refused, {}, {}};
+      }
+    }
+    auto ctxResult = run->sourceState->source->beginFrame(bytes);
+    if (!ctxResult) {
+      const auto err = ctxResult.error();
+      if (err == GraphicsFrameError::NoReadyCredit) {
+        return {DestinationStatus::Busy, {}, {}};
+      }
+      const auto message = contextErrorMessage(err);
+      recordStickyContextFailure(run->sourceState, err, message);
+      rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      {
+        std::lock_guard errors(error_state_->mutex);
+        if (error_state_->message.empty()) error_state_->message = message;
+      }
+      qWarning().noquote() << QStringLiteral("[GenICam] camera=%1 direct storage refused: %2")
+          .arg(QString::fromStdString(run->sourceName), QString::fromStdString(message));
+      return {DestinationStatus::Refused, {}, {}};
+    }
+    auto state = std::make_shared<DirectDestinationState>(run, std::move(ctxResult).value());
+    auto reserved = state->builder->reserve<std::uint8_t>(bytes, 1U);
+    if (!reserved) {
+      const auto err = reserved.error();
+      state.reset();
+      if (err == GraphicsFrameError::NoReadyCredit) {
+        return {DestinationStatus::Busy, {}, {}};
+      }
+      const auto message = contextErrorMessage(err);
+      recordStickyContextFailure(run->sourceState, err, message);
+      rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      {
+        std::lock_guard errors(error_state_->mutex);
+        if (error_state_->message.empty()) error_state_->message = message;
+      }
+      qWarning().noquote() << QStringLiteral("[GenICam] camera=%1 direct reserve refused: %2")
+          .arg(QString::fromStdString(run->sourceName), QString::fromStdString(message));
+      return {DestinationStatus::Refused, {}, {}};
+    }
+    state->region = std::move(reserved).value();
+    std::span<std::uint8_t> writable(state->region.data(), state->region.size());
+    return {DestinationStatus::Reserved, writable, std::move(state)};
+  };
+
+  // The sink owns no frame memory: each reservation acquires from the injected context source.
+  if (!lease.attach_lease_sink(kMaximumInFlightFrames, *payload, error, std::move(destinationProvider))) {
     throw std::runtime_error(error);
   }
   lease.set_shared_frame_callback(
-      [this, sourceName, token](const onegen::producer::SharedFrame& source) {
-        GraphicsFrameCallbackGate::Lease callback(token);
-        if (callback) deliverShared(source, sourceName);
+      [this](const onegen::producer::SharedFrame& source) {
+        deliverDirect(source);
       });
   {
     std::lock_guard lock(mutex_);
     lease_sink_ = lease.lease_sink();
   }
   qCDebug(onegenSourceDiagnosticLog).noquote() << QStringLiteral(
-      "[GenICam] Host frame storage attached: camera=%1 slots=%2 slotBytes=%3")
+      "[GenICam] Frame context direct sink attached: camera=%1 slots=%2 slotBytes=%3")
       .arg(QString::fromStdString(sourceName)).arg(kMaximumInFlightFrames).arg(*payload);
 }
 
@@ -601,9 +749,11 @@ void OneGenSourceController::start()
     if (!lease) return;
     const auto& info = lease->info();
     const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
+    std::string sourceError;
+    if (!activeContextSource(&sourceError)) throw std::runtime_error(sourceError);
     const auto modeChange = applyAcquisitionMode(false);
     reportAcquisitionMode(modeChange, "live");
-    configureFrameStorage(*lease, sourceName);
+    configureDirectSink(*lease, sourceName);
   }
   received_frames_.store(0, std::memory_order_relaxed);
   converted_frames_.store(0, std::memory_order_relaxed);
@@ -775,6 +925,12 @@ void OneGenSourceController::grabOne(const QString& diagnosticDirectory)
     }
   }
   if (!lease) return;
+  std::string sourceError;
+  if (!activeContextSource(&sourceError)) throw std::runtime_error(sourceError);
+  {
+    std::lock_guard lock(mutex_);
+    last_single_failure_.clear();
+  }
   const auto modeChange = applyAcquisitionMode(true);
   reportAcquisitionMode(modeChange, "single");
   delivered_frames_.store(0, std::memory_order_relaxed);
@@ -899,22 +1055,44 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
     const bool frameTrace = onegen::frame_trace_enabled();
     const auto conversionStarted = frameTrace ? std::chrono::steady_clock::now()
                                               : std::chrono::steady_clock::time_point{};
-    GraphicsFrameContext imageStorage = GraphicsFrameContext::local();
-    {
-      std::lock_guard lock(mutex_);
-      imageStorage = frameStorageContext(frame_storage_);
+    std::string sourceError;
+    auto sourceState = activeContextSource(&sourceError);
+    if (!sourceState) {
+      rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      if (single) {
+        std::lock_guard lock(mutex_);
+        last_single_failure_ = sourceError;
+      }
+      qWarning().noquote() << "[GenICam] frame rejected: camera=" << QString::fromStdString(sourceName)
+          << "sequence=" << sequence << "reason=" << QString::fromStdString(sourceError);
+      return;
     }
     std::string rejectionReason;
     std::optional<OneGenImageRejection> observation;
     std::optional<OneGenPlanarRejection> planar;
-    auto payload = oneGenGraphicsFrame(source, sequence, &rejectionReason, {}, {},
-        std::move(imageStorage), image_rejection_sink_ ? &observation : nullptr,
-        planar_rejection_sink_ ? &planar : nullptr, sourceName);
+    GraphicsFrameError storageError = GraphicsFrameError::None;
+    auto payload = oneGenGraphicsFrame(source, sequence, *sourceState->source, &rejectionReason,
+        image_rejection_sink_ ? &observation : nullptr,
+        planar_rejection_sink_ ? &planar : nullptr, sourceName, &storageError);
+    if (storageError != GraphicsFrameError::None) {
+      if (storageError == GraphicsFrameError::ClassRefused
+          || storageError == GraphicsFrameError::Capacity) {
+        recordStickyContextFailure(sourceState, storageError, rejectionReason);
+      }
+      if (storageError != GraphicsFrameError::NoReadyCredit) {
+        std::lock_guard errors(error_state_->mutex);
+        if (error_state_->message.empty()) error_state_->message = rejectionReason;
+      }
+    }
     if (planar) reportPlanarRejection(*planar, source, sequence, payload, single);
     const auto converted = frameTrace ? std::chrono::steady_clock::now()
                                       : std::chrono::steady_clock::time_point{};
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      if (single && !rejectionReason.empty()) {
+        std::lock_guard lock(mutex_);
+        last_single_failure_ = rejectionReason;
+      }
       if ((planar && rejectionReason.empty()) || (observation && reportImageRejection(*observation, source, sequence, source.payload.size(), false, single)))
         return;
       {
@@ -983,32 +1161,33 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
   }
 }
 
-void OneGenSourceController::deliverShared(
-    const onegen::producer::SharedFrame& shared, const std::string& sourceName)
+void OneGenSourceController::deliverDirect(const onegen::producer::SharedFrame& shared)
 {
   try {
     if (!shared.lease) return;
+    auto* state = static_cast<DirectDestinationState*>(shared.lease->owner().get());
+    if (!state || !state->run || !state->builder || !state->region.isOpen()) return;
+    GraphicsFrameCallbackGate::Lease callback(state->run->gateToken);
+    if (!callback) return;
+
+    const auto& sourceName = state->run->sourceName;
     const auto& source = shared.lease->metadata();
     const auto bytes = shared.lease->bytes();
     const auto sequence = sequence_.fetch_add(1, std::memory_order_relaxed);
     const bool firstFrame = received_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
     if (firstFrame) logFirstAcquisitionInput(source, bytes.size(), true);
-    GraphicsFrameContext imageStorage = GraphicsFrameContext::local();
-    {
-      std::lock_guard lock(mutex_);
-      imageStorage = frameStorageContext(frame_storage_);
-    }
+
     std::string rejectionReason;
     std::optional<OneGenImageRejection> observation;
-    std::optional<OneGenPlanarRejection> planar;
-    auto payload = oneGenGraphicsFrame(
-        source, sequence, &rejectionReason, bytes, shared.lease, std::move(imageStorage),
-        image_rejection_sink_ ? &observation : nullptr, planar_rejection_sink_ ? &planar : nullptr, sourceName);
-    if (planar) reportPlanarRejection(*planar, source, sequence, payload, false);
+    auto payload = oneGenBuildDirectImageFrame(
+        source, sequence, *state->builder, std::move(state->region), bytes.size(),
+        &rejectionReason, image_rejection_sink_ ? &observation : nullptr, sourceName);
+    state->builder.reset();
+    state->context.reset();
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
       const auto readableBytes = bytes.empty() ? source.payload.size() : bytes.size();
-      if ((planar && rejectionReason.empty()) || (observation && reportImageRejection(*observation, source, sequence, readableBytes, true, false)))
+      if (observation && reportImageRejection(*observation, source, sequence, readableBytes, true, false))
         return;
       qWarning().noquote() << QStringLiteral(
           "[GenICam] direct frame rejected: camera=%1 sequence=%2 frame=%3 reason=%4")
@@ -1019,12 +1198,6 @@ void OneGenSourceController::deliverShared(
       return;
     }
     converted_frames_.fetch_add(1, std::memory_order_relaxed);
-    if (planar || !rejectionReason.empty()) {
-      partial_frames_.fetch_add(1, std::memory_order_relaxed);
-      if (!rejectionReason.empty()) qWarning().noquote() << "[GenICam] direct frame retained with rejected parts: camera="
-          << QString::fromStdString(sourceName) << "sequence=" << sequence
-          << "frameId=" << source.frame_id << QString::fromStdString(rejectionReason);
-    }
     SessionFrame frame;
     frame.payload = std::move(*payload);
     frame.frameSeq = sequence;
@@ -1685,7 +1858,15 @@ DeviceConnectionResult OneGenSourceController::admitLifecycle(Lifecycle operatio
       } else if (operation == Lifecycle::Single) {
         const auto before = target->converted_frames_.load();
         target->grabOne();
-        if (target->converted_frames_.load() != before + 1) throw std::runtime_error("Acquired frame was not converted to a supported resource.");
+        if (target->converted_frames_.load() != before + 1) {
+          std::string singleError;
+          {
+            std::lock_guard lock(target->mutex_);
+            singleError = target->last_single_failure_;
+          }
+          throw std::runtime_error(singleError.empty()
+              ? "Acquired frame was not converted to a supported resource." : singleError);
+        }
         result = {{}, {}, DeviceConnectionEffect::Applied, finishState()};
       } else if (operation == Lifecycle::LiveStart) {
         target->start();

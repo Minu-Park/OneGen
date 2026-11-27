@@ -32,7 +32,7 @@ struct DirectReservation {
   std::shared_ptr<void> owner;
 };
 
-enum class ReserveStatus : std::uint8_t { Reserved, NoPool, Stopped, Busy };
+enum class ReserveStatus : std::uint8_t { Reserved, NoPool, Stopped, Busy, Refused };
 
 enum class CancelCause : std::uint8_t {
   Timeout,

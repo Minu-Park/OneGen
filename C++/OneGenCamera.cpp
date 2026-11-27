@@ -1298,6 +1298,7 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
   const auto reserved = sink.reserve(reservation);
   if (reserved == ReserveStatus::NoPool) return DirectStep::NoPool;
   if (reserved == ReserveStatus::Stopped) return DirectStep::Stopped;
+  if (reserved == ReserveStatus::Refused) return DirectStep::Refused;
   if (reserved == ReserveStatus::Busy) {
     // Consume and requeue one acquired frame without a direct-slot copy; chunk
     // and multipart layouts still extract their metadata and payload. The
@@ -1438,6 +1439,8 @@ void Camera::live() {
               continue;
             } else if (step == detail::DirectStep::Stopped) {
               continue;
+            } else if (step == detail::DirectStep::Refused) {
+              break;
             } else if (step == detail::DirectStep::Fallback) {
               f = std::move(fallback);
             } else {

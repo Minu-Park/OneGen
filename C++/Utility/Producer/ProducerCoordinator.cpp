@@ -383,7 +383,7 @@ std::uint64_t Lease::payload_size() {
 }
 
 bool Lease::attach_lease_sink(std::uint32_t slot_count, std::uint64_t slot_bytes,
-                              std::string& error, DirectLeaseSink::FrameStorage storage) {
+                              std::string& error, DirectLeaseSink::DestinationProvider provider) {
   std::lock_guard lock(producer_->mutex);
   if (closed_.load()) {
     error = "Device lease is closed.";
@@ -393,7 +393,7 @@ bool Lease::attach_lease_sink(std::uint32_t slot_count, std::uint64_t slot_bytes
     error = "A lease sink is already attached.";
     return false;
   }
-  auto sink = DirectLeaseSink::create(slot_count, slot_bytes, error, std::move(storage));
+  auto sink = DirectLeaseSink::create(slot_count, slot_bytes, error, std::move(provider));
   if (!sink) return false;
   sink->set_error_callback([callbacks = callbacks_](std::string_view message) {
     ErrorFn callback;
@@ -405,6 +405,22 @@ bool Lease::attach_lease_sink(std::uint32_t slot_count, std::uint64_t slot_bytes
   });
   sink_ = std::move(sink);
   return true;
+}
+
+bool Lease::attach_lease_sink(std::uint32_t slot_count, std::uint64_t slot_bytes,
+                              std::string& error, DirectLeaseSink::FrameStorage storage) {
+  if (!storage) {
+    error = "Lease sink requires consumer storage.";
+    return false;
+  }
+  return attach_lease_sink(
+      slot_count, slot_bytes, error,
+      [storage = std::move(storage)](std::size_t bytes) -> DirectLeaseSink::DestinationReservation {
+        auto buffer = storage(bytes);
+        if (!buffer) return {DirectLeaseSink::DestinationStatus::Busy, {}, {}};
+        std::span<std::uint8_t> writable(buffer.get(), bytes);
+        return {DirectLeaseSink::DestinationStatus::Reserved, writable, std::move(buffer)};
+      });
 }
 
 void Lease::detach_lease_sink() {

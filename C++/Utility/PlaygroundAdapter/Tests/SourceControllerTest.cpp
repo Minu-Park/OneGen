@@ -37,12 +37,62 @@ std::mutex imageRejectionMutex;
 std::vector<DeviceImageRejectionObservation> imageRejections;
 std::vector<DevicePlanarRejectionObservation> planarRejections;
 
-class TestFrameStorage final : public IFrameStorageProvider {
+class ScriptedContextSource final : public GraphicsFrameContextSource {
 public:
-    std::shared_ptr<std::uint8_t> acquire(std::size_t bytes) override
+    explicit ScriptedContextSource(GraphicsFrameError error = GraphicsFrameError::None)
+        : _error(error)
     {
-        return {new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>{}};
     }
+
+    void setError(GraphicsFrameError error) noexcept
+    {
+        _error.store(error, std::memory_order_release);
+    }
+
+    [[nodiscard]] std::size_t calls() const noexcept
+    {
+        return _calls.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::vector<const std::uint8_t*> reservedPointers() const
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _pointers;
+    }
+
+    [[nodiscard]] GraphicsResult<GraphicsFrameContext> beginFrame(const std::size_t sampleBytes) noexcept override
+    {
+        _calls.fetch_add(1U, std::memory_order_relaxed);
+        const auto err = _error.load(std::memory_order_acquire);
+        if (err != GraphicsFrameError::None) {
+            return err;
+        }
+        class TrackingAllocator final : public GraphicsFrameAllocator {
+        public:
+            TrackingAllocator(ScriptedContextSource* owner) : _owner(owner) {}
+            GraphicsResult<GraphicsAllocationSlice> allocate(
+                const std::size_t bytes, const std::size_t alignment) noexcept override
+            {
+                auto slice = GraphicsFrameContext::local().allocate(bytes, alignment);
+                if (slice) {
+                    const auto* ptr = reinterpret_cast<const std::uint8_t*>(
+                        slice.value().backing->base() + slice.value().offset);
+                    std::lock_guard<std::mutex> lock(_owner->_mutex);
+                    _owner->_pointers.push_back(ptr);
+                }
+                return slice;
+            }
+        private:
+            ScriptedContextSource* _owner;
+        };
+        return GraphicsFrameContext(std::make_shared<TrackingAllocator>(this));
+    }
+
+private:
+    std::atomic<GraphicsFrameError> _error{GraphicsFrameError::None};
+    std::atomic<std::size_t> _calls{0};
+    mutable std::mutex _mutex;
+    std::vector<const std::uint8_t*> _pointers;
 };
 
 void rememberImageRejection(const DeviceImageRejectionObservation& observation) noexcept
@@ -116,6 +166,7 @@ struct Fixture {
             throw std::runtime_error("The synthetic producer could not be selected.");
         _controller = std::make_unique<OneGenSourceController>();
         _controller->configureControl(_coordinator, {});
+        _controller->setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
         _controller->setFrameConsumer([this](SessionFrame&&, unsigned int index) {
             _frames.fetch_add(1);
             std::lock_guard lock(_framesMutex);
@@ -265,6 +316,7 @@ private slots:
     void concurrentParameterRequestsAreRefused();
     void moduleActionsNotifySubscribers();
     void declaredModuleActions();
+    void frameContextContractAndReadinessMappings();
     void cleanupTestCase();
 
 private:
@@ -289,6 +341,7 @@ void OneGenSourceControllerTests::initTestCase()
     QVERIFY(_coordinator->set_producer_files({ONEGEN_TEST_PRODUCER}));
     _controller = std::make_unique<OneGenSourceController>(nullptr, &rememberImageRejection, &rememberPlanarRejection);
     _controller->configureControl(_coordinator, {});
+    _controller->setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
     _controller->setFrameConsumer([this](SessionFrame&&, unsigned) { _frames.fetch_add(1); });
 }
 
@@ -470,7 +523,7 @@ void OneGenSourceControllerTests::liveSamplesRejectedDirectImagesAndResetsOnRest
 {
     if (!qEnvironmentVariableIsSet("ONEGEN_TEST_IMAGE_REJECTION"))
         QSKIP("This case uses the synthetic big-endian packed image.");
-    _controller->setFrameStorageProvider(std::make_shared<TestFrameStorage>());
+    _controller->setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
     connectTarget();
 
     std::uint64_t firstSequence = 0;
@@ -506,7 +559,7 @@ void OneGenSourceControllerTests::liveSamplesRejectedDirectImagesAndResetsOnRest
         firstSequence += stats.failed;
     }
     disconnect();
-    _controller->setFrameStorageProvider({});
+    _controller->setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
 }
 
 void OneGenSourceControllerTests::firstInputDetailsFollowCategory()
@@ -1531,6 +1584,113 @@ void OneGenSourceControllerTests::declaredModuleActions()
                     {"module", QStringLiteral("Interface")}});
     QVERIFY(!invalidModule.succeeded());
     QCOMPARE(invalidModule.error()->code, ApiErrorCode::InvalidArgument);
+}
+
+void OneGenSourceControllerTests::frameContextContractAndReadinessMappings()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+
+    Fixture fixture;
+    auto* client = qobject_cast<IFrameContextClient*>(fixture._controller.get());
+    QVERIFY(client != nullptr);
+    QCOMPARE(QString::fromLatin1(qobject_interface_iid<IFrameContextClient*>()),
+             QStringLiteral("org.playground.DeviceRuntime.FrameContextClient/1"));
+
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto* device = targetOfKind(targets, DeviceConnectionTargetKind::Device, 0);
+    QVERIFY(device != nullptr);
+    const auto connected = fixture.connect(device->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    const std::string connectionId = connected.state->connectionId;
+    const auto states = fixture.states();
+    const auto cameraIt = std::find_if(states.begin(), states.end(),
+        [&](const auto& st) { return st.connectionId == connectionId; });
+    QVERIFY(cameraIt != states.end() && !cameraIt->sources.empty());
+    const unsigned sourceIndex = cameraIt->sources.front().sourceIndex;
+
+    // Null source must refuse both Single and Live without falling back to Local.
+    client->setFrameContextSource({});
+    const auto missingSingle = fixture.invoke([&](auto done) {
+        return fixture._controller->requestSingle(connectionId, done);
+    });
+    QCOMPARE(missingSingle.error, DeviceConnectionError::BackendFailure);
+    const auto missingLive = fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStart(connectionId, done);
+    });
+    QCOMPARE(missingLive.error, DeviceConnectionError::BackendFailure);
+    QCOMPARE(fixture.frames(), 0);
+
+    // Tracked context source verifies direct reservation reuse (0 copies) and NoReadyCredit drops.
+    auto source = std::make_shared<ScriptedContextSource>();
+    std::vector<const std::uint8_t*> deliveredPointers;
+    std::mutex pointerMutex;
+    fixture._controller->setFrameConsumer([&](SessionFrame&& frame, unsigned int index) {
+        fixture._frames.fetch_add(1);
+        {
+            std::lock_guard lock(fixture._framesMutex);
+            ++fixture._framesByIndex[index];
+        }
+        if (frame.payload.hasImage()) {
+            std::lock_guard lock(pointerMutex);
+            deliveredPointers.push_back(frame.payload.images().front().payload.pixels.data());
+        }
+    });
+    client->setFrameContextSource(source);
+
+    // Direct Live: delivered pixels point directly into the reserved region with no Borrow rewrap.
+    QCOMPARE(fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStart(connectionId, done);
+    }).error, DeviceConnectionError::None);
+    QVERIFY(waitFor([&] { return fixture.frames() >= 2; }, 10000));
+    {
+        std::lock_guard lock(pointerMutex);
+        const auto& reserved = source->reservedPointers();
+        QVERIFY(!deliveredPointers.empty());
+        for (const auto* ptr : deliveredPointers) {
+            QVERIFY(std::find(reserved.begin(), reserved.end(), ptr) != reserved.end());
+        }
+    }
+
+    // Transient NoReadyCredit counts drop-before-copy without falling back to owned acquisition,
+    // and recovers cleanly when ready credit returns.
+    source->setError(GraphicsFrameError::NoReadyCredit);
+    const auto failedBefore = fixture._controller->runtimeDiagnostics(sourceIndex).failed;
+    QVERIFY(waitFor([&] {
+        return fixture._controller->runtimeDiagnostics(sourceIndex).failed > failedBefore + 1;
+    }, 10000));
+    const int framesDuringBusy = fixture.frames();
+    source->setError(GraphicsFrameError::None);
+    QVERIFY(waitFor([&] { return fixture.frames() > framesDuringBusy; }, 10000));
+    QCOMPARE(fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStop(connectionId, done);
+    }).error, DeviceConnectionError::None);
+
+    // ClassRefused latches a sticky refusal on Single and subsequent LiveStart until replaced.
+    source->setError(GraphicsFrameError::ClassRefused);
+    const auto refusedSingle = fixture.invoke([&](auto done) {
+        return fixture._controller->requestSingle(connectionId, done);
+    });
+    QCOMPARE(refusedSingle.error, DeviceConnectionError::BackendFailure);
+    source->setError(GraphicsFrameError::None);
+    const std::size_t callsBeforeSticky = source->calls();
+    const auto stickyLive = fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStart(connectionId, done);
+    });
+    QCOMPARE(stickyLive.error, DeviceConnectionError::BackendFailure);
+    QCOMPARE(source->calls(), callsBeforeSticky);
+
+    // Injecting a fresh source clears the sticky refusal and allows acquisition to succeed.
+    client->setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
+    const int framesBeforeFresh = fixture.frames();
+    const auto recoveredSingle = fixture.invoke([&](auto done) {
+        return fixture._controller->requestSingle(connectionId, done);
+    });
+    QVERIFY2(recoveredSingle.error == DeviceConnectionError::None, recoveredSingle.message.c_str());
+    QCOMPARE(fixture.frames(), framesBeforeFresh + 1);
+
+    QCOMPARE(fixture.disconnect(connectionId).error, DeviceConnectionError::None);
 }
 
 void OneGenSourceControllerTests::cleanupTestCase()

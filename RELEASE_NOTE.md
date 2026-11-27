@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Implement `org.playground.DeviceRuntime.FrameContextClient/1` (`IFrameContextClient`) in `OneGenSourceController`, remove `IFrameStorageClient`/`frame_storage_` and the Borrow rewrap path, reserve live direct frames into `GraphicsFrameBuilder::reserve<uint8_t>` and publish `GraphicsSpan::subspan(0, usedBytes)` with zero copies (releasing open regions before layout-transition fallback), plan SDK-owned allocations before calling `beginFrame(sampleBytes)` once, map typed readiness errors (`NoReadyCredit`, `ClassNotPrepared`, sticky `ClassRefused`/`Capacity`), and update standalone adapter/sink tests to inject an explicit `GraphicsFrameContextSource`.
+
 - Return `GraphicsAllocationSlice` from `RecordingStorage` and `RefusingStorage` in `GraphicsFrameAdapterTest`, drop the removed `GraphicsRangeFrameWriterFailure::MisalignedStorage` branch and the unreachable `RangeStorageMisaligned` planar rejection in `OneGenGraphicsFrameAdapter`, and adopt `DevicePluginSessionCapability::GraphicsViewer`.
 
 - Publish immutable GraphicsFrame handles using frame contexts for image and range storage, preserving direct lease and storage refusal behavior.

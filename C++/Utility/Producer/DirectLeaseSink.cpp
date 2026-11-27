@@ -3,6 +3,7 @@
 #include "Internal/StageLog.h"
 
 #include <algorithm>
+#include <cassert>
 #include <limits>
 #include <new>
 
@@ -10,7 +11,7 @@ namespace onegen::producer {
 
 FrameLease::FrameLease(std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
                        std::span<const std::uint8_t> bytes, Frame metadata,
-                       std::shared_ptr<std::uint8_t> storage) noexcept
+                       std::shared_ptr<void> storage) noexcept
     : sink_(std::move(sink)), storage_(std::move(storage)), slot_(slot), bytes_(bytes),
       metadata_(std::move(metadata)) {}
 
@@ -21,12 +22,12 @@ FrameLease::~FrameLease() {
 std::shared_ptr<DirectLeaseSink> DirectLeaseSink::create(std::uint32_t slots,
                                                          std::uint64_t slot_bytes,
                                                          std::string& error,
-                                                         FrameStorage storage) {
+                                                         DestinationProvider provider) {
   if (slots == 0 || slot_bytes == 0) {
     error = "Lease sink requires at least one non-empty slot.";
     return {};
   }
-  if (!storage) {
+  if (!provider) {
     error = "Lease sink requires consumer storage.";
     return {};
   }
@@ -35,10 +36,28 @@ std::shared_ptr<DirectLeaseSink> DirectLeaseSink::create(std::uint32_t slots,
     error = "Lease sink allocation failed.";
     return {};
   }
-  sink->storage_ = std::move(storage);
+  sink->provider_ = std::move(provider);
   sink->reserved_.resize(slots);
+  sink->reserve_threads_.resize(slots);
   for (std::uint32_t index = 0; index < slots; ++index) sink->free_.push_back(index);
   return sink;
+}
+
+std::shared_ptr<DirectLeaseSink> DirectLeaseSink::create(std::uint32_t slots,
+                                                         std::uint64_t slot_bytes,
+                                                         std::string& error,
+                                                         FrameStorage storage) {
+  if (!storage) {
+    error = "Lease sink requires consumer storage.";
+    return {};
+  }
+  return create(slots, slot_bytes, error,
+                [storage = std::move(storage)](std::size_t bytes) -> DestinationReservation {
+                  auto buffer = storage(bytes);
+                  if (!buffer) return {DestinationStatus::Busy, {}, {}};
+                  std::span<std::uint8_t> writable(buffer.get(), bytes);
+                  return {DestinationStatus::Reserved, writable, std::move(buffer)};
+                });
 }
 
 DirectLeaseSink::DirectLeaseSink(std::uint32_t slots, std::uint64_t slot_bytes) noexcept
@@ -89,22 +108,34 @@ detail::ReserveStatus DirectLeaseSink::reserve(detail::DirectReservation& reserv
     slot = free_.back();
     free_.pop_back();
     states_[slot] = SlotState::Reserved;
+    reserve_threads_[slot] = std::this_thread::get_id();
   }
-  // Ask the consumer outside the sink lock: the first acquire of a size may wait for the Host
-  // pool, and a frame release must not wait behind it. No storage is a full set.
-  auto bytes = storage_(static_cast<std::size_t>(slot_bytes_));
-  if (!bytes) {
+  // Ask the consumer outside the sink lock: cold admission may wait for the Host pool,
+  // and frame releases or cancels must not serialize behind it.
+  auto dest = provider_(static_cast<std::size_t>(slot_bytes_));
+  if (dest.status == DestinationStatus::Refused) {
+    dest.owner.reset();
+    std::lock_guard lock(mutex_);
+    stopped_ = true;
+    states_[slot] = SlotState::Free;
+    free_.push_back(slot);
+    return detail::ReserveStatus::Refused;
+  }
+  if (dest.status != DestinationStatus::Reserved
+      || dest.bytes.size() < static_cast<std::size_t>(slot_bytes_)
+      || dest.bytes.data() == nullptr) {
+    dest.owner.reset();
     std::lock_guard lock(mutex_);
     states_[slot] = SlotState::Free;
     free_.push_back(slot);
     return detail::ReserveStatus::Busy;
   }
-  std::uint8_t* memory = bytes.get();
+  auto writable = dest.bytes.first(static_cast<std::size_t>(slot_bytes_));
   {
     std::lock_guard lock(mutex_);
-    reserved_[slot] = std::move(bytes);
+    reserved_[slot] = ReservedSlot{writable, std::move(dest.owner)};
   }
-  reservation.destination = {memory, static_cast<std::size_t>(slot_bytes_)};
+  reservation.destination = writable;
   reservation.ticket = slot;
   reservation.owner = shared_from_this();
   return detail::ReserveStatus::Reserved;
@@ -114,19 +145,18 @@ void DirectLeaseSink::publish(const detail::DirectReservation& reservation, cons
                               std::size_t used_bytes) {
   const auto slot = static_cast<std::uint32_t>(reservation.ticket);
   SharedFrameFn callback;
-  std::shared_ptr<std::uint8_t> storage;
-  std::uint8_t* memory = nullptr;
+  ReservedSlot reserved;
   {
     std::lock_guard lock(mutex_);
     if (slot >= slot_count_ || states_[slot] != SlotState::Reserved) return;
-    storage = std::move(reserved_[slot]);
+    assert(reserve_threads_[slot] == std::this_thread::get_id());
+    reserved = std::move(reserved_[slot]);
     if (used_bytes > slot_bytes_) {
       // The writer never exceeds its destination; refuse instead of exposing a bad span.
       states_[slot] = SlotState::Free;
       free_.push_back(slot);
       return;
     }
-    memory = storage.get();
     states_[slot] = SlotState::Held;
     max_held_ = std::max(max_held_, ++held_);
     callback = on_frame_;
@@ -134,19 +164,24 @@ void DirectLeaseSink::publish(const detail::DirectReservation& reservation, cons
   published_.fetch_add(1, std::memory_order_relaxed);
   // The lease owns the slot from here; dropping it without a callback frees the slot.
   auto lease = std::shared_ptr<const FrameLease>(new FrameLease(
-      shared_from_this(), slot, {memory, used_bytes}, metadata, std::move(storage)));
+      shared_from_this(), slot, {reserved.bytes.data(), used_bytes}, metadata,
+      std::move(reserved.owner)));
   if (callback) callback(SharedFrame{std::move(lease)});
 }
 
 void DirectLeaseSink::cancel(const detail::DirectReservation& reservation,
                              detail::CancelCause) noexcept {
   const auto slot = static_cast<std::uint32_t>(reservation.ticket);
-  std::shared_ptr<std::uint8_t> storage;
-  std::lock_guard lock(mutex_);
-  if (slot >= slot_count_ || states_[slot] != SlotState::Reserved) return;
-  storage = std::move(reserved_[slot]);
-  states_[slot] = SlotState::Free;
-  free_.push_back(slot);
+  ReservedSlot reserved;
+  {
+    std::lock_guard lock(mutex_);
+    if (slot >= slot_count_ || states_[slot] != SlotState::Reserved) return;
+    assert(reserve_threads_[slot] == std::this_thread::get_id());
+    reserved = std::move(reserved_[slot]);
+    states_[slot] = SlotState::Free;
+    free_.push_back(slot);
+  }
+  // Release any consumer-owned open write region/context outside mutex_.
 }
 
 void DirectLeaseSink::release(std::uint32_t slot) noexcept {

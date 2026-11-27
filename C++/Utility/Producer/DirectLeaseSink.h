@@ -14,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace onegen::producer {
@@ -33,15 +34,17 @@ public:
   /** @brief Frame metadata; its payload vectors are empty, the image bytes are bytes(). */
   [[nodiscard]] const Frame& metadata() const noexcept { return metadata_; }
   [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept { return bytes_; }
+  /** @brief Consumer-owned destination state bound at reserve(), if any. */
+  [[nodiscard]] const std::shared_ptr<void>& owner() const noexcept { return storage_; }
 
 private:
   friend class DirectLeaseSink;
   FrameLease(std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
              std::span<const std::uint8_t> bytes, Frame metadata,
-             std::shared_ptr<std::uint8_t> storage) noexcept;
+             std::shared_ptr<void> storage) noexcept;
   std::shared_ptr<DirectLeaseSink> sink_;
-  // Consumer-provided bytes behind bytes(); the lease keeps this storage alive.
-  std::shared_ptr<std::uint8_t> storage_;
+  // Consumer-provided bytes/state behind bytes(); the lease keeps this storage alive.
+  std::shared_ptr<void> storage_;
   std::uint32_t slot_ = 0;
   std::span<const std::uint8_t> bytes_;
   Frame metadata_;
@@ -80,14 +83,30 @@ public:
   using SharedFrameFn = std::function<void(const SharedFrame&)>;
   using ErrorFn = std::function<void(std::string_view)>;
 
+  enum class DestinationStatus : std::uint8_t { Reserved, Busy, Refused };
+
+  struct DestinationReservation {
+    DestinationStatus status = DestinationStatus::Busy;
+    std::span<std::uint8_t> bytes;
+    /** Consumer-owned state kept alive until cancel completes or published FrameLease drops. */
+    std::shared_ptr<void> owner;
+  };
+
   /**
-   * @brief Storage for one frame: returns at least `bytes` writable bytes, or empty.
+   * @brief Reserves one writable destination for a direct frame on the acquisition thread.
    *
-   * Called on the acquisition thread. A provider may wait for its Host pool on the first
-   * acquire of a size; an empty result counts as a full set: the GenTL buffer is requeued and
-   * the frame is dropped.
+   * Returning Busy counts a drop-before-copy; Refused latches sink stop and halts the loop.
+   */
+  using DestinationProvider = std::function<DestinationReservation(std::size_t bytes)>;
+
+  /**
+   * @brief Legacy writable buffer callback returning at least `bytes` writable bytes, or empty.
    */
   using FrameStorage = std::function<std::shared_ptr<std::uint8_t>(std::size_t bytes)>;
+
+  static std::shared_ptr<DirectLeaseSink> create(std::uint32_t slots, std::uint64_t slot_bytes,
+                                                 std::string& error,
+                                                 DestinationProvider provider);
 
   /**
    * @brief Creates a bounded lease set over consumer storage; returns null with error when the
@@ -134,11 +153,17 @@ private:
 
   enum class SlotState : std::uint8_t { Free, Reserved, Held };
 
+  struct ReservedSlot {
+    std::span<std::uint8_t> bytes;
+    std::shared_ptr<void> owner;
+  };
+
   const std::uint32_t slot_count_;
   const std::uint64_t slot_bytes_;
-  FrameStorage storage_;
-  // Bytes of a reserved slot while the sink takes its storage from the consumer.
-  std::vector<std::shared_ptr<std::uint8_t>> reserved_;
+  DestinationProvider provider_;
+  // Bytes and owner of a reserved slot while the sink holds the consumer destination.
+  std::vector<ReservedSlot> reserved_;
+  std::vector<std::thread::id> reserve_threads_;
   mutable std::mutex mutex_;
   std::vector<SlotState> states_;
   std::vector<std::uint32_t> free_;
