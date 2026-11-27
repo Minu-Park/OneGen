@@ -1,5 +1,4 @@
 #include "OneGenGraphicsFrameAdapter.h"
-#include "DeviceRuntime/Contract/FrameStorage.h"
 #include <type_traits>
 #include <array>
 #include <algorithm>
@@ -23,25 +22,27 @@ bool samplesEqual(const GraphicsSpan<T>& actual, const std::vector<T>& expected)
 
 static_assert(std::is_const_v<std::remove_reference_t<decltype(*std::declval<GraphicsSpan<std::uint8_t>>().data())>>);
 
-struct RecordingStorage : IFrameStorageProvider
+struct RecordingStorage : GraphicsFrameAllocator
 {
   std::size_t calls = 0;
-  std::vector<std::shared_ptr<std::vector<std::uint8_t>>> buffers;
+  std::vector<std::size_t> sizes;
+  std::vector<const std::uint8_t*> buffers;
 
-  std::shared_ptr<std::uint8_t> acquire(const std::size_t bytes) override
+  GraphicsResult<GraphicsAllocationRef> allocate(std::size_t bytes, std::size_t alignment) noexcept override
   {
-      ++calls;
-      auto owner = std::make_shared<std::vector<std::uint8_t>>(bytes, 0);
-      buffers.push_back(owner);
-      return std::shared_ptr<std::uint8_t>(owner, owner->data());
+    ++calls;
+    sizes.push_back(bytes);
+    auto allocation = GraphicsFrameContext::local().allocate(bytes, alignment);
+    if (allocation) buffers.push_back(reinterpret_cast<const std::uint8_t*>(allocation.value()->base()));
+    return allocation;
   }
-  GraphicsFrameContext function() { return frameStorageContext(std::shared_ptr<IFrameStorageProvider>(this, [](IFrameStorageProvider*) {})); }
+  GraphicsFrameContext function() { return GraphicsFrameContext(std::shared_ptr<GraphicsFrameAllocator>(this, [](GraphicsFrameAllocator*) {})); }
 };
 
-struct RefusingStorage : IFrameStorageProvider {
-  std::shared_ptr<std::uint8_t> acquire(std::size_t) override { return {}; }
+struct RefusingStorage : GraphicsFrameAllocator {
+  GraphicsResult<GraphicsAllocationRef> allocate(std::size_t, std::size_t) noexcept override { return GraphicsFrameError::Allocation; }
 };
-GraphicsFrameContext refusingContext() { return frameStorageContext(std::make_shared<RefusingStorage>()); }
+GraphicsFrameContext refusingContext() { return GraphicsFrameContext(std::make_shared<RefusingStorage>()); }
 
 } // namespace
 
@@ -187,8 +188,8 @@ int main()
   const auto copied = oneGenGraphicsFrame(source, 70, nullptr, {}, {}, copyStorage.function());
   assert(copied && copied->hasImage());
   assert(copyStorage.calls == 1 && copyStorage.buffers.size() == 1);
-  assert(copied->images().front().payload.pixels.data() == copyStorage.buffers.front()->data());
-  assert(*copyStorage.buffers.front() == source.payload);
+  assert(copied->images().front().payload.pixels.data() == copyStorage.buffers.front());
+  assert(copyStorage.sizes.front() == source.payload.size() && std::equal(source.payload.begin(), source.payload.end(), copyStorage.buffers.front()));
 
   RecordingStorage swapStorage;
   source.pixel_endianness = 2;
@@ -197,8 +198,8 @@ int main()
   assert(swappedIntoStorage && swappedIntoStorage->hasImage());
   assert(swapStorage.calls == 1 && swapStorage.buffers.size() == 1);
   assert(swappedIntoStorage->images().front().payload.pixels.data()
-      == swapStorage.buffers.front()->data());
-  assert((*swapStorage.buffers.front()) == std::vector<std::uint8_t>({2, 1, 4, 3}));
+      == swapStorage.buffers.front());
+  assert(swapStorage.sizes.front() == 4 && std::equal(swapStorage.buffers.front(), swapStorage.buffers.front() + 4, std::array<std::uint8_t, 4>{2, 1, 4, 3}.begin()));
   source.pixel_endianness = 0;
 
   onegen::Frame wordSource;
@@ -215,7 +216,7 @@ int main()
   assert(wordSwapped->images().front().payload.pixelFormat
       == GraphicsImagePixelFormat::BiColorRGBG10);
   assert(wordStorage.calls == 1 && wordStorage.buffers.size() == 1);
-  assert((*wordStorage.buffers.front()) == std::vector<std::uint8_t>({4, 3, 2, 1}));
+  assert(wordStorage.sizes.front() == 4 && std::equal(wordStorage.buffers.front(), wordStorage.buffers.front() + 4, std::array<std::uint8_t, 4>{4, 3, 2, 1}.begin()));
 
   const auto dropped = oneGenGraphicsFrame(source, 73, nullptr, {}, {},
       refusingContext());
@@ -315,7 +316,7 @@ int main()
   assert(rangeStorage.calls == 1 && rangeStorage.buffers.size() == 1);
   const auto& storedRange = storedScene->ranges().front().payload;
   assert(storedRange.zValues.data()
-      == reinterpret_cast<const float*>(rangeStorage.buffers.front()->data()));
+      == reinterpret_cast<const float*>(rangeStorage.buffers.front()));
   assert(storedRange.zValues[0] == 2.0F && storedRange.zValues[1] == 3.0F);
   assert(storedRange.xValues[0] == 1.0F && storedRange.xValues[1] == 4.0F);
   assert(storedRange.yValues[0] == 2.0F && storedRange.yValues[1] == 5.0F);
