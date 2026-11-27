@@ -526,8 +526,9 @@ void borrowed_copy_happens_while_pinned() {
   std::vector<std::uint8_t> backing(required + 32, guard_byte);
   auto destination = std::span<std::uint8_t>(backing).subspan(16, required);
 
+  onegen::Frame scratch;
   onegen::detail::with_pinned_buffer(
-      fixture.context, 100, onegen::detail::PinnedExtraction::BorrowedImageOnly,
+      fixture.context, 100, onegen::detail::PinnedExtraction::BorrowedImageOnly, scratch,
       [&](onegen::detail::PinnedBuffer& buffer) {
         fixture.state.log.push_back("visit-begin");
         const onegen::BorrowedFrameView view(buffer.metadata(), buffer.transport());
@@ -558,8 +559,9 @@ void view_not_retained() {
   Fixture fixture;
   reset_fake(fixture, make_buffer(4, 2, 0, mono8));
   const std::uint8_t* stashed = nullptr;
+  onegen::Frame scratch;
   onegen::detail::with_pinned_buffer(
-      fixture.context, 100, onegen::detail::PinnedExtraction::BorrowedImageOnly,
+      fixture.context, 100, onegen::detail::PinnedExtraction::BorrowedImageOnly, scratch,
       [&](onegen::detail::PinnedBuffer& buffer) { stashed = buffer.transport().data(); });
   assert(stashed != nullptr);
   assert(*stashed == queued_byte);
@@ -750,9 +752,10 @@ void unsupported_layouts() {
 // T10
 void requeue_exactly_once_on_visitor_exception() {
   Fixture fixture;
+  onegen::Frame scratch;
   reset_fake(fixture, make_buffer(4, 2, 0, mono8));
   onegen::detail::with_pinned_buffer(
-      fixture.context, 100, onegen::detail::PinnedExtraction::Owned,
+      fixture.context, 100, onegen::detail::PinnedExtraction::Owned, scratch,
       [](onegen::detail::PinnedBuffer&) {});
   assert(fixture.state.queue_count == 1);
 
@@ -760,7 +763,7 @@ void requeue_exactly_once_on_visitor_exception() {
   bool runtime_caught = false;
   try {
     onegen::detail::with_pinned_buffer(
-        fixture.context, 100, onegen::detail::PinnedExtraction::Owned,
+        fixture.context, 100, onegen::detail::PinnedExtraction::Owned, scratch,
         [](onegen::detail::PinnedBuffer&) { throw std::runtime_error("boom"); });
   } catch (const std::runtime_error& error) {
     runtime_caught = std::string(error.what()) == "boom";
@@ -772,7 +775,7 @@ void requeue_exactly_once_on_visitor_exception() {
   int integer_caught = 0;
   try {
     onegen::detail::with_pinned_buffer(
-        fixture.context, 100, onegen::detail::PinnedExtraction::Owned,
+        fixture.context, 100, onegen::detail::PinnedExtraction::Owned, scratch,
         [](onegen::detail::PinnedBuffer&) { throw 7; });
   } catch (int value) {
     integer_caught = value;
@@ -836,8 +839,9 @@ void stop_while_pinned() {
   Fixture fixture;
   reset_fake(fixture, make_buffer(4, 2, 0, mono8));
   bool stopped = false;
+  onegen::Frame scratch;
   onegen::detail::with_pinned_buffer(
-      fixture.context, 100, onegen::detail::PinnedExtraction::Owned,
+      fixture.context, 100, onegen::detail::PinnedExtraction::Owned, scratch,
       [&](onegen::detail::PinnedBuffer&) {
         stopped = true;
         fixture.context.gentl->EventKill(fixture.context.new_buffer_event);
@@ -1301,7 +1305,9 @@ void direct_run_step_order_and_cancel() {
     auto destination = std::span<std::uint8_t>(backing).subspan(16, required);
     sink.reservation.destination = destination;
     onegen::Frame fallback;
-    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    onegen::Frame pinned_scratch;
+    const auto step = onegen::detail::run_direct_step(
+        fixture.context, 100, sink, fallback, pinned_scratch);
     assert(step == onegen::detail::DirectStep::Published);
     assert(fixture.state.queue_count == 1);
     assert((fixture.state.log == std::vector<std::string>{"reserve", "event", "queue", "publish"}));
@@ -1322,7 +1328,9 @@ void direct_run_step_order_and_cancel() {
     auto destination = std::span<std::uint8_t>(backing).subspan(16, required);
     sink.reservation.destination = destination;
     onegen::Frame fallback;
-    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    onegen::Frame pinned_scratch;
+    const auto step = onegen::detail::run_direct_step(
+        fixture.context, 100, sink, fallback, pinned_scratch);
     assert(step == onegen::detail::DirectStep::Fallback);
     assert(fixture.state.queue_count == 1);
     assert((fixture.state.log
@@ -1343,7 +1351,9 @@ void direct_run_step_order_and_cancel() {
     auto destination = std::span<std::uint8_t>(backing).subspan(16, required - 1);
     sink.reservation.destination = destination;
     onegen::Frame fallback;
-    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    onegen::Frame pinned_scratch;
+    const auto step = onegen::detail::run_direct_step(
+        fixture.context, 100, sink, fallback, pinned_scratch);
     assert(step == onegen::detail::DirectStep::CapacityFailed);
     assert(fixture.state.queue_count == 1);
     assert((fixture.state.log
@@ -1362,7 +1372,9 @@ void direct_run_step_order_and_cancel() {
     sink.trace = &fixture.state.log;
     sink.reserve_status = onegen::detail::ReserveStatus::NoPool;
     onegen::Frame fallback;
-    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    onegen::Frame pinned_scratch;
+    const auto step = onegen::detail::run_direct_step(
+        fixture.context, 100, sink, fallback, pinned_scratch);
     assert(step == onegen::detail::DirectStep::NoPool);
     assert((fixture.state.log == std::vector<std::string>{"reserve"}));
     assert(fixture.state.queue_count == 0);
@@ -1373,7 +1385,9 @@ void direct_run_step_order_and_cancel() {
     sink.trace = &fixture.state.log;
     sink.reserve_status = onegen::detail::ReserveStatus::Stopped;
     onegen::Frame fallback;
-    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    onegen::Frame pinned_scratch;
+    const auto step = onegen::detail::run_direct_step(
+        fixture.context, 100, sink, fallback, pinned_scratch);
     assert(step == onegen::detail::DirectStep::Stopped);
     assert((fixture.state.log == std::vector<std::string>{"reserve"}));
     assert(fixture.state.queue_count == 0);
@@ -1385,7 +1399,9 @@ void direct_run_step_order_and_cancel() {
     sink.trace = &fixture.state.log;
     sink.reserve_status = onegen::detail::ReserveStatus::Busy;
     onegen::Frame fallback;
-    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    onegen::Frame pinned_scratch;
+    const auto step = onegen::detail::run_direct_step(
+        fixture.context, 100, sink, fallback, pinned_scratch);
     assert(step == onegen::detail::DirectStep::Busy);
     assert(fixture.state.queue_count == 1);
     assert((fixture.state.log
@@ -1404,7 +1420,9 @@ void direct_run_step_order_and_cancel() {
     sink.trace = &fixture.state.log;
     sink.reserve_status = onegen::detail::ReserveStatus::Busy;
     onegen::Frame fallback;
-    const auto step = onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    onegen::Frame pinned_scratch;
+    const auto step = onegen::detail::run_direct_step(
+        fixture.context, 100, sink, fallback, pinned_scratch);
     assert(step == onegen::detail::DirectStep::Busy);
     assert(fixture.state.queue_count == 0);
     assert((fixture.state.log == std::vector<std::string>{"reserve", "event"}));
@@ -1420,9 +1438,10 @@ void direct_run_step_order_and_cancel() {
     sink.reservation.destination = destination;
     sink.throw_publish = true;
     onegen::Frame fallback;
+    onegen::Frame pinned_scratch;
     bool threw = false;
     try {
-      onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+      onegen::detail::run_direct_step(fixture.context, 100, sink, fallback, pinned_scratch);
     } catch (const std::runtime_error&) {
       threw = true;
     }
@@ -1439,9 +1458,10 @@ void direct_run_step_order_and_cancel() {
     std::vector<std::uint8_t> backing(64, guard_byte);
     sink.reservation.destination = std::span<std::uint8_t>(backing).subspan(16, 32);
     onegen::Frame fallback;
+    onegen::Frame pinned_scratch;
     bool threw = false;
     try {
-      onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+      onegen::detail::run_direct_step(fixture.context, 100, sink, fallback, pinned_scratch);
     } catch (const onegen::Error&) {
       threw = true;
     }
@@ -1487,9 +1507,10 @@ void direct_timeout_cancels_once() {
   std::vector<std::uint8_t> backing(64, guard_byte);
   sink.reservation.destination = std::span<std::uint8_t>(backing).subspan(16, 32);
   onegen::Frame fallback;
+  onegen::Frame pinned_scratch;
   bool threw = false;
   try {
-    onegen::detail::run_direct_step(fixture.context, 100, sink, fallback);
+    onegen::detail::run_direct_step(fixture.context, 100, sink, fallback, pinned_scratch);
   } catch (const onegen::Error& error) {
     threw = std::string(error.what()) == "grab timeout";
   }

@@ -983,14 +983,15 @@ DirectAcquisition acquire_into_or_owned(const AcquisitionContext& context, std::
                                         FrameDestination destination) {
   DirectState state;
   state.destination = destination;
-  with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned,
+  Frame scratch;
+  with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned, scratch,
                      [&](PinnedBuffer& buffer) { direct_or_owned_visit(&state, buffer); });
   return std::move(state.result);
 }
 
-void visit_pinned_buffer_into(const AcquisitionContext& context, std::uint64_t timeout_ms,
-                              PinnedExtraction extraction, Frame& f, PinnedVisitFn visit,
-                              void* user) {
+void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                         PinnedExtraction extraction, Frame& f, PinnedVisitFn visit,
+                         void* user) {
   GenTL::EVENT_NEW_BUFFER_DATA data{};
   size_t size = sizeof(data);
   auto err = context.gentl->EventGetData(context.new_buffer_event, &data, &size, timeout_ms);
@@ -1291,22 +1292,19 @@ void visit_pinned_buffer_into(const AcquisitionContext& context, std::uint64_t t
   if (queue_error != GenTL::GC_ERR_SUCCESS) context.gentl->fail("DSQueueBuffer", queue_error);
 }
 
-void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout_ms,
-                         PinnedExtraction extraction, PinnedVisitFn visit, void* user) {
-  Frame scratch;
-  visit_pinned_buffer_into(context, timeout_ms, extraction, scratch, visit, user);
-}
-
 Frame grab_owned(const AcquisitionContext& context, std::uint64_t timeout_ms) {
   Frame frame;
-  visit_pinned_buffer(context, timeout_ms, PinnedExtraction::Owned, &grab_owned_visit, &frame);
+  Frame scratch;
+  visit_pinned_buffer(context, timeout_ms, PinnedExtraction::Owned, scratch, &grab_owned_visit,
+                      &frame);
   return frame;
 }
 
 BorrowedGrabResult grab_one_into(const AcquisitionContext& context, std::uint64_t timeout_ms,
                                  FrameDestination destination) {
   BorrowedState state{destination, {}};
-  visit_pinned_buffer(context, timeout_ms, PinnedExtraction::BorrowedImageOnly,
+  Frame scratch;
+  visit_pinned_buffer(context, timeout_ms, PinnedExtraction::BorrowedImageOnly, scratch,
                       &grab_borrowed_visit, &state);
   return std::move(state.result);
 }
@@ -1325,8 +1323,8 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
     // themselves are not drops.
     try {
       bool dequeued = false;
-      with_pinned_buffer_into(context, timeout_ms, PinnedExtraction::DirectOrOwned, pinned_scratch,
-                              [&](PinnedBuffer&) { dequeued = true; });
+      with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned, pinned_scratch,
+                         [&](PinnedBuffer&) { dequeued = true; });
       if (dequeued) sink.note_slot_exhausted();
     } catch (const Error& error) {
       if (std::string_view(error.what()) != "grab timeout") throw;
@@ -1339,8 +1337,8 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
   state.sink = &sink;
   state.destination = FrameDestination{reservation.destination};
   try {
-    with_pinned_buffer_into(context, timeout_ms, PinnedExtraction::DirectOrOwned, pinned_scratch,
-                            [&](PinnedBuffer& buffer) { direct_or_owned_visit(&state, buffer); });
+    with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned, pinned_scratch,
+                       [&](PinnedBuffer& buffer) { direct_or_owned_visit(&state, buffer); });
   } catch (const Error& error) {
     if (std::string_view(error.what()) == "grab timeout") guard.set_cause(CancelCause::Timeout);
     throw;
@@ -1366,12 +1364,6 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
       return DirectStep::CapacityFailed;
   }
   return DirectStep::Stopped;
-}
-
-DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t timeout_ms,
-                           DirectFrameSink& sink, Frame& fallback_out) {
-  Frame pinned_scratch;
-  return run_direct_step(context, timeout_ms, sink, fallback_out, pinned_scratch);
 }
 
 }  // namespace detail
