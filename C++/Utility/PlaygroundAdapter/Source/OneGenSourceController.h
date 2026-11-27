@@ -52,6 +52,8 @@ class OneGenSourceController final : public AbstractSourceController, public IDe
   Q_OBJECT
   Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameContextClient IToolProvider)
 public:
+  struct DirectDestinationPool;
+  struct DirectDestinationState;
   /** @brief Applies to this controller and its camera controllers from their next Single/Live start. */
   void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source) override;
   using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
@@ -172,6 +174,7 @@ signals:
 
 private:
   friend class FeatureTreeTests;
+  friend class OneGenSourceControllerTests;
   struct ContextSourceState {
     std::shared_ptr<GraphicsFrameContextSource> source;
     mutable std::mutex mutex;
@@ -183,9 +186,12 @@ private:
     GraphicsFrameCallbackGate::Token gateToken;
     std::string sourceName;
   };
-  struct DirectDestinationState;
   void deliver(const onegen::Frame& source, const std::string& sourceName, bool single = false);
   void deliverDirect(const onegen::producer::SharedFrame& source);
+  std::function<void(const onegen::Frame&)> makeAcquisitionCallback(
+      const std::string& sourceName, GraphicsFrameCallbackGate::Token token);
+  GraphicsFrameCallbackGate::Token ensureCallbackGateLocked(
+      onegen::producer::Lease& lease, const std::string& sourceName);
   std::shared_ptr<ContextSourceState> activeContextSource(std::string* error = nullptr) const;
   void recordStickyContextFailure(const std::shared_ptr<ContextSourceState>& state,
       GraphicsFrameError error, const std::string& message);
@@ -200,6 +206,7 @@ private:
   void configureDirectSink(onegen::producer::Lease& lease, const std::string& sourceName);
   mutable std::mutex mutex_;
   std::shared_ptr<ContextSourceState> context_source_;
+  std::shared_ptr<DirectDestinationPool> destination_pool_;
   std::shared_ptr<const DirectRunRecord> active_direct_run_;
   std::string last_single_failure_;
   /** @brief Serializes direct sink attachment with lease replacement without callbacks under mutex_. */

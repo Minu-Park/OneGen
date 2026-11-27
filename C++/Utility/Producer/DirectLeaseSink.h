@@ -27,6 +27,15 @@ class DirectLeaseSink;
  */
 class FrameLease {
 public:
+  struct ConstructKey {
+  private:
+    friend class DirectLeaseSink;
+    explicit ConstructKey() = default;
+  };
+
+  FrameLease(ConstructKey, std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
+             std::span<const std::uint8_t> bytes, Frame metadata,
+             std::shared_ptr<void> storage) noexcept;
   FrameLease(const FrameLease&) = delete;
   FrameLease& operator=(const FrameLease&) = delete;
   ~FrameLease();
@@ -39,9 +48,6 @@ public:
 
 private:
   friend class DirectLeaseSink;
-  FrameLease(std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
-             std::span<const std::uint8_t> bytes, Frame metadata,
-             std::shared_ptr<void> storage) noexcept;
   std::shared_ptr<DirectLeaseSink> sink_;
   // Consumer-provided bytes/state behind bytes(); the lease keeps this storage alive.
   std::shared_ptr<void> storage_;
@@ -80,6 +86,7 @@ struct LeaseSinkCounters {
 class DirectLeaseSink final : public detail::DirectFrameSink,
                               public std::enable_shared_from_this<DirectLeaseSink> {
 public:
+  struct LeaseBlockPool;
   using SharedFrameFn = std::function<void(const SharedFrame&)>;
   using ErrorFn = std::function<void(std::string_view)>;
 
@@ -161,6 +168,7 @@ private:
   const std::uint32_t slot_count_;
   const std::uint64_t slot_bytes_;
   DestinationProvider provider_;
+  std::shared_ptr<LeaseBlockPool> lease_pool_;
   // Bytes and owner of a reserved slot while the sink holds the consumer destination.
   std::vector<ReservedSlot> reserved_;
   std::vector<std::thread::id> reserve_threads_;

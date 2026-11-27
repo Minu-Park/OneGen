@@ -118,11 +118,25 @@ std::string contextErrorMessage(GraphicsFrameError error)
 
 } // namespace
 
+struct OneGenSourceController::DirectDestinationPool {
+  std::mutex mutex;
+  std::size_t capacity = kMaximumInFlightFrames;
+  std::size_t blockBytes = 0;
+  std::vector<void*> freeBlocks;
+
+  ~DirectDestinationPool()
+  {
+    for (void* ptr : freeBlocks) ::operator delete(ptr);
+  }
+};
+
 struct OneGenSourceController::DirectDestinationState {
   std::shared_ptr<const DirectRunRecord> run;
   std::optional<GraphicsFrameContext> context;
   std::optional<GraphicsFrameBuilder> builder;
   GraphicsWriteRegion<std::uint8_t> region;
+
+  DirectDestinationState() noexcept = default;
 
   DirectDestinationState(std::shared_ptr<const DirectRunRecord> runIn,
                          GraphicsFrameContext contextIn)
@@ -142,6 +156,62 @@ struct OneGenSourceController::DirectDestinationState {
     context.reset();
   }
 };
+
+namespace {
+
+template <typename T>
+struct DestinationPoolAllocator {
+  using value_type = T;
+  std::shared_ptr<OneGenSourceController::DirectDestinationPool> pool;
+
+  explicit DestinationPoolAllocator(
+      std::shared_ptr<OneGenSourceController::DirectDestinationPool> poolIn) noexcept
+      : pool(std::move(poolIn))
+  {
+  }
+  template <typename U>
+  DestinationPoolAllocator(const DestinationPoolAllocator<U>& other) noexcept
+      : pool(other.pool)
+  {
+  }
+
+  [[nodiscard]] T* allocate(std::size_t count)
+  {
+    const std::size_t bytes = count * sizeof(T);
+    if (pool) {
+      std::lock_guard lock(pool->mutex);
+      if (pool->blockBytes == bytes && !pool->freeBlocks.empty()) {
+        void* ptr = pool->freeBlocks.back();
+        pool->freeBlocks.pop_back();
+        return static_cast<T*>(ptr);
+      }
+    }
+    return static_cast<T*>(::operator new(bytes));
+  }
+
+  void deallocate(T* ptr, std::size_t count) noexcept
+  {
+    if (!ptr) return;
+    const std::size_t bytes = count * sizeof(T);
+    if (pool) {
+      std::lock_guard lock(pool->mutex);
+      if (pool->blockBytes == 0U) pool->blockBytes = bytes;
+      if (pool->blockBytes == bytes && pool->freeBlocks.size() < pool->capacity) {
+        pool->freeBlocks.push_back(ptr);
+        return;
+      }
+    }
+    ::operator delete(ptr);
+  }
+
+  template <typename U>
+  bool operator==(const DestinationPoolAllocator<U>& other) const noexcept
+  {
+    return pool == other.pool;
+  }
+};
+
+} // namespace
 
 OneGenSourceController::OneGenSourceController(QObject* parent, DeviceImageRejectionSink imageRejectionSink,
     DevicePlanarRejectionSink planarRejectionSink, std::uint32_t imageSourceIndex)
@@ -471,11 +541,28 @@ void OneGenSourceController::setLease(onegen::producer::Lease* lease)
   bindLease();
 }
 
+std::function<void(const onegen::Frame&)> OneGenSourceController::makeAcquisitionCallback(
+    const std::string& sourceName, GraphicsFrameCallbackGate::Token token)
+{
+  return [this, sourceName, token = std::move(token)](const onegen::Frame& source) {
+    GraphicsFrameCallbackGate::Lease callback(token);
+    if (callback) deliver(source, sourceName);
+  };
+}
+
+GraphicsFrameCallbackGate::Token OneGenSourceController::ensureCallbackGateLocked(
+    onegen::producer::Lease& lease, const std::string& sourceName)
+{
+  if (!callback_gate_) {
+    callback_gate_ = std::make_unique<GraphicsFrameCallbackGate>();
+    lease.set_frame_callback(makeAcquisitionCallback(sourceName, callback_gate_->token()));
+  }
+  return callback_gate_->token();
+}
+
 void OneGenSourceController::bindLease()
 {
   if (!lease_) return;
-  callback_gate_ = std::make_unique<GraphicsFrameCallbackGate>();
-  const auto token = callback_gate_->token();
   const auto& info = lease_->info();
   const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
   // Inspect the copied node tree without changing selectors or acquisition settings.
@@ -514,11 +601,8 @@ void OneGenSourceController::bindLease()
     qWarning() << "[GenICam] component inventory unavailable:" << error.what();
   }
 
-  lease_->set_frame_callback(
-      [this, sourceName, token](const onegen::Frame& source) {
-        GraphicsFrameCallbackGate::Lease callback(token);
-        if (callback) deliver(source, sourceName);
-      });
+  callback_gate_.reset();
+  (void)ensureCallbackGateLocked(*lease_, sourceName);
   lease_->set_error_callback([this, errors = error_state_, model = info.model, serial = info.serial](
                                  const std::string_view error) {
     const auto message = QString::fromLocal8Bit(error.data(), static_cast<qsizetype>(error.size()));
@@ -589,9 +673,20 @@ void OneGenSourceController::configureDirectSink(
     onegen::producer::Lease& lease, const std::string& sourceName)
 {
   GraphicsFrameCallbackGate::Token token;
+  std::shared_ptr<DirectDestinationPool> pool;
   {
     std::lock_guard lock(mutex_);
-    if (callback_gate_) token = callback_gate_->token();
+    token = ensureCallbackGateLocked(lease, sourceName);
+    if (!destination_pool_) {
+      destination_pool_ = std::make_shared<DirectDestinationPool>();
+      std::vector<std::shared_ptr<DirectDestinationState>> warmup;
+      warmup.reserve(kMaximumInFlightFrames);
+      for (std::uint32_t i = 0; i < kMaximumInFlightFrames; ++i) {
+        warmup.push_back(std::allocate_shared<DirectDestinationState>(
+            DestinationPoolAllocator<DirectDestinationState>(destination_pool_)));
+      }
+    }
+    pool = destination_pool_;
   }
   if (!token) throw std::runtime_error("Frame delivery is not bound to a consumer.");
 
@@ -636,7 +731,7 @@ void OneGenSourceController::configureDirectSink(
     lease_sink_.reset();
   }
 
-  auto destinationProvider = [this](std::size_t bytes) -> onegen::producer::DirectLeaseSink::DestinationReservation {
+  auto destinationProvider = [this, pool](std::size_t bytes) -> onegen::producer::DirectLeaseSink::DestinationReservation {
     using DestinationReservation = onegen::producer::DirectLeaseSink::DestinationReservation;
     using DestinationStatus = onegen::producer::DirectLeaseSink::DestinationStatus;
     std::shared_ptr<const DirectRunRecord> run;
@@ -645,6 +740,10 @@ void OneGenSourceController::configureDirectSink(
       run = active_direct_run_;
     }
     if (!run || !run->sourceState || !run->sourceState->source) {
+      return {DestinationStatus::Refused, {}, {}};
+    }
+    GraphicsFrameCallbackGate::Lease callback(run->gateToken);
+    if (!callback) {
       return {DestinationStatus::Refused, {}, {}};
     }
     {
@@ -670,7 +769,9 @@ void OneGenSourceController::configureDirectSink(
           .arg(QString::fromStdString(run->sourceName), QString::fromStdString(message));
       return {DestinationStatus::Refused, {}, {}};
     }
-    auto state = std::make_shared<DirectDestinationState>(run, std::move(ctxResult).value());
+    auto state = std::allocate_shared<DirectDestinationState>(
+        DestinationPoolAllocator<DirectDestinationState>(pool),
+        run, std::move(ctxResult).value());
     auto reserved = state->builder->reserve<std::uint8_t>(bytes, 1U);
     if (!reserved) {
       const auto err = reserved.error();
@@ -839,6 +940,16 @@ void OneGenSourceController::stopOwnAcquisition()
     const auto& info = lease->info();
     const auto sourceName = info.display_name.empty() ? info.id : info.display_name;
     lease->stop();
+    std::unique_ptr<GraphicsFrameCallbackGate> oldGate;
+    {
+      std::lock_guard lock(mutex_);
+      active_direct_run_.reset();
+      oldGate = std::move(callback_gate_);
+    }
+    if (oldGate) {
+      oldGate->beginShutdown();
+      oldGate->waitForDrain();
+    }
     grabbing_.store(false, std::memory_order_relaxed);
     qInfo().noquote() << QStringLiteral(
         "[GenICam] live diagnostics: camera=%1 received=%2 delivered=%3 failed=%4 incomplete=%5 dropped=%6")
@@ -1168,7 +1279,20 @@ void OneGenSourceController::deliverDirect(const onegen::producer::SharedFrame& 
     auto* state = static_cast<DirectDestinationState*>(shared.lease->owner().get());
     if (!state || !state->run || !state->builder || !state->region.isOpen()) return;
     GraphicsFrameCallbackGate::Lease callback(state->run->gateToken);
-    if (!callback) return;
+    std::shared_ptr<const DirectRunRecord> activeRun;
+    {
+      std::lock_guard lock(mutex_);
+      activeRun = active_direct_run_;
+    }
+    if (!callback || activeRun.get() != state->run.get()) {
+      rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      if (state->region.isOpen()) {
+        GraphicsWriteRegion<std::uint8_t> abandoned = std::move(state->region);
+      }
+      state->builder.reset();
+      state->context.reset();
+      return;
+    }
 
     const auto& sourceName = state->run->sourceName;
     const auto& source = shared.lease->metadata();

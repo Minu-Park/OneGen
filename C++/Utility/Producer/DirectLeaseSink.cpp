@@ -9,7 +9,63 @@
 
 namespace onegen::producer {
 
-FrameLease::FrameLease(std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
+struct DirectLeaseSink::LeaseBlockPool {
+  std::mutex mutex;
+  std::uint32_t capacity = 0;
+  std::size_t block_bytes = 0;
+  std::vector<void*> free_blocks;
+
+  ~LeaseBlockPool() {
+    for (void* ptr : free_blocks) ::operator delete(ptr);
+  }
+};
+
+namespace {
+
+template <typename T>
+struct LeasePoolAllocator {
+  using value_type = T;
+  std::shared_ptr<DirectLeaseSink::LeaseBlockPool> pool;
+
+  explicit LeasePoolAllocator(std::shared_ptr<DirectLeaseSink::LeaseBlockPool> poolIn) noexcept
+      : pool(std::move(poolIn)) {}
+  template <typename U>
+  LeasePoolAllocator(const LeasePoolAllocator<U>& other) noexcept : pool(other.pool) {}
+
+  [[nodiscard]] T* allocate(std::size_t count) {
+    const std::size_t bytes = count * sizeof(T);
+    {
+      std::lock_guard lock(pool->mutex);
+      if (pool->block_bytes == bytes && !pool->free_blocks.empty()) {
+        void* ptr = pool->free_blocks.back();
+        pool->free_blocks.pop_back();
+        return static_cast<T*>(ptr);
+      }
+    }
+    return static_cast<T*>(::operator new(bytes));
+  }
+
+  void deallocate(T* ptr, std::size_t count) noexcept {
+    if (!ptr) return;
+    const std::size_t bytes = count * sizeof(T);
+    std::lock_guard lock(pool->mutex);
+    if (pool->block_bytes == 0U) pool->block_bytes = bytes;
+    if (pool->block_bytes == bytes && pool->free_blocks.size() < pool->capacity) {
+      pool->free_blocks.push_back(ptr);
+      return;
+    }
+    ::operator delete(ptr);
+  }
+
+  template <typename U>
+  bool operator==(const LeasePoolAllocator<U>& other) const noexcept {
+    return pool == other.pool;
+  }
+};
+
+}  // namespace
+
+FrameLease::FrameLease(ConstructKey, std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
                        std::span<const std::uint8_t> bytes, Frame metadata,
                        std::shared_ptr<void> storage) noexcept
     : sink_(std::move(sink)), storage_(std::move(storage)), slot_(slot), bytes_(bytes),
@@ -37,9 +93,23 @@ std::shared_ptr<DirectLeaseSink> DirectLeaseSink::create(std::uint32_t slots,
     return {};
   }
   sink->provider_ = std::move(provider);
+  sink->lease_pool_ = std::make_shared<LeaseBlockPool>();
+  sink->lease_pool_->capacity = slots;
   sink->reserved_.resize(slots);
   sink->reserve_threads_.resize(slots);
   for (std::uint32_t index = 0; index < slots; ++index) sink->free_.push_back(index);
+  // Pre-warm slot_count_ FrameLease blocks so steady-state publish makes no heap allocations.
+  {
+    std::vector<std::shared_ptr<const FrameLease>> warmup;
+    warmup.reserve(slots);
+    const Frame empty_metadata{};
+    for (std::uint32_t index = 0; index < slots; ++index) {
+      warmup.push_back(std::allocate_shared<const FrameLease>(
+          LeasePoolAllocator<FrameLease>(sink->lease_pool_), FrameLease::ConstructKey{},
+          std::shared_ptr<DirectLeaseSink>{}, 0U, std::span<const std::uint8_t>{},
+          empty_metadata, std::shared_ptr<void>{}));
+    }
+  }
   return sink;
 }
 
@@ -163,9 +233,10 @@ void DirectLeaseSink::publish(const detail::DirectReservation& reservation, cons
   }
   published_.fetch_add(1, std::memory_order_relaxed);
   // The lease owns the slot from here; dropping it without a callback frees the slot.
-  auto lease = std::shared_ptr<const FrameLease>(new FrameLease(
-      shared_from_this(), slot, {reserved.bytes.data(), used_bytes}, metadata,
-      std::move(reserved.owner)));
+  auto lease = std::allocate_shared<const FrameLease>(
+      LeasePoolAllocator<FrameLease>(lease_pool_), FrameLease::ConstructKey{},
+      shared_from_this(), slot, std::span<const std::uint8_t>{reserved.bytes.data(), used_bytes},
+      metadata, std::move(reserved.owner));
   if (callback) callback(SharedFrame{std::move(lease)});
 }
 

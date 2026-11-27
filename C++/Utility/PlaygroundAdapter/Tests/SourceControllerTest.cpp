@@ -6,6 +6,7 @@
  * delivers one converted frame, Live selects Continuous. An unwritable mode is refused with
  * an explicit reason instead of being emulated by stopping a continuous stream.
  */
+#include "DirectLeaseSink.h"
 #include "OneGenSourceController.h"
 #include "ProducerCoordinator.h"
 #include "DeviceRuntime/Contract/HardwareResourceKey.h"
@@ -21,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -29,6 +31,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -41,6 +44,7 @@ class ScriptedContextSource final : public GraphicsFrameContextSource {
 public:
     explicit ScriptedContextSource(GraphicsFrameError error = GraphicsFrameError::None)
         : _error(error)
+        , _state(std::make_shared<TrackingState>())
     {
     }
 
@@ -49,50 +53,151 @@ public:
         _error.store(error, std::memory_order_release);
     }
 
+    void setCredits(std::optional<std::size_t> credits) noexcept
+    {
+        std::lock_guard<std::mutex> lock(_state->mutex);
+        _state->credits = credits;
+    }
+
+    [[nodiscard]] std::optional<std::size_t> remainingCredits() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(_state->mutex);
+        return _state->credits;
+    }
+
     [[nodiscard]] std::size_t calls() const noexcept
     {
         return _calls.load(std::memory_order_acquire);
     }
 
-    [[nodiscard]] std::vector<const std::uint8_t*> reservedPointers() const
+    [[nodiscard]] int aliveContexts() const noexcept
     {
-        std::lock_guard<std::mutex> lock(_mutex);
-        return _pointers;
+        return _state->aliveContexts.load(std::memory_order_acquire);
     }
 
-    [[nodiscard]] GraphicsResult<GraphicsFrameContext> beginFrame(const std::size_t sampleBytes) noexcept override
+    [[nodiscard]] int aliveAllocations() const noexcept
+    {
+        return _state->aliveAllocations.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::thread::id lastContextReleaseThread() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(_state->mutex);
+        return _state->lastContextReleaseThread;
+    }
+
+    [[nodiscard]] std::thread::id lastAllocationReleaseThread() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(_state->mutex);
+        return _state->lastAllocationReleaseThread;
+    }
+
+    [[nodiscard]] std::vector<const std::uint8_t*> reservedPointers() const
+    {
+        std::lock_guard<std::mutex> lock(_state->mutex);
+        return _state->pointers;
+    }
+
+    [[nodiscard]] GraphicsResult<GraphicsFrameContext> beginFrame(const std::size_t) noexcept override
     {
         _calls.fetch_add(1U, std::memory_order_relaxed);
         const auto err = _error.load(std::memory_order_acquire);
         if (err != GraphicsFrameError::None) {
             return err;
         }
-        class TrackingAllocator final : public GraphicsFrameAllocator {
-        public:
-            TrackingAllocator(ScriptedContextSource* owner) : _owner(owner) {}
-            GraphicsResult<GraphicsAllocationSlice> allocate(
-                const std::size_t bytes, const std::size_t alignment) noexcept override
-            {
-                auto slice = GraphicsFrameContext::local().allocate(bytes, alignment);
-                if (slice) {
-                    const auto* ptr = reinterpret_cast<const std::uint8_t*>(
-                        slice.value().backing->base() + slice.value().offset);
-                    std::lock_guard<std::mutex> lock(_owner->_mutex);
-                    _owner->_pointers.push_back(ptr);
+        {
+            std::lock_guard<std::mutex> lock(_state->mutex);
+            if (_state->credits.has_value()) {
+                if (*_state->credits == 0U) {
+                    return GraphicsFrameError::NoReadyCredit;
                 }
-                return slice;
+                --(*_state->credits);
             }
-        private:
-            ScriptedContextSource* _owner;
-        };
-        return GraphicsFrameContext(std::make_shared<TrackingAllocator>(this));
+        }
+        return GraphicsFrameContext(std::make_shared<TrackingAllocator>(_state));
     }
 
 private:
+    struct TrackingState {
+        std::atomic<int> aliveContexts{0};
+        std::atomic<int> aliveAllocations{0};
+        mutable std::mutex mutex;
+        std::optional<std::size_t> credits;
+        std::vector<const std::uint8_t*> pointers;
+        std::thread::id lastContextReleaseThread{};
+        std::thread::id lastAllocationReleaseThread{};
+    };
+
+    class TrackedAllocation final : public GraphicsAllocation {
+    public:
+        TrackedAllocation(std::shared_ptr<TrackingState> state, GraphicsAllocationSlice inner) noexcept
+            : GraphicsAllocation(const_cast<std::byte*>(inner.backing->base() + inner.offset),
+                                 inner.size,
+                                 GraphicsAllocationOrigin::LocalHeap,
+                                 0U,
+                                 GraphicsAllocationState::Writable)
+            , _state(std::move(state))
+            , _inner(std::move(inner))
+        {
+            _state->aliveAllocations.fetch_add(1, std::memory_order_acq_rel);
+        }
+
+        ~TrackedAllocation() override
+        {
+            {
+                std::lock_guard<std::mutex> lock(_state->mutex);
+                _state->lastAllocationReleaseThread = std::this_thread::get_id();
+            }
+            _state->aliveAllocations.fetch_sub(1, std::memory_order_acq_rel);
+        }
+
+        void destroy() noexcept override { delete this; }
+
+    private:
+        std::shared_ptr<TrackingState> _state;
+        GraphicsAllocationSlice _inner;
+    };
+
+    class TrackingAllocator final : public GraphicsFrameAllocator {
+    public:
+        explicit TrackingAllocator(std::shared_ptr<TrackingState> state) noexcept
+            : _state(std::move(state))
+        {
+            _state->aliveContexts.fetch_add(1, std::memory_order_acq_rel);
+        }
+
+        ~TrackingAllocator() override
+        {
+            {
+                std::lock_guard<std::mutex> lock(_state->mutex);
+                _state->lastContextReleaseThread = std::this_thread::get_id();
+            }
+            _state->aliveContexts.fetch_sub(1, std::memory_order_acq_rel);
+        }
+
+        GraphicsResult<GraphicsAllocationSlice> allocate(
+            const std::size_t bytes, const std::size_t alignment) noexcept override
+        {
+            auto slice = GraphicsFrameContext::local().allocate(bytes, alignment);
+            if (!slice) return slice.error();
+            auto* tracked = new (std::nothrow) TrackedAllocation(_state, slice.value());
+            if (tracked == nullptr) return GraphicsFrameError::Allocation;
+            const auto* ptr = reinterpret_cast<const std::uint8_t*>(tracked->base());
+            {
+                std::lock_guard<std::mutex> lock(_state->mutex);
+                _state->pointers.push_back(ptr);
+            }
+            return GraphicsAllocationSlice{
+                GraphicsAllocationRef::adoptNew(tracked), 0U, slice.value().size};
+        }
+
+    private:
+        std::shared_ptr<TrackingState> _state;
+    };
+
     std::atomic<GraphicsFrameError> _error{GraphicsFrameError::None};
     std::atomic<std::size_t> _calls{0};
-    mutable std::mutex _mutex;
-    std::vector<const std::uint8_t*> _pointers;
+    std::shared_ptr<TrackingState> _state;
 };
 
 void rememberImageRejection(const DeviceImageRejectionObservation& observation) noexcept
@@ -317,6 +422,9 @@ private slots:
     void moduleActionsNotifySubscribers();
     void declaredModuleActions();
     void frameContextContractAndReadinessMappings();
+    void staleDirectRunBindingIsRefusedAndCounted();
+    void stopBeforeDirectCompletionReleasesOnLiveLoopAndRestarts();
+    void lateCallbackAfterRearmIsIgnored();
     void cleanupTestCase();
 
 private:
@@ -1691,6 +1799,307 @@ void OneGenSourceControllerTests::frameContextContractAndReadinessMappings()
     QCOMPARE(fixture.frames(), framesBeforeFresh + 1);
 
     QCOMPARE(fixture.disconnect(connectionId).error, DeviceConnectionError::None);
+}
+
+void OneGenSourceControllerTests::staleDirectRunBindingIsRefusedAndCounted()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+
+    Fixture fixture;
+    auto source = std::make_shared<ScriptedContextSource>();
+    fixture._controller->setFrameContextSource(source);
+
+    std::vector<std::string> deliveredFrameIds;
+    std::mutex deliveredMutex;
+    std::atomic<int> deliveredCount{0};
+    fixture._controller->setFrameConsumer([&](SessionFrame&& frame, unsigned int index) {
+        deliveredCount.fetch_add(1, std::memory_order_relaxed);
+        fixture._frames.fetch_add(1);
+        {
+            std::lock_guard lock(fixture._framesMutex);
+            ++fixture._framesByIndex[index];
+        }
+        std::lock_guard lock(deliveredMutex);
+        deliveredFrameIds.push_back(frame.payload.metadata().frameId);
+    });
+
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto* device = targetOfKind(targets, DeviceConnectionTargetKind::Device, 0);
+    QVERIFY(device != nullptr);
+    const auto connected = fixture.connect(device->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    const std::string connectionId = connected.state->connectionId;
+    const auto disconnectGuard = qScopeGuard([&] {
+        (void)fixture.invoke([&](auto done) { return fixture._controller->requestLiveStop(connectionId, done); });
+        (void)fixture.disconnect(connectionId);
+    });
+
+    const auto states = fixture.states();
+    const auto cameraIt = std::find_if(states.begin(), states.end(),
+        [&](const auto& st) { return st.connectionId == connectionId; });
+    QVERIFY(cameraIt != states.end() && !cameraIt->sources.empty());
+    const unsigned sourceIndex = cameraIt->sources.front().sourceIndex;
+
+    QCOMPARE(fixture._controller->children_.size(), std::size_t{1});
+    const auto& childEntry = fixture._controller->children_.begin()->second;
+    OneGenSourceController* camera = childEntry.controller.get();
+    QVERIFY(camera != nullptr);
+    const auto lease = camera->deviceLease();
+    QVERIFY(lease != nullptr);
+
+    // Arm run N and hold an open direct reservation before stopping and rearming to run N+1.
+    camera->configureDirectSink(*lease, childEntry.label);
+    auto sinkN = std::const_pointer_cast<onegen::producer::DirectLeaseSink>(camera->lease_sink_);
+    QVERIFY(sinkN != nullptr);
+    const auto runN = camera->active_direct_run_;
+    QVERIFY(runN != nullptr);
+
+    onegen::detail::DirectReservation staleReservation;
+    QCOMPARE(sinkN->reserve(staleReservation), onegen::detail::ReserveStatus::Reserved);
+    QVERIFY(!staleReservation.destination.empty());
+    std::fill_n(staleReservation.destination.data(),
+                std::min<std::size_t>(staleReservation.destination.size(), 16U),
+                std::uint8_t{0x3C});
+
+    // Stop run N and start live acquisition on run N+1 before publishing the run N reservation.
+    sinkN->request_stop();
+    camera->stopOwnAcquisition();
+    QCOMPARE(fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStart(connectionId, done);
+    }).error, DeviceConnectionError::None);
+    QVERIFY(waitFor([&] { return deliveredCount.load() >= 1; }, 10000));
+    QVERIFY(camera->active_direct_run_ != nullptr);
+    QVERIFY(camera->active_direct_run_.get() != runN.get());
+
+    const auto rejectedBefore = camera->rejected_frames_.load(std::memory_order_acquire);
+    const auto diagFailedBefore = fixture._controller->runtimeDiagnostics(sourceIndex).failed;
+
+    onegen::Frame staleMeta;
+    staleMeta.payload_type = 1U;
+    staleMeta.pixel_format = 0x01080001ULL;
+    staleMeta.width = 4;
+    staleMeta.height = 4;
+    staleMeta.stride = 4;
+    staleMeta.frame_id = 987654ULL;
+    sinkN->publish(staleReservation, staleMeta, 16U);
+    staleReservation.owner.reset();
+
+    QCOMPARE(camera->rejected_frames_.load(std::memory_order_acquire), rejectedBefore + 1U);
+    QVERIFY(fixture._controller->runtimeDiagnostics(sourceIndex).failed >= diagFailedBefore + 1U);
+
+    const int countAfterStale = deliveredCount.load();
+    QVERIFY(waitFor([&] { return deliveredCount.load() >= countAfterStale + 2; }, 10000));
+    {
+        std::lock_guard lock(deliveredMutex);
+        QVERIFY(std::find(deliveredFrameIds.begin(), deliveredFrameIds.end(), std::string("987654"))
+                == deliveredFrameIds.end());
+    }
+
+    QCOMPARE(fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStop(connectionId, done);
+    }).error, DeviceConnectionError::None);
+}
+
+void OneGenSourceControllerTests::stopBeforeDirectCompletionReleasesOnLiveLoopAndRestarts()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+
+    Fixture fixture;
+    auto source = std::make_shared<ScriptedContextSource>();
+    source->setCredits(1U);
+    fixture._controller->setFrameContextSource(source);
+
+    std::atomic<int> deliveredCount{0};
+    fixture._controller->setFrameConsumer([&](SessionFrame&&, unsigned int index) {
+        deliveredCount.fetch_add(1, std::memory_order_relaxed);
+        fixture._frames.fetch_add(1);
+        std::lock_guard lock(fixture._framesMutex);
+        ++fixture._framesByIndex[index];
+    });
+
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto* device = targetOfKind(targets, DeviceConnectionTargetKind::Device, 0);
+    QVERIFY(device != nullptr);
+    const auto connected = fixture.connect(device->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    const std::string connectionId = connected.state->connectionId;
+    const auto disconnectGuard = qScopeGuard([&] {
+        (void)fixture.invoke([&](auto done) { return fixture._controller->requestLiveStop(connectionId, done); });
+        (void)fixture.disconnect(connectionId);
+    });
+
+    QCOMPARE(fixture._controller->children_.size(), std::size_t{1});
+    const auto& childEntry = fixture._controller->children_.begin()->second;
+    OneGenSourceController* camera = childEntry.controller.get();
+    QVERIFY(camera != nullptr);
+    const auto lease = camera->deviceLease();
+    QVERIFY(lease != nullptr);
+
+    camera->configureDirectSink(*lease, childEntry.label);
+    auto sink = std::const_pointer_cast<onegen::producer::DirectLeaseSink>(camera->lease_sink_);
+    QVERIFY(sink != nullptr);
+
+    std::mutex loopMutex;
+    std::condition_variable loopCv;
+    bool reservationOpen = false;
+    bool allowCancel = false;
+    std::thread::id liveLoopId{};
+    onegen::detail::ReserveStatus reserveStatus = onegen::detail::ReserveStatus::NoPool;
+
+    std::thread liveLoop([&] {
+        liveLoopId = std::this_thread::get_id();
+        onegen::detail::DirectReservation res;
+        reserveStatus = sink->reserve(res);
+        {
+            std::lock_guard lock(loopMutex);
+            reservationOpen = true;
+        }
+        loopCv.notify_one();
+        {
+            std::unique_lock lock(loopMutex);
+            loopCv.wait(lock, [&] { return allowCancel; });
+        }
+        sink->cancel(res, onegen::detail::CancelCause::Stop);
+        res.owner.reset();
+    });
+
+    const auto joinGuard = qScopeGuard([&] {
+        {
+            std::lock_guard lock(loopMutex);
+            allowCancel = true;
+        }
+        loopCv.notify_all();
+        if (liveLoop.joinable()) liveLoop.join();
+    });
+
+    {
+        std::unique_lock lock(loopMutex);
+        QVERIFY(loopCv.wait_for(lock, std::chrono::seconds(5), [&] { return reservationOpen; }));
+    }
+    QCOMPARE(reserveStatus, onegen::detail::ReserveStatus::Reserved);
+    QCOMPARE(source->aliveContexts(), 1);
+    QCOMPARE(source->aliveAllocations(), 1);
+    QCOMPARE(source->remainingCredits(), std::optional<std::size_t>{0U});
+
+    // Stop while the single credit is exhausted and the direct reservation is still unsealed;
+    // stop must return promptly without publishing or waiting for another credit.
+    QElapsedTimer stopTimer;
+    stopTimer.start();
+    sink->request_stop();
+    camera->stopOwnAcquisition();
+    QVERIFY2(stopTimer.elapsed() < 500, qPrintable(QString("stop took %1 ms").arg(stopTimer.elapsed())));
+    QCOMPARE(deliveredCount.load(), 0);
+    QCOMPARE(sink->counters().published, std::uint64_t{0});
+
+    {
+        std::lock_guard lock(loopMutex);
+        allowCancel = true;
+    }
+    loopCv.notify_all();
+    liveLoop.join();
+
+    QCOMPARE(source->aliveAllocations(), 0);
+    QCOMPARE(source->aliveContexts(), 0);
+    QCOMPARE(source->lastAllocationReleaseThread(), liveLoopId);
+    QCOMPARE(source->lastContextReleaseThread(), liveLoopId);
+    QCOMPARE(deliveredCount.load(), 0);
+    QCOMPARE(sink->counters().published, std::uint64_t{0});
+
+    // Restore credits and verify a following Live starts and delivers frames cleanly.
+    source->setCredits(std::nullopt);
+    QCOMPARE(fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStart(connectionId, done);
+    }).error, DeviceConnectionError::None);
+    QVERIFY(waitFor([&] { return deliveredCount.load() >= 2; }, 10000));
+    QCOMPARE(fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStop(connectionId, done);
+    }).error, DeviceConnectionError::None);
+}
+
+void OneGenSourceControllerTests::lateCallbackAfterRearmIsIgnored()
+{
+    if (qEnvironmentVariableIsSet("ONEGEN_TEST_ACQ_MODE"))
+        QSKIP("The unwritable-mode run covers only its own refusal.");
+
+    Fixture fixture;
+    auto source = std::make_shared<ScriptedContextSource>();
+    fixture._controller->setFrameContextSource(source);
+
+    std::atomic<int> deliveredCount{0};
+    fixture._controller->setFrameConsumer([&](SessionFrame&&, unsigned int index) {
+        deliveredCount.fetch_add(1, std::memory_order_relaxed);
+        fixture._frames.fetch_add(1);
+        std::lock_guard lock(fixture._framesMutex);
+        ++fixture._framesByIndex[index];
+    });
+
+    const auto targets = fixture.discover();
+    QCOMPARE(targets.result.error, DeviceConnectionError::None);
+    const auto* device = targetOfKind(targets, DeviceConnectionTargetKind::Device, 0);
+    QVERIFY(device != nullptr);
+    const auto connected = fixture.connect(device->targetId);
+    QVERIFY2(connected.error == DeviceConnectionError::None, connected.message.c_str());
+    const std::string connectionId = connected.state->connectionId;
+    const auto disconnectGuard = qScopeGuard([&] {
+        (void)fixture.invoke([&](auto done) { return fixture._controller->requestLiveStop(connectionId, done); });
+        (void)fixture.disconnect(connectionId);
+    });
+
+    QCOMPARE(fixture._controller->children_.size(), std::size_t{1});
+    const auto& childEntry = fixture._controller->children_.begin()->second;
+    OneGenSourceController* camera = childEntry.controller.get();
+    QVERIFY(camera != nullptr);
+    const auto lease = camera->deviceLease();
+    QVERIFY(lease != nullptr);
+
+    // Arm run N, capture its acquisition callback carrying CallbackGate::Token, then stop and rearm to run N+1.
+    camera->configureDirectSink(*lease, childEntry.label);
+    QVERIFY(camera->callback_gate_ != nullptr);
+    const auto oldToken = camera->callback_gate_->token();
+    const auto lateAcquisitionCallback = camera->makeAcquisitionCallback(childEntry.label, oldToken);
+    QVERIFY(camera->lease_sink_ != nullptr);
+
+    camera->stopOwnAcquisition();
+    camera->configureDirectSink(*lease, childEntry.label);
+    QVERIFY(camera->callback_gate_ != nullptr);
+    QVERIFY(camera->callback_gate_->token() != oldToken);
+
+    const std::size_t callsBefore = source->calls();
+    const int framesBefore = deliveredCount.load();
+    const int aliveBefore = source->aliveContexts();
+    const auto publishedBefore = camera->lease_sink_->counters().published;
+
+    // Late acquisition callback carrying the stale token must be ignored without reservation or beginFrame.
+    onegen::Frame lateFrame;
+    lateFrame.payload_type = 1U;
+    lateFrame.pixel_format = 0x01080001ULL;
+    lateFrame.width = 4;
+    lateFrame.height = 4;
+    lateFrame.stride = 4;
+    lateFrame.frame_id = 777ULL;
+    lateFrame.payload.assign(16U, std::uint8_t{0x2A});
+    lateAcquisitionCallback(lateFrame);
+
+    QCOMPARE(source->calls(), callsBefore);
+    QCOMPARE(source->aliveContexts(), aliveBefore);
+    QCOMPARE(source->aliveAllocations(), 0);
+    QCOMPARE(camera->lease_sink_->counters().held, std::uint32_t{0});
+    QCOMPARE(camera->lease_sink_->counters().published, publishedBefore);
+    QCOMPARE(deliveredCount.load(), framesBefore);
+
+    // The rearmed run N+1 must still start and deliver frames unaffected.
+    QCOMPARE(fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStart(connectionId, done);
+    }).error, DeviceConnectionError::None);
+    QVERIFY(waitFor([&] { return deliveredCount.load() >= framesBefore + 2; }, 10000));
+    QVERIFY(source->calls() > callsBefore);
+    QCOMPARE(fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStop(connectionId, done);
+    }).error, DeviceConnectionError::None);
 }
 
 void OneGenSourceControllerTests::cleanupTestCase()
