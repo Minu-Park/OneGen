@@ -60,6 +60,8 @@ public:
 private:
   friend void visit_pinned_buffer(const AcquisitionContext&, std::uint64_t,
                                   PinnedExtraction, PinnedVisitFn, void*);
+  friend void visit_pinned_buffer_into(const AcquisitionContext&, std::uint64_t,
+                                       PinnedExtraction, Frame&, PinnedVisitFn, void*);
 
   PinnedBuffer(Frame& metadata, std::span<const std::uint8_t> transport,
                std::span<const PinnedPart> parts, bool borrowable) noexcept
@@ -72,12 +74,16 @@ private:
 };
 
 /** EventGetData -> requeue guard -> describe -> visit -> explicit requeue. */
+void visit_pinned_buffer_into(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                              PinnedExtraction extraction, Frame& scratch, PinnedVisitFn visit,
+                              void* user);
+
 void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout_ms,
                          PinnedExtraction extraction, PinnedVisitFn visit, void* user);
 
 template <class F>
-void with_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout_ms,
-                        PinnedExtraction extraction, F&& visit)
+void with_pinned_buffer_into(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                             PinnedExtraction extraction, Frame& scratch, F&& visit)
 {
   struct Thunk {
     static void call(void* user, PinnedBuffer& buffer) {
@@ -85,8 +91,16 @@ void with_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout
     }
   };
   using Visitor = std::remove_cvref_t<F>;
-  visit_pinned_buffer(context, timeout_ms, extraction, &Thunk::call,
-                      const_cast<Visitor*>(std::addressof(visit)));
+  visit_pinned_buffer_into(context, timeout_ms, extraction, scratch, &Thunk::call,
+                           const_cast<Visitor*>(std::addressof(visit)));
+}
+
+template <class F>
+void with_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                        PinnedExtraction extraction, F&& visit)
+{
+  Frame scratch;
+  with_pinned_buffer_into(context, timeout_ms, extraction, scratch, std::forward<F>(visit));
 }
 
 /** Owned path: identical to the previous Camera::Impl::grab_one. */
@@ -117,6 +131,8 @@ DirectAcquisition acquire_into_or_owned(const AcquisitionContext& context, std::
 enum class DirectStep : std::uint8_t { Published, Fallback, CapacityFailed, NoPool, Stopped, Busy, Refused };
 
 /** Reserve -> pinned direct/owned conversion -> publish/cancel; fallback_out is valid for Fallback. */
+DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                           DirectFrameSink& sink, Frame& fallback_out, Frame& pinned_scratch);
 DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t timeout_ms,
                            DirectFrameSink& sink, Frame& fallback_out);
 

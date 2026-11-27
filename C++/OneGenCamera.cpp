@@ -988,8 +988,9 @@ DirectAcquisition acquire_into_or_owned(const AcquisitionContext& context, std::
   return std::move(state.result);
 }
 
-void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout_ms,
-                         PinnedExtraction extraction, PinnedVisitFn visit, void* user) {
+void visit_pinned_buffer_into(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                              PinnedExtraction extraction, Frame& f, PinnedVisitFn visit,
+                              void* user) {
   GenTL::EVENT_NEW_BUFFER_DATA data{};
   size_t size = sizeof(data);
   auto err = context.gentl->EventGetData(context.new_buffer_event, &data, &size, timeout_ms);
@@ -998,7 +999,7 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
   if (!data.BufferHandle) throw Error("grab: null buffer handle");
   BufferRequeue requeue(context.gentl, context.stream, data.BufferHandle);
 
-  Frame f;
+  reset_reusable_frame(f);
   auto u64 = [&](GenTL::BUFFER_INFO_CMD cmd) {
     return buffer_info(context.gentl, context.stream, data.BufferHandle, cmd);
   };
@@ -1079,9 +1080,21 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
   f.timestamp = u64(GenTL::BUFFER_INFO_TIMESTAMP);
   f.timestamp_ns = u64(GenTL::BUFFER_INFO_TIMESTAMP_NS);
   f.stream_index = context.stream_index;
-  if (context.stream_id) f.stream_id = *context.stream_id;
-  if (context.scan3d_geometry) f.scan3d_geometry = *context.scan3d_geometry;
-  if (context.components) f.components = *context.components;
+  if (!context.stream_id) {
+    f.stream_id.clear();
+  } else if (f.stream_id != *context.stream_id) {
+    f.stream_id = *context.stream_id;
+  }
+  if (context.scan3d_geometry) {
+    copy_scan3d_geometry(f.scan3d_geometry, *context.scan3d_geometry);
+  } else {
+    f.scan3d_geometry.reset();
+  }
+  if (!context.components) {
+    f.components.clear();
+  } else {
+    copy_components(f.components, *context.components);
+  }
 
   std::vector<PinnedPart> part_spans;
   bool borrowable = false;
@@ -1278,6 +1291,12 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
   if (queue_error != GenTL::GC_ERR_SUCCESS) context.gentl->fail("DSQueueBuffer", queue_error);
 }
 
+void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                         PinnedExtraction extraction, PinnedVisitFn visit, void* user) {
+  Frame scratch;
+  visit_pinned_buffer_into(context, timeout_ms, extraction, scratch, visit, user);
+}
+
 Frame grab_owned(const AcquisitionContext& context, std::uint64_t timeout_ms) {
   Frame frame;
   visit_pinned_buffer(context, timeout_ms, PinnedExtraction::Owned, &grab_owned_visit, &frame);
@@ -1293,7 +1312,7 @@ BorrowedGrabResult grab_one_into(const AcquisitionContext& context, std::uint64_
 }
 
 DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t timeout_ms,
-                           DirectFrameSink& sink, Frame& fallback_out) {
+                           DirectFrameSink& sink, Frame& fallback_out, Frame& pinned_scratch) {
   DirectReservation reservation;
   const auto reserved = sink.reserve(reservation);
   if (reserved == ReserveStatus::NoPool) return DirectStep::NoPool;
@@ -1306,8 +1325,8 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
     // themselves are not drops.
     try {
       bool dequeued = false;
-      with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned,
-                         [&](PinnedBuffer&) { dequeued = true; });
+      with_pinned_buffer_into(context, timeout_ms, PinnedExtraction::DirectOrOwned, pinned_scratch,
+                              [&](PinnedBuffer&) { dequeued = true; });
       if (dequeued) sink.note_slot_exhausted();
     } catch (const Error& error) {
       if (std::string_view(error.what()) != "grab timeout") throw;
@@ -1320,8 +1339,8 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
   state.sink = &sink;
   state.destination = FrameDestination{reservation.destination};
   try {
-    with_pinned_buffer(context, timeout_ms, PinnedExtraction::DirectOrOwned,
-                       [&](PinnedBuffer& buffer) { direct_or_owned_visit(&state, buffer); });
+    with_pinned_buffer_into(context, timeout_ms, PinnedExtraction::DirectOrOwned, pinned_scratch,
+                            [&](PinnedBuffer& buffer) { direct_or_owned_visit(&state, buffer); });
   } catch (const Error& error) {
     if (std::string_view(error.what()) == "grab timeout") guard.set_cause(CancelCause::Timeout);
     throw;
@@ -1331,6 +1350,8 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
     case DirectStatus::SharedReady:
       guard.disarm();
       sink.publish(reservation, state.result.frame, state.result.used_bytes);
+      // Reclaim stream_id/components/geometry allocations into pinned_scratch for the next frame.
+      pinned_scratch = std::move(state.result.frame);
       return DirectStep::Published;
     case DirectStatus::OwnedFallback:
       guard.cancel_now(CancelCause::Fallback);
@@ -1341,9 +1362,16 @@ DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t time
       guard.cancel_now(CancelCause::Capacity);
       sink.report_capacity_failure(state.result.frame, state.result.required_bytes,
                                    reservation.destination.size());
+      pinned_scratch = std::move(state.result.frame);
       return DirectStep::CapacityFailed;
   }
   return DirectStep::Stopped;
+}
+
+DirectStep run_direct_step(const AcquisitionContext& context, std::uint64_t timeout_ms,
+                           DirectFrameSink& sink, Frame& fallback_out) {
+  Frame pinned_scratch;
+  return run_direct_step(context, timeout_ms, sink, fallback_out, pinned_scratch);
 }
 
 }  // namespace detail
@@ -1422,13 +1450,14 @@ void Camera::live() {
         } catch (...) {
         }
       };
+      Frame direct_scratch;
+      Frame fallback;
       while (!impl_->stop_live.load()) {
         try {
           Frame f;
           if (direct_sink) {
-            Frame fallback;
             const auto step = detail::run_direct_step(impl_->context(), 500, *direct_sink,
-                                                      fallback);
+                                                      fallback, direct_scratch);
             if (step == detail::DirectStep::NoPool) {
               f = impl_->grab_one(500);
             } else if (step == detail::DirectStep::CapacityFailed) {

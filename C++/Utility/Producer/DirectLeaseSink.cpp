@@ -66,13 +66,19 @@ struct LeasePoolAllocator {
 }  // namespace
 
 FrameLease::FrameLease(ConstructKey, std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
-                       std::span<const std::uint8_t> bytes, Frame metadata,
+                       std::span<const std::uint8_t> bytes, const Frame* metadata,
                        std::shared_ptr<void> storage) noexcept
     : sink_(std::move(sink)), storage_(std::move(storage)), slot_(slot), bytes_(bytes),
-      metadata_(std::move(metadata)) {}
+      metadata_(metadata) {}
 
 FrameLease::~FrameLease() {
+  storage_.reset();
   if (sink_) sink_->release(slot_);
+}
+
+const Frame& FrameLease::metadata() const noexcept {
+  static const Frame empty_metadata{};
+  return metadata_ ? *metadata_ : empty_metadata;
 }
 
 std::shared_ptr<DirectLeaseSink> DirectLeaseSink::create(std::uint32_t slots,
@@ -96,18 +102,18 @@ std::shared_ptr<DirectLeaseSink> DirectLeaseSink::create(std::uint32_t slots,
   sink->lease_pool_ = std::make_shared<LeaseBlockPool>();
   sink->lease_pool_->capacity = slots;
   sink->reserved_.resize(slots);
+  sink->slot_metadata_.resize(slots);
   sink->reserve_threads_.resize(slots);
   for (std::uint32_t index = 0; index < slots; ++index) sink->free_.push_back(index);
   // Pre-warm slot_count_ FrameLease blocks so steady-state publish makes no heap allocations.
   {
     std::vector<std::shared_ptr<const FrameLease>> warmup;
     warmup.reserve(slots);
-    const Frame empty_metadata{};
     for (std::uint32_t index = 0; index < slots; ++index) {
       warmup.push_back(std::allocate_shared<const FrameLease>(
           LeasePoolAllocator<FrameLease>(sink->lease_pool_), FrameLease::ConstructKey{},
           std::shared_ptr<DirectLeaseSink>{}, 0U, std::span<const std::uint8_t>{},
-          empty_metadata, std::shared_ptr<void>{}));
+          nullptr, std::shared_ptr<void>{}));
     }
   }
   return sink;
@@ -232,11 +238,12 @@ void DirectLeaseSink::publish(const detail::DirectReservation& reservation, cons
     callback = on_frame_;
   }
   published_.fetch_add(1, std::memory_order_relaxed);
+  detail::copy_frame_metadata_reusing_capacity(slot_metadata_[slot], metadata);
   // The lease owns the slot from here; dropping it without a callback frees the slot.
   auto lease = std::allocate_shared<const FrameLease>(
       LeasePoolAllocator<FrameLease>(lease_pool_), FrameLease::ConstructKey{},
       shared_from_this(), slot, std::span<const std::uint8_t>{reserved.bytes.data(), used_bytes},
-      metadata, std::move(reserved.owner));
+      &slot_metadata_[slot], std::move(reserved.owner));
   if (callback) callback(SharedFrame{std::move(lease)});
 }
 

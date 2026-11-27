@@ -199,6 +199,42 @@ int main() {
     assert(sink2->reserve(refusedRes) == d::ReserveStatus::Stopped);
   }
 
+  // Reused slot metadata retains heap capacity across steady-state publishes.
+  {
+    auto slotStorage = [&](std::size_t bytes) -> std::shared_ptr<std::uint8_t> {
+      return std::shared_ptr<std::uint8_t>(new std::uint8_t[bytes]);
+    };
+    std::string slotError;
+    auto sink3 = DirectLeaseSink::create(1, 32, slotError, slotStorage);
+    assert(sink3 && slotError.empty());
+    std::shared_ptr<const onegen::producer::FrameLease> lease;
+    sink3->set_frame_callback([&](const SharedFrame& f) { lease = f.lease; });
+
+    onegen::Frame longMeta;
+    longMeta.width = 4;
+    longMeta.height = 4;
+    longMeta.stream_id = "stream-with-long-non-sso-identifier-0123456789abcdef";
+    longMeta.components = {{1, "IntensityLongComponentName"}, {2, "RangeLongComponentName"}};
+
+    auto first = reserve(*sink3);
+    longMeta.frame_id = 1;
+    sink3->publish(first, longMeta, 16);
+    first.owner.reset();
+    const char* streamPtr = lease->metadata().stream_id.data();
+    const auto* compPtr = lease->metadata().components.data();
+    assert(lease->metadata().frame_id == 1);
+    lease.reset();
+
+    auto second = reserve(*sink3);
+    longMeta.frame_id = 2;
+    sink3->publish(second, longMeta, 16);
+    second.owner.reset();
+    assert(lease->metadata().frame_id == 2);
+    assert(lease->metadata().stream_id.data() == streamPtr);
+    assert(lease->metadata().components.data() == compPtr);
+    lease.reset();
+  }
+
   std::cout << "Frame lease accounting and consumer storage passed.\n";
   return 0;
 }

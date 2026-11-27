@@ -34,14 +34,14 @@ public:
   };
 
   FrameLease(ConstructKey, std::shared_ptr<DirectLeaseSink> sink, std::uint32_t slot,
-             std::span<const std::uint8_t> bytes, Frame metadata,
+             std::span<const std::uint8_t> bytes, const Frame* metadata,
              std::shared_ptr<void> storage) noexcept;
   FrameLease(const FrameLease&) = delete;
   FrameLease& operator=(const FrameLease&) = delete;
   ~FrameLease();
 
   /** @brief Frame metadata; its payload vectors are empty, the image bytes are bytes(). */
-  [[nodiscard]] const Frame& metadata() const noexcept { return metadata_; }
+  [[nodiscard]] const Frame& metadata() const noexcept;
   [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept { return bytes_; }
   /** @brief Consumer-owned destination state bound at reserve(), if any. */
   [[nodiscard]] const std::shared_ptr<void>& owner() const noexcept { return storage_; }
@@ -53,7 +53,7 @@ private:
   std::shared_ptr<void> storage_;
   std::uint32_t slot_ = 0;
   std::span<const std::uint8_t> bytes_;
-  Frame metadata_;
+  const Frame* metadata_ = nullptr;
 };
 
 /** @brief Delivered on the acquisition thread; the callee must not block. */
@@ -171,6 +171,8 @@ private:
   std::shared_ptr<LeaseBlockPool> lease_pool_;
   // Bytes and owner of a reserved slot while the sink holds the consumer destination.
   std::vector<ReservedSlot> reserved_;
+  // Pre-sized per-slot metadata reused across publishes so stream_id/components keep capacity.
+  std::vector<Frame> slot_metadata_;
   std::vector<std::thread::id> reserve_threads_;
   mutable std::mutex mutex_;
   std::vector<SlotState> states_;

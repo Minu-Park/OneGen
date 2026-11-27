@@ -31,10 +31,12 @@ constexpr std::uint8_t guard_byte = 0xA5;
 constexpr std::uint8_t queued_byte = 0xDD;
 
 std::atomic<std::size_t> g_largest_allocation{0};
+std::atomic<std::size_t> g_allocation_count{0};
 std::atomic<bool> g_track_allocations{false};
 
 void record_allocation(std::size_t size) {
   if (!g_track_allocations.load(std::memory_order_relaxed)) return;
+  g_allocation_count.fetch_add(1, std::memory_order_relaxed);
   auto current = g_largest_allocation.load(std::memory_order_relaxed);
   while (size > current
          && !g_largest_allocation.compare_exchange_weak(current, size, std::memory_order_relaxed)) {
@@ -1497,6 +1499,70 @@ void direct_timeout_cancels_once() {
          && sink.cancel_cause == onegen::detail::CancelCause::Timeout);
 }
 
+// T23
+void direct_steady_state_reuses_metadata_capacity() {
+  Fixture fixture;
+  fixture.stream_id = "stream-with-long-non-sso-identifier-0123456789abcdef";
+  fixture.scan3d_geometry.emplace();
+  fixture.scan3d_geometry->distance_unit = "millimeters-long-non-sso-unit-name";
+  fixture.components = {{1, "IntensityLongComponentNameExceedingSSO"},
+                        {65281, "PhaseLongComponentNameExceedingSSO"}};
+  auto input = make_buffer(4, 3, 0, mono8);
+  const auto image_bytes = input.transport.size();
+
+  struct NoopSink final : onegen::detail::DirectFrameSink {
+    std::vector<std::uint8_t> backing;
+    onegen::Frame published;
+    onegen::detail::ReserveStatus reserve(onegen::detail::DirectReservation& r) override {
+      r.destination = std::span<std::uint8_t>(backing);
+      r.ticket = 1;
+      return onegen::detail::ReserveStatus::Reserved;
+    }
+    void publish(const onegen::detail::DirectReservation&, const onegen::Frame& metadata,
+                 std::size_t) override {
+      onegen::detail::copy_frame_metadata_reusing_capacity(published, metadata);
+    }
+    void cancel(const onegen::detail::DirectReservation&, onegen::detail::CancelCause) noexcept override {}
+    void note_fallback(onegen::detail::FallbackReason, const onegen::Frame&) noexcept override {}
+    onegen::detail::FallbackReason metadata_gate(const onegen::Frame&) const noexcept override {
+      return onegen::detail::FallbackReason::None;
+    }
+    void report_capacity_failure(const onegen::Frame&, std::size_t, std::size_t) noexcept override {}
+    void wake() noexcept override {}
+  } sink;
+  sink.backing.resize(image_bytes);
+
+  onegen::Frame fallback;
+  onegen::Frame pinned_scratch;
+
+  // First frame warms capacities of pinned_scratch and sink.published.
+  reset_fake(fixture, input);
+  assert(onegen::detail::run_direct_step(fixture.context, 100, sink, fallback, pinned_scratch)
+         == onegen::detail::DirectStep::Published);
+  assert(sink.published.stream_id == fixture.stream_id);
+  assert(sink.published.components.size() == 2);
+
+  // Subsequent frames reuse the same Frame buffers with zero heap allocations.
+  g_allocation_count.store(0, std::memory_order_relaxed);
+  try {
+    for (int iteration = 0; iteration < 4; ++iteration) {
+      g_track_allocations.store(false, std::memory_order_relaxed);
+      reset_fake(fixture, input);
+      fixture.state.log.reserve(8);
+      g_track_allocations.store(true, std::memory_order_relaxed);
+      assert(onegen::detail::run_direct_step(fixture.context, 100, sink, fallback, pinned_scratch)
+             == onegen::detail::DirectStep::Published);
+    }
+  } catch (...) {
+    g_track_allocations.store(false, std::memory_order_relaxed);
+    throw;
+  }
+  g_track_allocations.store(false, std::memory_order_relaxed);
+  assert(g_allocation_count.load(std::memory_order_relaxed) == 0);
+  assert(sink.published.stream_id == fixture.stream_id);
+  assert(sink.published.components.size() == 2 && sink.published.components[1].id == 65281);
+}
+
 }  // namespace
 
 
@@ -1553,5 +1619,6 @@ int main() {
   direct_run_step_order_and_cancel();
   direct_no_intermediate_allocation();
   direct_timeout_cancels_once();
+  direct_steady_state_reuses_metadata_capacity();
   return 0;
 }
