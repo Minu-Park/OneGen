@@ -462,8 +462,6 @@ std::optional<RangeFrame> rangeFrame(const onegen::Frame::Part& part,
       return reject("range writer size limit exceeded", Reason::RangeSizeLimitExceeded);
     case GraphicsRangeFrameWriterFailure::StorageRefused:
       return reject("provided storage refused the range frame", Reason::RangeStorageRefused);
-    case GraphicsRangeFrameWriterFailure::MisalignedStorage:
-      return reject("range destination storage alignment is invalid", Reason::RangeStorageMisaligned);
     case GraphicsRangeFrameWriterFailure::None:
       break;
     }

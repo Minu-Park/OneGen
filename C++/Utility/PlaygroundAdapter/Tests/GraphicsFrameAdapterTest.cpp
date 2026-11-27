@@ -28,19 +28,21 @@ struct RecordingStorage : GraphicsFrameAllocator
   std::vector<std::size_t> sizes;
   std::vector<const std::uint8_t*> buffers;
 
-  GraphicsResult<GraphicsAllocationRef> allocate(std::size_t bytes, std::size_t alignment) noexcept override
+  GraphicsResult<GraphicsAllocationSlice> allocate(std::size_t bytes, std::size_t alignment) noexcept override
   {
     ++calls;
     sizes.push_back(bytes);
     auto allocation = GraphicsFrameContext::local().allocate(bytes, alignment);
-    if (allocation) buffers.push_back(reinterpret_cast<const std::uint8_t*>(allocation.value()->base()));
+    if (allocation)
+      buffers.push_back(reinterpret_cast<const std::uint8_t*>(
+          allocation.value().backing->base() + allocation.value().offset));
     return allocation;
   }
   GraphicsFrameContext function() { return GraphicsFrameContext(std::shared_ptr<GraphicsFrameAllocator>(this, [](GraphicsFrameAllocator*) {})); }
 };
 
 struct RefusingStorage : GraphicsFrameAllocator {
-  GraphicsResult<GraphicsAllocationRef> allocate(std::size_t, std::size_t) noexcept override { return GraphicsFrameError::Allocation; }
+  GraphicsResult<GraphicsAllocationSlice> allocate(std::size_t, std::size_t) noexcept override { return GraphicsFrameError::Allocation; }
 };
 GraphicsFrameContext refusingContext() { return GraphicsFrameContext(std::make_shared<RefusingStorage>()); }
 
