@@ -32,7 +32,7 @@ struct OneGenPlanarRejection {
         MissingAxis, DuplicateAxis, InvalidLayout, StrideBelowMinimum,
         TruncatedPlane, JoinedRangeRejected, MissingCalibration, InvalidCalibration,
         UnsupportedGeometry, UnsupportedUnit, AuxiliaryLayoutRejected,
-        RangeInvalidDimensions, RangeSizeLimitExceeded, RangeStorageRefused, RangeStorageMisaligned
+        RangeInvalidDimensions, RangeSizeLimitExceeded, RangeStorageRefused
     };
     Reason reason = Reason::MissingAxis;
     std::size_t anchorPart = 0;

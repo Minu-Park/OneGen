@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Return `GraphicsAllocationSlice` from `RecordingStorage` and `RefusingStorage` in `GraphicsFrameAdapterTest`, drop the removed `GraphicsRangeFrameWriterFailure::MisalignedStorage` branch in `OneGenGraphicsFrameAdapter`, and adopt `DevicePluginSessionCapability::GraphicsViewer`.
+- Return `GraphicsAllocationSlice` from `RecordingStorage` and `RefusingStorage` in `GraphicsFrameAdapterTest`, drop the removed `GraphicsRangeFrameWriterFailure::MisalignedStorage` branch and the unreachable `RangeStorageMisaligned` planar rejection in `OneGenGraphicsFrameAdapter`, and adopt `DevicePluginSessionCapability::GraphicsViewer`.
 
 - Publish immutable GraphicsFrame handles using frame contexts for image and range storage, preserving direct lease and storage refusal behavior.
 

@@ -204,7 +204,7 @@ private:
   const std::uint32_t image_source_index_;
   std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(DeviceImageRejection::NoImage) + 1>
       image_rejection_counts_{};
-  std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(DevicePlanarRejection::RangeStorageMisaligned) + 1>
+  std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(DevicePlanarRejection::RangeStorageRefused) + 1>
       planar_rejection_counts_{};
   std::atomic<bool> grabbing_{false};
   std::atomic<std::uint64_t> sequence_{0};

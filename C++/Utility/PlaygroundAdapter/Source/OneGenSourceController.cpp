@@ -848,7 +848,6 @@ void OneGenSourceController::reportPlanarRejection(const OneGenPlanarRejection& 
     case Reason::RangeInvalidDimensions: observation.reason = DevicePlanarRejection::RangeInvalidDimensions; break;
     case Reason::RangeSizeLimitExceeded: observation.reason = DevicePlanarRejection::RangeSizeLimitExceeded; break;
     case Reason::RangeStorageRefused: observation.reason = DevicePlanarRejection::RangeStorageRefused; break;
-    case Reason::RangeStorageMisaligned: observation.reason = DevicePlanarRejection::RangeStorageMisaligned; break;
   }
   if (source.parts.size() > DevicePlanarRejectionObservation::noPart) return;
   if (!single) {
