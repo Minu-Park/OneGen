@@ -1054,16 +1054,25 @@ void OneGenSourceController::trigger()
   if (lease) lease->trigger();
 }
 
+namespace {
+/** True for the first occurrence and whenever the count crosses a multiple of one hundred. */
+bool crossesReportThreshold(const std::uint64_t before, const std::uint64_t after) noexcept
+{
+  return before == 0 || after / 100 > before / 100;
+}
+} // namespace
+
 bool OneGenSourceController::reportImageRejection(const OneGenImageRejection& evidence,
     const onegen::Frame& source, std::uint64_t sequence, std::size_t readableBytes,
-    bool directInput, bool single) noexcept
+    bool directInput, bool single, std::size_t repeat) noexcept
 {
+  if (!image_rejection_sink_) return false;
   const auto reason = deviceImageRejection(evidence);
   if (!reason) return false;
   if (!single) {
     auto& counter = image_rejection_counts_[static_cast<std::size_t>(*reason)];
-    const auto count = counter.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (count != 1 && count % 100 != 0) return true;
+    const auto before = counter.fetch_add(repeat, std::memory_order_relaxed);
+    if (!crossesReportThreshold(before, before + repeat)) return true;
   }
   DeviceImageRejectionObservation observation;
   observation.reason = *reason;
@@ -1085,9 +1094,10 @@ bool OneGenSourceController::reportImageRejection(const OneGenImageRejection& ev
 
 void OneGenSourceController::reportPlanarRejection(const OneGenPlanarRejection& evidence,
     const onegen::Frame& source, std::uint64_t sequence, const std::optional<GraphicsFrame>& output,
-    bool single) noexcept
+    bool single, std::size_t repeat) noexcept
 {
   using Reason = OneGenPlanarRejection::Reason;
+  if (!planar_rejection_sink_) return;
   DevicePlanarRejectionObservation observation;
   switch (evidence.reason) {
     case Reason::MissingAxis: observation.reason = DevicePlanarRejection::MissingAxis; break;
@@ -1104,20 +1114,26 @@ void OneGenSourceController::reportPlanarRejection(const OneGenPlanarRejection& 
     case Reason::RangeInvalidDimensions: observation.reason = DevicePlanarRejection::RangeInvalidDimensions; break;
     case Reason::RangeSizeLimitExceeded: observation.reason = DevicePlanarRejection::RangeSizeLimitExceeded; break;
     case Reason::RangeStorageRefused: observation.reason = DevicePlanarRejection::RangeStorageRefused; break;
+    // The host contract has no dedicated rule for these; the nearest layout rule carries them.
+    case Reason::UnsupportedPartFormat: observation.reason = DevicePlanarRejection::InvalidLayout; break;
+    case Reason::InvalidPartDimensions: observation.reason = DevicePlanarRejection::RangeInvalidDimensions; break;
+    case Reason::BufferRepaired: observation.reason = DevicePlanarRejection::InvalidLayout; break;
   }
   if (source.parts.size() > DevicePlanarRejectionObservation::noPart) return;
   if (!single) {
     auto& counter = planar_rejection_counts_[static_cast<std::size_t>(observation.reason)];
-    const auto count = counter.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (count != 1 && count % 100 != 0) return;
+    const auto before = counter.fetch_add(repeat, std::memory_order_relaxed);
+    if (!crossesReportThreshold(before, before + repeat)) return;
   }
-  const auto& part = source.parts[evidence.affectedPart.value_or(evidence.anchorPart)];
+  // A single-payload frame has no parts; its own extent and format describe the anomaly.
+  const auto partIndex = evidence.affectedPart.value_or(evidence.anchorPart);
+  const bool hasPart = partIndex < source.parts.size();
   observation.sourceIndex = forwarded_by_parent_ ? image_source_index_ : source.stream_index;
   observation.partCount = static_cast<std::uint32_t>(source.parts.size());
   observation.anchorPart = static_cast<std::uint32_t>(evidence.anchorPart);
   if (evidence.affectedPart) observation.affectedPart = static_cast<std::uint32_t>(*evidence.affectedPart);
-  observation.width = part.width;
-  observation.height = part.height;
+  observation.width = hasPart ? source.parts[partIndex].width : source.width;
+  observation.height = hasPart ? source.parts[partIndex].height : source.height;
   observation.matchedAxes = static_cast<std::uint8_t>(evidence.matchedAxes);
   observation.duplicateAxes = static_cast<std::uint8_t>(evidence.duplicateAxes);
   observation.namespaceMismatchAxes = static_cast<std::uint8_t>(evidence.namespaceMismatchAxes);
@@ -1126,7 +1142,7 @@ void OneGenSourceController::reportPlanarRejection(const OneGenPlanarRejection& 
   observation.imageRetained = output && output->hasImage();
   observation.rangeRetained = output && output->hasRangeFrame();
   observation.frameSequence = sequence;
-  observation.pixelFormat = part.data_format;
+  observation.pixelFormat = hasPart ? source.parts[partIndex].data_format : source.pixel_format;
   observation.reportedStride = evidence.reportedStride;
   observation.effectiveStride = evidence.effectiveStride;
   observation.minimumRowBytes = evidence.minimumRowBytes;
@@ -1134,6 +1150,34 @@ void OneGenSourceController::reportPlanarRejection(const OneGenPlanarRejection& 
   observation.requiredBytes = evidence.requiredBytes;
   observation.requestedStorageBytes = evidence.requestedStorageBytes;
   planar_rejection_sink_(observation);
+}
+
+bool OneGenSourceController::reportAnomalies(const OneGenFrameAnomalies& anomalies,
+    const onegen::Frame& source, std::uint64_t sequence, std::size_t readableBytes, bool directInput,
+    const std::optional<GraphicsFrame>& output, bool single) noexcept
+{
+  bool reported = false;
+  for (std::size_t i = 0; i < anomalies.imageCount; ++i)
+    reported |= reportImageRejection(anomalies.images[i], source, sequence, readableBytes, directInput, single);
+  for (std::size_t index = 0; index < anomalies.imageOverflow.size(); ++index) {
+    if (!anomalies.imageOverflow[index]) continue;
+    OneGenImageRejection evidence{};
+    if (index) evidence.failure = static_cast<GraphicsImageFailure>(index - 1U);
+    reported |= reportImageRejection(evidence, source, sequence, readableBytes, directInput, single,
+        anomalies.imageOverflow[index]);
+  }
+  if (!planar_rejection_sink_) return reported;
+  for (std::size_t i = 0; i < anomalies.partCount; ++i)
+    reportPlanarRejection(anomalies.parts[i], source, sequence, output, single);
+  for (std::size_t index = 0; index < anomalies.partOverflow.size(); ++index) {
+    if (!anomalies.partOverflow[index]) continue;
+    OneGenPlanarRejection evidence;
+    evidence.reason = static_cast<OneGenPlanarRejection::Reason>(index);
+    reportPlanarRejection(evidence, source, sequence, output, single, anomalies.partOverflow[index]);
+  }
+  return reported || anomalies.partCount != 0
+      || std::any_of(anomalies.partOverflow.begin(), anomalies.partOverflow.end(),
+                     [](const std::size_t count) { return count != 0; });
 }
 
 void OneGenSourceController::deliver(const onegen::Frame& source, const std::string& sourceName, bool single)
@@ -1168,19 +1212,19 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
       return;
     }
     std::string rejectionReason;
-    std::optional<OneGenImageRejection> observation;
-    std::optional<OneGenPlanarRejection> planar;
+    OneGenFrameAnomalies anomalies;
     GraphicsFrameError storageError = GraphicsFrameError::None;
     auto payload = oneGenGraphicsFrame(source, sequence, *sourceState->source, &rejectionReason,
-        image_rejection_sink_ ? &observation : nullptr,
-        planar_rejection_sink_ ? &planar : nullptr, sourceName, &storageError);
+        nullptr, nullptr, sourceName, &storageError, &anomalies);
     if (storageError != GraphicsFrameError::None) {
       if (storageError != GraphicsFrameError::NoReadyCredit) {
         std::lock_guard errors(error_state_->mutex);
         if (error_state_->message.empty()) error_state_->message = rejectionReason;
       }
     }
-    if (planar) reportPlanarRejection(*planar, source, sequence, payload, single);
+    const bool anomalous = anomalies.total() != 0;
+    const bool reported = anomalous
+        && reportAnomalies(anomalies, source, sequence, source.payload.size(), false, payload, single);
     const auto converted = frameTrace ? std::chrono::steady_clock::now()
                                       : std::chrono::steady_clock::time_point{};
     if (!payload) {
@@ -1189,8 +1233,7 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
         std::lock_guard lock(mutex_);
         last_single_failure_ = rejectionReason;
       }
-      if ((planar && rejectionReason.empty()) || (observation && reportImageRejection(*observation, source, sequence, source.payload.size(), false, single)))
-        return;
+      if (reported) return;
       {
         const auto message = QStringLiteral(
             "Frame rejected: %1; PFNC 0x%2, %3x%4, stride %5, payload %6 bytes, "
@@ -1211,8 +1254,13 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
       return;
     }
     const bool firstConverted = converted_frames_.fetch_add(1, std::memory_order_relaxed) == 0;
-    if (planar || !rejectionReason.empty()) {
-      partial_frames_.fetch_add(1, std::memory_order_relaxed);
+    if (anomalous || !rejectionReason.empty()) {
+      const auto fitted = partial_frames_.fetch_add(1, std::memory_order_relaxed) + 1;
+      // Fitted frames are published; the warning is rate limited like the sink reports.
+      if (anomalous && (fitted == 1 || fitted % 100 == 0))
+        qWarning().noquote() << "[GenICam] frame fitted and published: camera=" << QString::fromStdString(sourceName)
+            << "sequence=" << sequence << "frameId=" << source.frame_id << "anomalies=" << anomalies.total()
+            << "fittedFrames=" << fitted;
       if (!rejectionReason.empty()) qWarning().noquote() << "[GenICam] frame retained with rejected parts: camera="
           << QString::fromStdString(sourceName) << "sequence=" << sequence
           << "frameId=" << source.frame_id << QString::fromStdString(rejectionReason);
@@ -1287,17 +1335,19 @@ void OneGenSourceController::deliverDirect(const onegen::producer::SharedFrame& 
     if (firstFrame) logFirstAcquisitionInput(source, bytes.size(), true);
 
     std::string rejectionReason;
-    std::optional<OneGenImageRejection> observation;
+    OneGenFrameAnomalies anomalies;
     auto payload = oneGenBuildDirectImageFrame(
         source, sequence, *state->builder, std::move(state->region), bytes.size(),
-        &rejectionReason, image_rejection_sink_ ? &observation : nullptr, sourceName);
+        &rejectionReason, nullptr, sourceName, &anomalies);
     state->builder.reset();
     state->context.reset();
+    const auto readableBytes = bytes.empty() ? source.payload.size() : bytes.size();
+    const bool anomalous = anomalies.total() != 0;
+    const bool reported = anomalous
+        && reportAnomalies(anomalies, source, sequence, readableBytes, true, payload, false);
     if (!payload) {
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
-      const auto readableBytes = bytes.empty() ? source.payload.size() : bytes.size();
-      if (observation && reportImageRejection(*observation, source, sequence, readableBytes, true, false))
-        return;
+      if (reported) return;
       qWarning().noquote() << QStringLiteral(
           "[GenICam] direct frame rejected: camera=%1 sequence=%2 frame=%3 reason=%4")
           .arg(QString::fromStdString(sourceName))
@@ -1307,6 +1357,13 @@ void OneGenSourceController::deliverDirect(const onegen::producer::SharedFrame& 
       return;
     }
     converted_frames_.fetch_add(1, std::memory_order_relaxed);
+    if (anomalous) {
+      const auto fitted = partial_frames_.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (fitted == 1 || fitted % 100 == 0)
+        qWarning().noquote() << "[GenICam] direct frame fitted and published: camera=" << QString::fromStdString(sourceName)
+            << "sequence=" << sequence << "frameId=" << source.frame_id << "anomalies=" << anomalies.total()
+            << "fittedFrames=" << fitted;
+    }
     SessionFrame frame;
     frame.payload = std::move(*payload);
     frame.frameSeq = sequence;

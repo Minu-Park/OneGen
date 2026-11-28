@@ -614,8 +614,9 @@ void OneGenSourceControllerTests::singleWithUnusableImageReportsAssemblyFailure(
     const auto single = invoke([&](auto done) {
         return _controller->requestSingle(_connectionId.toStdString(), done);
     });
-    QCOMPARE(single.error, DeviceConnectionError::BackendFailure);
-    QCOMPARE(_frames.load(), 0);
+    // The big-endian packed image is published as delivered; the conversion it cannot perform is counted.
+    QVERIFY2(single.error == DeviceConnectionError::None, single.message.c_str());
+    QCOMPARE(_frames.load(), 1);
     {
         std::lock_guard lock(imageRejectionMutex);
         QCOMPARE(imageRejections.size(), std::size_t{1});
@@ -636,6 +637,7 @@ void OneGenSourceControllerTests::liveSamplesRejectedDirectImagesAndResetsOnRest
 
     std::uint64_t firstSequence = 0;
     for (const std::size_t minimumSamples : {3U, 1U}) {
+        _frames.store(0);
         QCOMPARE(invoke([&](auto done) {
             return _controller->requestLiveStart(_connectionId.toStdString(), done);
         }).error, DeviceConnectionError::None);
@@ -653,10 +655,12 @@ void OneGenSourceControllerTests::liveSamplesRejectedDirectImagesAndResetsOnRest
             std::lock_guard lock(imageRejectionMutex);
             observations.swap(imageRejections);
         }
+        // Every frame is published and counts one anomaly; the first and every hundredth is reported.
         const auto stats = _controller->runtimeDiagnostics(observations.front().sourceIndex);
-        QCOMPARE(stats.delivered, std::uint64_t{0});
-        QCOMPARE(_frames.load(), 0);
-        QCOMPARE(observations.size(), std::size_t{1} + static_cast<std::size_t>(stats.failed / 100));
+        const auto published = static_cast<std::uint64_t>(_frames.load());
+        QVERIFY(published > 0);
+        QCOMPARE(stats.delivered, published);
+        QCOMPARE(observations.size(), std::size_t{1} + static_cast<std::size_t>(published / 100));
         for (std::size_t index = 0; index < observations.size(); ++index) {
             const auto& observation = observations[index];
             QCOMPARE(observation.reason, DeviceImageRejection::UnsupportedConversion);
@@ -664,7 +668,8 @@ void OneGenSourceControllerTests::liveSamplesRejectedDirectImagesAndResetsOnRest
             const auto offset = index == 0 ? 0 : index * 100 - 1;
             QCOMPARE(observation.frameSequence, firstSequence + offset);
         }
-        firstSequence += stats.failed;
+        firstSequence += published;
+        _frames.store(0);
     }
     disconnect();
     _controller->setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
@@ -704,8 +709,12 @@ void OneGenSourceControllerTests::singleWithIncompletePlanarGroupKeepsImage()
     QCOMPARE(single.error, DeviceConnectionError::None);
     QCOMPARE(_frames.load(), 1);
     {
+        // MissingAxis is reported first; the two plane parts are fitted as images and each unknown
+        // plane format is counted as a layout anomaly.
         std::lock_guard lock(imageRejectionMutex);
-        QCOMPARE(planarRejections.size(), std::size_t{1});
+        QCOMPARE(planarRejections.size(), std::size_t{3});
+        QCOMPARE(planarRejections[1].reason, DevicePlanarRejection::InvalidLayout);
+        QCOMPARE(planarRejections[2].reason, DevicePlanarRejection::InvalidLayout);
         const auto& observation = planarRejections.front();
         QCOMPARE(observation.reason, DevicePlanarRejection::MissingAxis);
         QCOMPARE(observation.partCount, std::uint32_t{3});
@@ -731,7 +740,9 @@ void OneGenSourceControllerTests::liveSamplesPlanarRejectionAndResetsOnRestart()
         }).error, DeviceConnectionError::None);
         const auto sampled = waitFor([minimumSamples] {
             std::lock_guard lock(imageRejectionMutex);
-            return planarRejections.size() >= minimumSamples;
+            return std::count_if(planarRejections.begin(), planarRejections.end(), [](const auto& entry) {
+                return entry.reason == DevicePlanarRejection::MissingAxis;
+            }) >= static_cast<std::ptrdiff_t>(minimumSamples);
         }, 10000);
         QCOMPARE(invoke([&](auto done) {
             return _controller->requestLiveStop(_connectionId.toStdString(), done);
@@ -740,7 +751,10 @@ void OneGenSourceControllerTests::liveSamplesPlanarRejectionAndResetsOnRestart()
         std::vector<DevicePlanarRejectionObservation> observations;
         {
             std::lock_guard lock(imageRejectionMutex);
-            observations.swap(planarRejections);
+            // The plane-format anomalies share the sink; this run follows the MissingAxis counter.
+            std::copy_if(planarRejections.begin(), planarRejections.end(), std::back_inserter(observations),
+                [](const auto& entry) { return entry.reason == DevicePlanarRejection::MissingAxis; });
+            planarRejections.clear();
         }
         const auto delivered = static_cast<std::uint64_t>(_frames.load());
         QCOMPARE(observations.size(), std::size_t{1} + static_cast<std::size_t>(delivered / 100));
@@ -1782,6 +1796,25 @@ void OneGenSourceControllerTests::frameContextContractAndReadinessMappings()
         return fixture._controller->requestSingle(connectionId, done);
     });
     QCOMPARE(refusedSingle.error, DeviceConnectionError::BackendFailure);
+    // A Single whose frame is dropped for a refusal completes at once with that refusal as its reason;
+    // it never waits for a deadline or for the user to end it.
+    const std::pair<GraphicsFrameError, const char*> singleRefusals[] = {
+        {GraphicsFrameError::ClassRefused, "class refused"},
+        {GraphicsFrameError::Capacity, "capacity exceeded"},
+        {GraphicsFrameError::ClassNotPrepared, "class not prepared"},
+    };
+    for (const auto& [refusal, expectedReason] : singleRefusals) {
+        source->setError(refusal);
+        QElapsedTimer elapsed;
+        elapsed.start();
+        const auto refused = fixture.invoke([&](auto done) {
+            return fixture._controller->requestSingle(connectionId, done);
+        });
+        QCOMPARE(refused.error, DeviceConnectionError::BackendFailure);
+        QVERIFY2(QString::fromStdString(refused.message).contains(QLatin1String(expectedReason)),
+                 refused.message.c_str());
+        QVERIFY2(elapsed.elapsed() < 5000, "a refused Single must not wait for a deadline");
+    }
     source->setError(GraphicsFrameError::None);
     const std::size_t callsBeforeRetry = source->calls();
     const int framesBeforeRetry = fixture.frames();

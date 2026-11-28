@@ -39,6 +39,7 @@ class DirectLeaseSink;
 
 struct OneGenImageRejection;
 struct OneGenPlanarRejection;
+struct OneGenFrameAnomalies;
 
 /** @brief Reports a refused acquisition-mode write before any acquisition effect. */
 class OneGenAcquisitionModeRefused : public std::runtime_error {
@@ -190,10 +191,20 @@ private:
   GraphicsFrameCallbackGate::Token ensureCallbackGateLocked(
       onegen::producer::Lease& lease, const std::string& sourceName);
   std::shared_ptr<ContextSourceState> activeContextSource(std::string* error = nullptr) const;
+  /** @brief Counts @p repeat occurrences of an image anomaly and forwards the first and every hundredth. */
   bool reportImageRejection(const OneGenImageRejection& evidence, const onegen::Frame& source,
-      std::uint64_t sequence, std::size_t readableBytes, bool directInput, bool single) noexcept;
+      std::uint64_t sequence, std::size_t readableBytes, bool directInput, bool single,
+      std::size_t repeat = 1) noexcept;
+  /** @brief Counts @p repeat occurrences of a part anomaly and forwards the first and every hundredth. */
   void reportPlanarRejection(const OneGenPlanarRejection& evidence, const onegen::Frame& source,
-      std::uint64_t sequence, const std::optional<GraphicsFrame>& output, bool single) noexcept;
+      std::uint64_t sequence, const std::optional<GraphicsFrame>& output, bool single,
+      std::size_t repeat = 1) noexcept;
+  /** @brief Reports every anomaly of one frame, including those counted only in the overflow arrays.
+   * @return True when at least one anomaly reached a diagnostic sink.
+   */
+  bool reportAnomalies(const OneGenFrameAnomalies& anomalies, const onegen::Frame& source,
+      std::uint64_t sequence, std::size_t readableBytes, bool directInput,
+      const std::optional<GraphicsFrame>& output, bool single) noexcept;
   void bindLease();
   /** @brief Frames dropped for lack of a free slot or ready credit since the last start. */
   std::uint64_t droppedFrames() const;

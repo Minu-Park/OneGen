@@ -182,7 +182,7 @@ int main()
     assert(std::equal(px.begin(), px.end(), expectedSwap.begin()));
   }
 
-  // Direct path still reports the packed big-endian conversion the owned path cannot perform.
+  // Direct path publishes the bytes as delivered and counts the packed big-endian conversion it cannot perform.
   {
     onegen::Frame packedMeta;
     packedMeta.width = 64;
@@ -195,11 +195,19 @@ int main()
     auto region = builder.reserve<std::uint8_t>(16U, 1U);
     assert(region.hasValue());
     std::optional<OneGenImageRejection> packedObs;
-    assert(!oneGenBuildDirectImageFrame(packedMeta, 11, builder, std::move(region).value(), 16U, nullptr, &packedObs));
+    OneGenFrameAnomalies packedAnomalies;
+    const auto packedFrame = oneGenBuildDirectImageFrame(
+        packedMeta, 11, builder, std::move(region).value(), 16U, nullptr, &packedObs, {}, &packedAnomalies);
+    assert(packedFrame && packedFrame->hasImage());
     assert(packedObs && packedObs->failure == GraphicsImageFailure::UnsupportedConversion);
+    // The 16 delivered bytes are shorter than the declared 64 pixels, so they are published as a raw row.
+    assert(packedAnomalies.imageCount == 2 && packedAnomalies.total() == 2);
+    assert(packedAnomalies.images[1].failure == GraphicsImageFailure::TruncatedBytes);
+    assert(packedFrame->images().front().payload.pixelFormat == GraphicsImagePixelFormat::Mono8);
+    assert(packedFrame->images().front().payload.width == 16 && packedFrame->images().front().payload.height == 1);
   }
 
-  // Invalid direct metadata abandons open region without producing a frame.
+  // A direct stride below the row size is published from the delivered bytes and counted.
   {
     onegen::Frame badDirect;
     badDirect.width = 2;
@@ -212,7 +220,8 @@ int main()
     auto region = builder.reserve<std::uint8_t>(16U, 1U);
     assert(region.hasValue());
     std::optional<OneGenImageRejection> directObs;
-    assert(!oneGenBuildDirectImageFrame(badDirect, 9, builder, std::move(region).value(), 4U, nullptr, &directObs));
+    const auto badFrame = oneGenBuildDirectImageFrame(badDirect, 9, builder, std::move(region).value(), 4U, nullptr, &directObs);
+    assert(badFrame && badFrame->hasImage());
     assert(directObs && directObs->failure == GraphicsImageFailure::StrideBelowMinimum);
     assert(builder.openWriteRegions() == 0U);
   }
@@ -288,11 +297,19 @@ int main()
   assert(oneGenGraphicsFrame(source, 11, localSource)->images().front().payload.pixelFormat
          == GraphicsImagePixelFormat::YCbCr422_8);
 
+  // An unknown PFNC is fitted: 12 bits per pixel has no whole element size, so rows become raw Mono8 bytes.
   source.pixel_format = 0x010c0004;
-  assert(!oneGenGraphicsFrame(source, 12, localSource));
+  {
+    OneGenFrameAnomalies unknownAnomalies;
+    const auto unknown = oneGenGraphicsFrame(source, 12, localSource, nullptr, nullptr, nullptr, {}, nullptr, &unknownAnomalies);
+    assert(unknown && unknown->hasImage());
+    assert(unknown->images().front().payload.pixelFormat == GraphicsImagePixelFormat::Mono8);
+    assert(unknown->images().front().payload.width == 6 && unknown->images().front().payload.height == 1);
+    assert(unknownAnomalies.imageCount >= 1 && unknownAnomalies.images[0].failure == GraphicsImageFailure::UnsupportedFormat);
+  }
 
   source.pixel_format = 0;
-  assert(!oneGenGraphicsFrame(source, 13, localSource));
+  assert(oneGenGraphicsFrame(source, 13, localSource)->hasImage());
 
   source.payload_type = 5;
   source.width = 640;
@@ -362,15 +379,26 @@ int main()
   using Conversion = OneGenImageRejection::Conversion;
   std::optional<OneGenImageRejection> observation;
   RecordingContextSource invalidPlanSource;
-  assert(!oneGenGraphicsFrame(mono16, 75, invalidPlanSource, nullptr, &observation));
-  assert(invalidPlanSource.calls == 0);
+  const auto narrowStride = oneGenGraphicsFrame(mono16, 75, invalidPlanSource, nullptr, &observation);
+  assert(narrowStride && narrowStride->hasImage());
+  assert(invalidPlanSource.calls == 1);
+  assert(narrowStride->images().front().payload.stride == 8 && narrowStride->images().front().payload.height == 2);
   assert(observation && observation->failure == GraphicsImageFailure::StrideBelowMinimum);
   assert(observation->conversion == Conversion::Copy && observation->effectiveStride == 7);
   assert(observation->minimumRowBytes == 8 && observation->requiredBytes == 16);
   mono16.stride = 8;
   mono16.payload.resize(15);
-  assert(!oneGenGraphicsFrame(mono16, 78, invalidPlanSource, nullptr, &observation));
-  assert(invalidPlanSource.calls == 0);
+  mono16.payload.assign(15, 0xff);
+  OneGenFrameAnomalies shortAnomalies;
+  const auto shortFrame = oneGenGraphicsFrame(mono16, 78, invalidPlanSource, nullptr, &observation, nullptr, {}, nullptr, &shortAnomalies);
+  assert(shortFrame && shortFrame->hasImage());
+  assert(invalidPlanSource.calls == 2);
+  {
+    // Planned at the declared 16 bytes: the 15 delivered bytes are copied and the last one is zero.
+    const auto pixels = shortFrame->images().front().payload.pixels;
+    assert(pixels.size() == 16 && pixels[14] == 0xff && pixels[15] == 0);
+  }
+  assert(shortAnomalies.total() == 1 && shortAnomalies.imageCount == 1);
   assert(observation && observation->failure == GraphicsImageFailure::TruncatedBytes);
   assert(observation->conversion == Conversion::Copy && observation->requiredBytes == 16);
   mono16.payload.resize(16);
@@ -385,14 +413,14 @@ int main()
 
   std::string rejectionReason;
   source.payload_type = 8;
-  assert(!oneGenGraphicsFrame(source, 13, localSource, &rejectionReason));
+  assert(oneGenGraphicsFrame(source, 13, localSource, &rejectionReason)->hasImage());
   source.payload_type = 4;
   source.buffer_info.image_present = false;
   assert(!oneGenGraphicsFrame(source, 13, localSource, &rejectionReason));
   source.buffer_info.image_present = true;
   assert(oneGenGraphicsFrame(source, 13, localSource)->hasImage());
   source.payload_type = 2;
-  assert(!oneGenGraphicsFrame(source, 13, localSource));
+  assert(oneGenGraphicsFrame(source, 13, localSource)->hasImage());
   source.payload_type = 0;
 
   onegen::Frame multipart;
@@ -483,11 +511,11 @@ int main()
   assert(c16BigEndianScene->ranges().front().payload.rangeRaw[0] == 6U);
   auto missingCalibration = c16Frame;
   missingCalibration.scan3d_geometry->calibrated_axes[2] = false;
-  assert(!oneGenGraphicsFrame(missingCalibration, 15, localSource, &rejectionReason, nullptr, &standalonePlanarRejection));
-  assert(!standalonePlanarRejection);
-  assert(rejectionReason.find("part=0") != std::string::npos
-      && rejectionReason.find("PFNC=0x11000b8") != std::string::npos
-      && rejectionReason.find("axis=2") != std::string::npos);
+  // Without usable Z calibration the scalar part is published as an uncalibrated pixel grid and counted.
+  const auto uncalibratedC = oneGenGraphicsFrame(missingCalibration, 15, localSource, &rejectionReason, nullptr, &standalonePlanarRejection);
+  assert(uncalibratedC && uncalibratedC->hasRangeFrame() && rejectionReason.empty());
+  assert(uncalibratedC->ranges().front().payload.rangeField.domain == MeasurementValueDomain::Native);
+  assert(standalonePlanarRejection && standalonePlanarRejection->reason == OneGenPlanarRejection::Reason::InvalidCalibration);
   onegen::Frame::Part survivingImage;
   survivingImage.data_type = 1;
   survivingImage.data_format = 0x01080001;
@@ -495,8 +523,7 @@ int main()
   survivingImage.payload = {1, 2};
   missingCalibration.parts.push_back(survivingImage);
   const auto partial = oneGenGraphicsFrame(missingCalibration, 15, localSource, &rejectionReason);
-  assert(partial && partial->hasImage() && !partial->hasRangeFrame()
-      && rejectionReason.find("axis=2") != std::string::npos);
+  assert(partial && partial->hasImage() && partial->hasRangeFrame() && rejectionReason.empty());
   missingCalibration.scan3d_geometry.reset();
   const auto native = oneGenGraphicsFrame(missingCalibration, 15, localSource, &rejectionReason);
   assert(native && native->hasRangeFrame() && rejectionReason.empty()
@@ -514,11 +541,9 @@ int main()
   orphanConfidence.source_id = 999;
   discardedParts.parts.push_back(orphanConfidence);
   const auto retainedRange = oneGenGraphicsFrame(discardedParts, 16, localSource, &rejectionReason);
-  assert(retainedRange && retainedRange->hasRangeFrame());
-  assert(rejectionReason.find("part=1 type=2") != std::string::npos
-      && rejectionReason.find("unsupported multipart") != std::string::npos
-      && rejectionReason.find("part=2 type=9") != std::string::npos
-      && rejectionReason.find("confidence part has no matching range") != std::string::npos);
+  // A part of an unsupported type and a confidence part without a range are fitted and published as images.
+  assert(retainedRange && retainedRange->hasRangeFrame() && retainedRange->images().size() == 2);
+  assert(rejectionReason.empty());
 
   onegen::Frame floating;
   floating.scan3d_geometry = multipart.scan3d_geometry;
@@ -577,7 +602,12 @@ int main()
   single.parts = {floating.parts[1]};
   assert(oneGenGraphicsFrame(single, 26, localSource)->ranges().front().payload.rangeField.displayName == "Confidence");
   single.pixel_endianness = 3;
-  assert(!oneGenGraphicsFrame(single, 27, localSource));
+  {
+    OneGenFrameAnomalies endianAnomalies;
+    const auto endianFrame = oneGenGraphicsFrame(single, 27, localSource, nullptr, nullptr, nullptr, {}, nullptr, &endianAnomalies);
+    assert(endianFrame && endianFrame->hasRangeFrame());
+    assert(endianAnomalies.partCount == 1 && endianAnomalies.parts[0].reason == OneGenPlanarRejection::Reason::InvalidLayout);
+  }
   // The complete vendor PixelFormat enumeration, including padded monochrome rows.
   for (const auto format : {0x01080001U, 0x01100007U}) {
     onegen::Frame mono;
@@ -615,12 +645,30 @@ int main()
   floating.scan3d_geometry->invalid_value[2] = -2;
   assert(oneGenGraphicsFrame(floating, 18, localSource)->ranges().front().payload.validMask[1] == 0);
   floating.parts[1].payload.pop_back();
-  assert(oneGenGraphicsFrame(floating, 19, localSource)->ranges().front().payload.confidence.empty());
+  {
+    // The confidence part lacks its last padding byte: the channel stays, the shortfall is counted.
+    OneGenFrameAnomalies confidenceAnomalies;
+    const auto shortConfidence = oneGenGraphicsFrame(floating, 19, localSource, nullptr, nullptr, nullptr, {}, nullptr, &confidenceAnomalies);
+    assert(shortConfidence && shortConfidence->ranges().front().payload.confidence.size() == 4);
+    assert(confidenceAnomalies.partCount == 1
+        && confidenceAnomalies.parts[0].reason == OneGenPlanarRejection::Reason::AuxiliaryLayoutRejected);
+  }
   floating.pixel_endianness = 3;
-  assert(!oneGenGraphicsFrame(floating, 20, localSource));
+  {
+    OneGenFrameAnomalies endianAnomalies;
+    const auto endianScene = oneGenGraphicsFrame(floating, 20, localSource, nullptr, nullptr, nullptr, {}, nullptr, &endianAnomalies);
+    assert(endianScene && endianScene->hasRangeFrame() && endianAnomalies.partCount >= 1);
+    assert(endianAnomalies.parts[0].reason == OneGenPlanarRejection::Reason::InvalidLayout);
+  }
   floating.pixel_endianness = 0;
   floating.parts[0].payload.pop_back();
-  assert(!oneGenGraphicsFrame(floating, 21, localSource));
+  {
+    OneGenFrameAnomalies truncatedAnomalies;
+    const auto truncatedRange = oneGenGraphicsFrame(floating, 21, localSource, nullptr, nullptr, nullptr, {}, nullptr, &truncatedAnomalies);
+    assert(truncatedRange && truncatedRange->hasRangeFrame());
+    assert(truncatedAnomalies.partCount >= 1
+        && truncatedAnomalies.parts[0].reason == OneGenPlanarRejection::Reason::TruncatedPlane);
+  }
   floating.parts[0].payload.resize(24);
   floating.scan3d_geometry.reset();
   const auto uncalibrated = oneGenGraphicsFrame(floating, 22, localSource);
@@ -714,34 +762,38 @@ int main()
         return oneGenGraphicsFrame(coordinates, 43, localSource, nullptr, nullptr, &planarRejection);
       };
       coordinates.parts[1].source_id = 9;
-      assert(!inspectPlanar());
+      assert(inspectPlanar());
       assert(planarRejection && planarRejection->reason == PlanarReason::MissingAxis);
       assert(planarRejection->anchorPart == 0 && planarRejection->matchedAxes == 0b101U);
       assert(planarRejection->shapeMismatchAxes == 0 && planarRejection->namespaceMismatchAxes == 0);
       coordinates.parts[1].source_id = 0;
 
       coordinates.parts.erase(coordinates.parts.begin());
-      assert(!inspectPlanar());
+      assert(inspectPlanar());
       assert(planarRejection && planarRejection->reason == PlanarReason::MissingAxis);
       assert(planarRejection->anchorPart == 0 && planarRejection->matchedAxes == 0b110U);
       coordinates.parts = firstPlanarGroup;
 
       ++coordinates.parts[1].width;
       ++coordinates.parts[1].format_namespace;
-      assert(!inspectPlanar());
+      assert(inspectPlanar());
       assert(planarRejection && planarRejection->reason == PlanarReason::MissingAxis);
       assert(planarRejection->matchedAxes == 0b101U && planarRejection->shapeMismatchAxes == 0b010U);
       assert(planarRejection->namespaceMismatchAxes == 0b010U);
       coordinates.parts = firstPlanarGroup;
 
       coordinates.parts.push_back(coordinates.parts.front());
-      assert(!inspectPlanar());
+      assert(inspectPlanar());
       assert(planarRejection && planarRejection->reason == PlanarReason::DuplicateAxis);
       assert(planarRejection->duplicateAxes == 0b001U && planarRejection->affectedPart == 3);
       coordinates.parts.pop_back();
 
       coordinates.parts[1].stride = 2 * layout.bytes - 1;
-      assert(!inspectPlanar());
+      {
+        // The plane is joined row by row; the missing byte of each row is zero and the stride is counted.
+        const auto joinedNarrow = inspectPlanar();
+        assert(joinedNarrow && joinedNarrow->hasRangeFrame());
+      }
       assert(planarRejection && planarRejection->reason == PlanarReason::StrideBelowMinimum);
       assert(planarRejection->affectedPart == 1);
       assert(planarRejection->minimumRowBytes == 2 * layout.bytes);
@@ -749,7 +801,10 @@ int main()
       coordinates.parts = firstPlanarGroup;
 
       coordinates.parts[1].payload.pop_back();
-      assert(!inspectPlanar());
+      {
+        const auto joinedShort = inspectPlanar();
+        assert(joinedShort && joinedShort->hasRangeFrame());
+      }
       assert(planarRejection && planarRejection->reason == PlanarReason::TruncatedPlane);
       assert(planarRejection->affectedPart == 1 && planarRejection->readableBytes == planeSize - 1);
       assert(planarRejection->requiredBytes == planeSize);
@@ -760,7 +815,7 @@ int main()
       survivingImage.payload = {1, 2, 3, 4};
       coordinates.parts.push_back(survivingImage);
       const auto partial = inspectPlanar();
-      assert(partial && partial->hasImage() && !partial->hasRangeFrame());
+      assert(partial && partial->hasImage() && partial->hasRangeFrame());
       assert(planarRejection && planarRejection->reason == PlanarReason::TruncatedPlane);
 
       auto unusableImage = survivingImage;
@@ -821,7 +876,12 @@ int main()
     geometry.invalid_enabled[2] = true; geometry.invalid_value[2] = 0;
     assert(oneGenGraphicsFrame(coordinates, 33, localSource)->ranges().front().payload.validMask[1] == 0);
     coordinates.payload.pop_back();
-    assert(!oneGenGraphicsFrame(coordinates, 34, localSource));
+    {
+      std::optional<OneGenPlanarRejection> shortCoordinates;
+      const auto shortScene = oneGenGraphicsFrame(coordinates, 34, localSource, nullptr, nullptr, &shortCoordinates);
+      assert(shortScene && shortScene->hasRangeFrame());
+      assert(shortCoordinates && shortCoordinates->reason == OneGenPlanarRejection::Reason::TruncatedPlane);
+    }
   }
   onegen::Frame rectifiedFrame;
   rectifiedFrame.scan3d_geometry = multipart.scan3d_geometry;
@@ -835,16 +895,23 @@ int main()
   assert(rectifiedScene->ranges().front().payload.xScale == 2 && rectifiedScene->ranges().front().payload.yScale == -3);
   assert(rectifiedScene->ranges().front().payload.xOffset == 10 && rectifiedScene->ranges().front().payload.yOffset == 20);
   rectifiedFrame.scan3d_geometry->calibrated_axes[0] = false;
-  assert(!oneGenGraphicsFrame(rectifiedFrame, 36, localSource));
+  // Rectified C without all axes is fitted as an uncalibrated pixel grid; each fit is counted.
+  const auto reasonOf = [&](std::uint64_t sequence) {
+    std::optional<OneGenPlanarRejection> evidence;
+    const auto fitted = oneGenGraphicsFrame(rectifiedFrame, sequence, localSource, nullptr, nullptr, &evidence);
+    assert(fitted && fitted->hasRangeFrame());
+    return evidence ? std::optional(evidence->reason) : std::nullopt;
+  };
+  assert(reasonOf(36) == OneGenPlanarRejection::Reason::InvalidCalibration);
   rectifiedFrame.scan3d_geometry->output_mode = "CalibratedC";
-  assert(oneGenGraphicsFrame(rectifiedFrame, 37, localSource));
+  assert(!reasonOf(37));
   rectifiedFrame.scan3d_geometry->coordinate_system = "Spherical";
-  assert(!oneGenGraphicsFrame(rectifiedFrame, 38, localSource));
+  assert(reasonOf(38) == OneGenPlanarRejection::Reason::UnsupportedGeometry);
   rectifiedFrame.scan3d_geometry->coordinate_system = "Cartesian";
   rectifiedFrame.scan3d_geometry->output_mode = "DisparityC";
-  assert(!oneGenGraphicsFrame(rectifiedFrame, 39, localSource));
+  assert(reasonOf(39) == OneGenPlanarRejection::Reason::InvalidCalibration);
   rectifiedFrame.scan3d_geometry->output_mode = "RectifiedC_Linescan";
-  assert(!oneGenGraphicsFrame(rectifiedFrame, 40, localSource));
+  assert(reasonOf(40) == OneGenPlanarRejection::Reason::UnsupportedGeometry);
   rectifiedFrame.scan3d_geometry->output_mode = "UncalibratedC";
   rectifiedFrame.scan3d_geometry->distance_unit.clear();
   const auto rawScene = oneGenGraphicsFrame(rectifiedFrame, 41, localSource);
@@ -1027,5 +1094,171 @@ int main()
   assert(sphereGrid->ranges().front().payload.yValues[0] == 0 && sphereGrid->ranges().front().payload.zValues[0] == 2);
 
   multipart.scan3d_geometry->distance_unit.clear();
-  assert(!oneGenGraphicsFrame(multipart, 16, localSource));
+  {
+    // An unknown distance unit keeps the values, labeled millimeters, and counts the anomaly.
+    OneGenFrameAnomalies unitAnomalies;
+    const auto unitScene = oneGenGraphicsFrame(multipart, 16, localSource, nullptr, nullptr, nullptr, {}, nullptr, &unitAnomalies);
+    assert(unitScene && unitScene->hasRangeFrame());
+    assert(unitScene->ranges().front().payload.lengthUnit == GraphicsLengthUnit::Millimeter);
+    assert(unitAnomalies.partCount == 1 && unitAnomalies.parts[0].reason == OneGenPlanarRejection::Reason::UnsupportedUnit);
+  }
+
+  // ---- Fit instead of reject: every anomaly is counted, the data is published. ----
+  // The per-frame record is fixed-size: it never allocates per frame.
+  static_assert(std::is_trivially_destructible_v<OneGenFrameAnomalies>
+      && std::is_trivially_copyable_v<OneGenFrameAnomalies>);
+  {
+    // An unknown PFNC maps to the GraphicsEngine format with the same bytes per element.
+    struct UnknownCase { std::uint64_t pfnc; GraphicsImagePixelFormat format; int width; };
+    const UnknownCase unknownCases[] = {
+      {0x01080999, GraphicsImagePixelFormat::Mono8, 4},
+      {0x01100999, GraphicsImagePixelFormat::Mono16, 4},
+      {0x02180999, GraphicsImagePixelFormat::RGB24, 4},
+      {0x02200999, GraphicsImagePixelFormat::Mono32, 4},
+      {0x01400999, GraphicsImagePixelFormat::Mono8, 32}, // 64 bits per pixel: eight raw bytes per pixel
+    };
+    for (const auto& unknownCase : unknownCases) {
+      onegen::Frame frameSource;
+      frameSource.width = 4; frameSource.height = 2;
+      frameSource.pixel_format = unknownCase.pfnc;
+      const auto bytesPerPixel = static_cast<std::size_t>((unknownCase.pfnc >> 16U) & 0xffU) / 8U;
+      frameSource.stride = 4 * bytesPerPixel;
+      frameSource.payload.assign(frameSource.stride * 2, 0x5a);
+      OneGenFrameAnomalies counted;
+      const auto fitted = oneGenGraphicsFrame(frameSource, 90, localSource, nullptr, nullptr, nullptr, {}, nullptr, &counted);
+      assert(fitted && fitted->hasImage());
+      const auto& image = fitted->images().front().payload;
+      assert(image.pixelFormat == unknownCase.format && image.width == unknownCase.width && image.height == 2);
+      assert(image.pixels.size() == frameSource.payload.size() && image.pixels[0] == 0x5a);
+      assert(counted.total() == 1 && counted.imageCount == 1);
+      assert(counted.images[0].failure == GraphicsImageFailure::UnsupportedFormat);
+    }
+  }
+  {
+    // A short buffer is planned at its declared size: delivered bytes are copied, the rest is zero.
+    onegen::Frame shortFrame;
+    shortFrame.width = 4; shortFrame.height = 4; shortFrame.stride = 4;
+    shortFrame.pixel_format = 0x01080001;
+    shortFrame.payload.assign(10, 0x7f);
+    OneGenFrameAnomalies counted;
+    const auto fitted = oneGenGraphicsFrame(shortFrame, 91, localSource, nullptr, nullptr, nullptr, {}, nullptr, &counted);
+    assert(fitted && fitted->hasImage());
+    const auto pixels = fitted->images().front().payload.pixels;
+    assert(pixels.size() == 16 && pixels[9] == 0x7f && pixels[10] == 0 && pixels[15] == 0);
+    assert(counted.total() == 1 && counted.images[0].failure == GraphicsImageFailure::TruncatedBytes);
+    assert(counted.images[0].requiredBytes == 16);
+
+    // A range part with fewer bytes than its layout keeps zeros and marks the missing samples invalid.
+    onegen::Frame shortRange;
+    shortRange.width = 2; shortRange.height = 2; shortRange.stride = 4;
+    shortRange.pixel_format = 0x011000b8;
+    shortRange.payload = {5, 0, 6, 0, 7, 0}; // the last sample is missing
+    shortRange.scan3d_geometry.emplace();
+    shortRange.scan3d_geometry->distance_unit = "Millimeter";
+    shortRange.scan3d_geometry->output_mode = "CalibratedC";
+    OneGenFrameAnomalies rangeCounted;
+    const auto rangeFrame = oneGenGraphicsFrame(shortRange, 92, localSource, nullptr, nullptr, nullptr, {}, nullptr, &rangeCounted);
+    assert(rangeFrame && rangeFrame->hasRangeFrame());
+    const auto& shortRangePayload = rangeFrame->ranges().front().payload;
+    assert(shortRangePayload.zValues[3] == 0.0F);
+    assert(samplesEqual(shortRangePayload.validMask, std::vector<std::uint8_t>({1, 1, 1, 0})));
+    assert(rangeCounted.partCount == 1 && rangeCounted.parts[0].reason == OneGenPlanarRejection::Reason::TruncatedPlane);
+  }
+  {
+    // A stride below the row size or beyond the integer range is rewritten row by row into a valid stride.
+    onegen::Frame narrow;
+    narrow.width = 4; narrow.height = 3; narrow.stride = 2;
+    narrow.pixel_format = 0x01080001;
+    narrow.payload = {1, 2, 3, 4, 5, 6};
+    OneGenFrameAnomalies counted;
+    const auto fitted = oneGenGraphicsFrame(narrow, 93, localSource, nullptr, nullptr, nullptr, {}, nullptr, &counted);
+    assert(fitted && fitted->hasImage());
+    const auto& image = fitted->images().front().payload;
+    assert(image.stride == 4 && image.height == 3 && image.pixels.size() == 12);
+    assert(samplesEqual(image.pixels, std::vector<std::uint8_t>({1, 2, 0, 0, 3, 4, 0, 0, 5, 6, 0, 0})));
+    assert(counted.images[0].failure == GraphicsImageFailure::StrideBelowMinimum);
+
+    onegen::Frame huge = narrow;
+    huge.stride = static_cast<std::size_t>(std::numeric_limits<int>::max()) + 100U;
+    OneGenFrameAnomalies hugeCounted;
+    const auto hugeFrame = oneGenGraphicsFrame(huge, 94, localSource, nullptr, nullptr, nullptr, {}, nullptr, &hugeCounted);
+    assert(hugeFrame && hugeFrame->hasImage() && hugeFrame->images().front().payload.stride == 4);
+    assert(hugeCounted.images[0].failure == GraphicsImageFailure::InvalidStride);
+
+    // Invalid dimensions publish the bytes as a raw row layout instead of dropping them.
+    onegen::Frame empty = narrow;
+    empty.width = 0;
+    OneGenFrameAnomalies dimensionCounted;
+    const auto dimensionFrame = oneGenGraphicsFrame(empty, 95, localSource, nullptr, nullptr, nullptr, {}, nullptr, &dimensionCounted);
+    assert(dimensionFrame && dimensionFrame->images().front().payload.pixels.size() == 6);
+    assert(dimensionCounted.images[0].failure == GraphicsImageFailure::InvalidDimensions);
+  }
+  {
+    // One bad part never removes another: every other part still publishes, and an absent part is only described.
+    onegen::Frame parts;
+    onegen::Frame::Part good;
+    good.width = 2; good.height = 2; good.stride = 2; good.data_type = 1; good.data_format = 0x01080001;
+    good.payload = {1, 2, 3, 4};
+    auto truncated = good; truncated.payload = {9, 9, 9};
+    auto unknown = good; unknown.data_format = 0x01100999; unknown.stride = 4; unknown.payload.assign(8, 7);
+    auto absent = good; absent.payload.clear();
+    parts.parts = {good, truncated, unknown, absent};
+    OneGenFrameAnomalies counted;
+    std::string description;
+    const auto fitted = oneGenGraphicsFrame(parts, 96, localSource, &description, nullptr, nullptr, {}, nullptr, &counted);
+    assert(fitted && fitted->images().size() == 3);
+    assert(description.find("part=3 ") != std::string::npos && description.find("part=1 ") == std::string::npos);
+    assert(counted.partCount == 2 && counted.total() == 2);
+    assert(counted.parts[0].reason == OneGenPlanarRejection::Reason::TruncatedPlane && counted.parts[0].affectedPart == 1);
+    assert(counted.parts[1].reason == OneGenPlanarRejection::Reason::UnsupportedPartFormat && counted.parts[1].affectedPart == 2);
+    assert(fitted->images()[1].payload.pixels[3] == 0 && fitted->images()[1].payload.pixels[2] == 9);
+
+    // Nothing is published only when no part has any bytes.
+    auto none = parts;
+    for (auto& part : none.parts) part.payload.clear();
+    std::string noneDescription;
+    assert(!oneGenGraphicsFrame(none, 97, localSource, &noneDescription));
+    assert(noneDescription.find("no part with data") != std::string::npos);
+
+    // Entries beyond the fixed capacity are still counted per reason.
+    onegen::Frame many;
+    for (int i = 0; i < 12; ++i) many.parts.push_back(unknown);
+    OneGenFrameAnomalies overflow;
+    const auto manyFrame = oneGenGraphicsFrame(many, 98, localSource, nullptr, nullptr, nullptr, {}, nullptr, &overflow);
+    assert(manyFrame && manyFrame->images().size() == 12);
+    assert(overflow.partCount == OneGenFrameAnomalies::capacity && overflow.total() == 12);
+    assert(overflow.partOverflow[static_cast<std::size_t>(OneGenPlanarRejection::Reason::UnsupportedPartFormat)] == 4);
+  }
+  {
+    // An auxiliary part never removes its range; a range without calibration is published as raw bytes.
+    onegen::Frame ranged;
+    ranged.scan3d_geometry.emplace();
+    ranged.scan3d_geometry->distance_unit = "Millimeter";
+    ranged.scan3d_geometry->output_mode = "CalibratedC";
+    onegen::Frame::Part c;
+    c.width = 2; c.height = 1; c.stride = 4; c.data_type = 5; c.data_format = 0x011000b8; c.payload = {1, 0, 2, 0};
+    onegen::Frame::Part intensity;
+    intensity.width = 2; intensity.height = 1; intensity.stride = 4; intensity.data_type = 1; intensity.data_format = 0x01100007;
+    intensity.payload = {3, 0}; // one 16-bit sample only
+    ranged.parts = {c, intensity};
+    OneGenFrameAnomalies counted;
+    const auto scene = oneGenGraphicsFrame(ranged, 99, localSource, nullptr, nullptr, nullptr, {}, nullptr, &counted);
+    assert(scene && scene->hasRangeFrame());
+    assert(samplesEqual(scene->ranges().front().payload.intensity, std::vector<float>({3.0F, 0.0F})));
+    // The intensity part is also an image of its own; both uses of the short part are counted.
+    assert(counted.partCount == 2 && counted.total() == 2);
+    assert(counted.parts[0].reason == OneGenPlanarRejection::Reason::TruncatedPlane);
+    assert(counted.parts[1].reason == OneGenPlanarRejection::Reason::AuxiliaryLayoutRejected);
+
+    onegen::Frame abc;
+    onegen::Frame::Part abcPart;
+    abcPart.width = 1; abcPart.height = 1; abcPart.stride = 12; abcPart.data_type = 5; abcPart.data_format = 0x026000c0;
+    abcPart.payload.assign(12, 1);
+    abc.parts = {abcPart};
+    OneGenFrameAnomalies abcCounted;
+    const auto rawAbc = oneGenGraphicsFrame(abc, 100, localSource, nullptr, nullptr, nullptr, {}, nullptr, &abcCounted);
+    assert(rawAbc && rawAbc->hasImage() && !rawAbc->hasRangeFrame());
+    assert(rawAbc->images().front().payload.pixels.size() == 12);
+    assert(abcCounted.partCount >= 1 && abcCounted.parts[0].reason == OneGenPlanarRejection::Reason::MissingCalibration);
+  }
 }
