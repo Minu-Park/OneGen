@@ -53,9 +53,11 @@ In the consumer adapter, optional first-frame diagnostics use the `playground.de
 
 The first-frame layout reports whether Scan3d geometry is present. The log excludes raw Scan3d configuration and calibration values and producer-supplied source, region and purpose IDs. Part ordinals identify entries within the bounded input summary.
 
-The optional image rejection sink reports the conversion and failed rule for a single 2D input, including short stride, truncated data and refused destination storage. It carries the numeric format and input layout in bytes. Each Single reports its observed rejection. Live reports the first and every hundredth occurrence of each reason per camera controller during a run. These observations are independent of the detail category.
+The adapter never rejects device data for a validation reason: data that exists is fitted into a GraphicsEngine layout and published, and a broken-looking image is left to the user to judge. An unknown PFNC maps to the GraphicsEngine format with the same bytes per element (Mono8, Mono16, RGB24, Mono32) and otherwise to raw Mono8 rows; an unusable extent publishes the bytes as a raw row layout; a short buffer is planned at its declared size, copied only as far as the delivered bytes reach and zero-filled; a stride below the row size or beyond the integer range is rewritten row by row into a valid stride; a big-endian packed pixel the adapter cannot swap is published as delivered. Only a part with no bytes, a chunk payload that reports no image, an extent the allocation bounds cannot represent, and transport readiness or storage refusals publish nothing.
 
-The optional planar rejection sink reports the first failed A/B/C assembly in an input. Matching B and C planes can identify a group with a missing A plane. A standalone C plane remains a range input. The sink identifies matching and duplicate axes, same-group namespace or shape mismatches, and the failing part ordinal and byte extent for stride and truncation errors. Once planes are joined, it distinguishes calibration, geometry, auxiliary layout and destination storage failures. A different source or region is a separate group. The observation records whether an image or range survived assembly. The planar sink follows the same Single and Live rules as the 2D sink. The adapter collects these fields only on rejection when requested.
+Every fit is an anomaly counted in a fixed-capacity per-frame record (`OneGenFrameAnomalies`, eight entries per kind plus per-reason overflow counters, no allocation per frame). The optional image rejection sink reports the conversion and rule for each 2D anomaly, including short stride, truncated data and refused destination storage, with the numeric format and input layout in bytes. Each Single reports every anomaly it observed. Live reports the first and every hundredth occurrence of each reason per camera controller during a run. A published frame with anomalies also logs a rate-limited warning. These observations are independent of the detail category.
+
+The optional planar rejection sink reports the anomalies of multipart and range inputs. A group whose axes cannot be joined (a missing or duplicated axis, or an unusable layout) is reported and each of its planes is published on its own, as a range for a scalar C plane and otherwise as a fitted image. Matching B and C planes can identify a group with a missing A plane. The sink identifies matching and duplicate axes, same-group namespace or shape mismatches, and the failing part ordinal and byte extent for stride and truncation errors; a plane with a short buffer or a small stride is joined row by row and keeps zeros where it has no bytes. A calibration, geometry or unit the range model cannot use never rejects the part: a scalar C part falls back to an uncalibrated pixel grid, an unsupported mode or coordinate system is read as the default interpretation of its component count, an unknown unit keeps the values labeled millimeters, and a multi-axis part without usable calibration is published as raw bytes. Range samples the buffer does not hold are zero and marked invalid. An auxiliary part never removes its range: what it lacks stays zero, and an auxiliary part that matches no range is published as an image. A different source or region is a separate group. The observation records whether an image or range survived. The host contract has no dedicated rule for an unknown part format, invalid part dimensions or a repaired transport descriptor, so they are reported with the nearest layout rule and the numeric format. The planar sink follows the same Single and Live rules as the 2D sink.
 
 The consumer package declares on-demand discovery. Loading its metadata does not
 load producers. Explicit session discovery starts one shared scan and waits for
@@ -112,6 +114,8 @@ remote node map, so it is never emulated by stopping Live. Single completes afte
 frame conversion; consumer presentation and artifact export remain separate
 authorities.
 
+A Single whose frame is dropped for a storage refusal (`ClassRefused`, `Capacity`, `ClassNotPrepared` or `NoReadyCredit`) completes immediately with a backend failure that carries the refusal reason: the frame is delivered synchronously after the one native frame (`OneGenSourceController::deliver` records the reason for the pending Single), so no deadline or user stop is involved.
+
 The source controller also implements the consumer's optional
 `IDeviceParameterControl` contract. Existing `Lease::describe_features`,
 `observe_node` and `write_node_checked` provide typed inventory, reads, writes and
@@ -152,7 +156,8 @@ GenTL 1.5 multipart buffers are retained without a vendor SDK. The Playground
 adapter assembles standard PFNC `Coord3D_ABC32f` and `Coord3D_C16` range data
 with matching mono intensity and confidence parts. SFNC coordinate scale,
 offset, invalid-value, and distance-unit features are snapshotted before
-acquisition; missing calibration is rejected instead of guessed.
+acquisition; missing calibration is never guessed into physical units, so the data is
+published as an uncalibrated pixel grid or as raw bytes and the anomaly is counted.
 
 GenDC parsing, vendor motion/trigger recipes, and proprietary pixel formats are
 not GenTL services and still require a documented standard payload or an explicit
@@ -230,9 +235,14 @@ revalidate connection and selector context at their owning execution boundary.
 
 Single-image payloads are copied from the producer's image offset using the
 declared row stride and delivered height; prefix bytes, Y padding and trailing
-chunk metadata are excluded. Available chunk descriptors are validated against
+chunk metadata are excluded. Available chunk descriptors are checked against
 delivered bytes and retained in `Frame::chunks` as owned ID/offset/raw-byte data,
-including in delivered frames. Chunk-only and other non-image payloads retain
+including in delivered frames; a descriptor outside the delivered bytes is skipped and
+recorded in `Frame::BufferInfo::repaired` without removing the image. A buffer whose
+announced data exceeds its storage is cut at the storage end, a part that reaches past the
+delivered bytes keeps only the bytes that exist, and an image layout larger than the
+delivered bytes keeps the delivered prefix for the adapter to zero-fill. A missing storage
+pointer is an SDK failure and still fails the acquisition. Chunk-only and other non-image payloads retain
 their raw bytes but are not interpreted as images by the graphics adapter.
 Chunk geometry is read while attached to the GenApi node map; general decoded
 chunk values are not exposed by this raw-byte contract. Compressed images with
