@@ -241,7 +241,7 @@ including in delivered frames; a descriptor outside the delivered bytes is skipp
 recorded in `Frame::BufferInfo::repaired` without removing the image. A buffer whose
 announced data exceeds its storage is cut at the storage end, a part that reaches past the
 delivered bytes keeps only the bytes that exist, and an image layout larger than the
-delivered bytes keeps the delivered prefix for the adapter to zero-fill. A missing storage
+delivered bytes keeps the delivered prefix for the adapter to zero-fill. An incomplete buffer keeps its declared height instead of shrinking to the complete rows, so the lost tail is zero-filled and counted as truncation. A missing storage
 pointer is an SDK failure and still fails the acquisition. Chunk-only and other non-image payloads retain
 their raw bytes but are not interpreted as images by the graphics adapter.
 Chunk geometry is read while attached to the GenApi node map; general decoded

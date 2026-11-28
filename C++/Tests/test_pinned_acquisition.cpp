@@ -875,24 +875,26 @@ void incomplete_buffer_parity() {
   reset_fake(fixture, input);
   const auto owned = onegen::detail::grab_owned(fixture.context, 100);
   assert(fixture.state.queue_count == 1);
-  assert(owned.height == 3);
+  // The declared height is kept; the delivered height and the 12 delivered bytes stay in the metadata.
+  assert(owned.height == 4 && owned.buffer_info.delivered_image_height == 3);
   assert(owned.buffer_info.incomplete);
   assert(!owned.buffer_info.diagnostic.empty());
   assert(owned.payload == transport);
 
+  // The unused borrowed API keeps its strict contract: the declared layout is larger than the delivered
+  // bytes, so it refuses instead of writing, and the buffer is still requeued exactly once.
   reset_fake(fixture, input);
-  std::vector<std::uint8_t> backing(12 + 32, guard_byte);
-  auto destination = std::span<std::uint8_t>(backing).subspan(16, 12);
-  const auto borrowed = onegen::detail::grab_one_into(fixture.context, 100, {destination});
+  std::vector<std::uint8_t> backing(16 + 32, guard_byte);
+  auto destination = std::span<std::uint8_t>(backing).subspan(16, 16);
+  bool threw = false;
+  try {
+    onegen::detail::grab_one_into(fixture.context, 100, {destination});
+  } catch (const onegen::Error&) {
+    threw = true;
+  }
+  assert(threw);
   assert(fixture.state.queue_count == 1);
-  assert(borrowed.write.status == onegen::FrameWriteStatus::Written);
-  assert(borrowed.write.used_bytes == 3 * 4);
-  assert(borrowed.write.required_bytes == 3 * 4);
-  assert(borrowed.metadata.height == owned.height);
-  assert(borrowed.metadata.buffer_info.incomplete);
-  assert(borrowed.metadata.buffer_info.diagnostic == owned.buffer_info.diagnostic);
-  assert(same_metadata(owned, borrowed.metadata));
-  assert(std::equal(transport.begin(), transport.end(), destination.begin()));
+  assert(std::all_of(backing.begin(), backing.end(), [](std::uint8_t b) { return b == guard_byte; }));
 }
 
 // T15

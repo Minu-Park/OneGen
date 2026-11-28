@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fit device data into the GraphicsEngine format and publish it instead of rejecting it for validation: unknown PFNC maps to the nearest format or raw Mono8, short buffers are zero-filled at the declared size, stride mismatches are rewritten row by row, a bad or uncalibrated part never removes another part, transport descriptors outside the delivered data are repaired, and every fit is counted in a fixed per-frame anomaly record reported through the existing sinks and a rate-limited warning; a refused Single already completes at once with the refusal reason and is now pinned by a test.
+- Fit device data into the GraphicsEngine format and publish it instead of rejecting it for validation: unknown PFNC maps to the nearest format or raw Mono8, short buffers are zero-filled at the declared size, stride mismatches are rewritten row by row, an incomplete buffer keeps its declared height with a zero-filled tail, a bad or uncalibrated part never removes another part, transport descriptors outside the delivered data are repaired, and every fit is counted in a fixed per-frame anomaly record reported through the existing sinks and a rate-limited warning; a refused Single already completes at once with the refusal reason and is now pinned by a test.
 
 - Drop a frame refused by the frame context (ClassRefused or Capacity) without latching a refusal so the run continues and the next frame asks again, byte-swap big-endian 16/32-bit direct images in place, and skip only the multipart part that overflows or fails to write while recording it as dropped.
 

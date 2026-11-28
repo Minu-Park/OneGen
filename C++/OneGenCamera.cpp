@@ -1035,7 +1035,9 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
   f.width = static_cast<std::uint32_t>(u64(GenTL::BUFFER_INFO_WIDTH));
   f.height = static_cast<std::uint32_t>(u64(GenTL::BUFFER_INFO_HEIGHT));
   const auto delivered_height = f.buffer_info.delivered_image_height;
-  if (delivered_height) f.height = delivered_height;
+  // An incomplete buffer keeps its declared height: the adapter copies the bytes that exist and zero-fills
+  // the missing tail, so the lost part is visible. The delivered height stays in buffer_info.
+  if (delivered_height && !f.buffer_info.incomplete) f.height = delivered_height;
   f.pixel_format = u64(GenTL::BUFFER_INFO_PIXELFORMAT);
   f.payload_type = u64(GenTL::BUFFER_INFO_PAYLOADTYPE);
   f.format_namespace = u64(GenTL::BUFFER_INFO_PIXELFORMAT_NAMESPACE);
@@ -1073,11 +1075,6 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
       f.stride = row_bytes + padding;
   }
   if (f.payload_type == GenTL::PAYLOAD_TYPE_JPEG && !f.stride) f.stride = filled;
-  if (f.buffer_info.incomplete && f.stride && filled > f.buffer_info.image_offset) {
-    const auto usable = filled - f.buffer_info.image_offset;
-    const auto rows = usable / f.stride;
-    if (rows && rows < f.height) f.height = static_cast<std::uint32_t>(rows);
-  }
   if (f.buffer_info.incomplete && context.stream_features) {
     f.buffer_info.diagnostic = incomplete_error(context.gentl, context.stream, f.buffer_info,
                                                 *context.stream_features, f.width,

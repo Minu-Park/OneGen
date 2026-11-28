@@ -1165,6 +1165,24 @@ int main()
     assert(rangeCounted.partCount == 1 && rangeCounted.parts[0].reason == OneGenPlanarRejection::Reason::TruncatedPlane);
   }
   {
+    // An incomplete buffer is published at its declared height: the delivered bytes (including a partial
+    // last row) are copied, the missing tail is zero, and the truncation is counted.
+    onegen::Frame incomplete;
+    incomplete.width = 4; incomplete.height = 4; incomplete.stride = 4;
+    incomplete.pixel_format = 0x01080001;
+    incomplete.buffer_info.incomplete = true;
+    incomplete.buffer_info.delivered_image_height = 3;
+    incomplete.payload.assign(14, 0x33);
+    OneGenFrameAnomalies counted;
+    const auto fitted = oneGenGraphicsFrame(incomplete, 89, localSource, nullptr, nullptr, nullptr, {}, nullptr, &counted);
+    assert(fitted && fitted->hasImage());
+    const auto& image = fitted->images().front().payload;
+    assert(image.height == 4 && image.pixels.size() == 16);
+    assert(image.pixels[13] == 0x33 && image.pixels[14] == 0 && image.pixels[15] == 0);
+    assert(counted.total() == 1 && counted.images[0].failure == GraphicsImageFailure::TruncatedBytes);
+    assert(counted.images[0].requiredBytes == 16);
+  }
+  {
     // A stride below the row size or beyond the integer range is rewritten row by row into a valid stride.
     onegen::Frame narrow;
     narrow.width = 4; narrow.height = 3; narrow.stride = 2;
