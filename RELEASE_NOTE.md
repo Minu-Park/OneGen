@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Drop a frame refused by the frame context (ClassRefused or Capacity) without latching a refusal so the run continues and the next frame asks again, byte-swap big-endian 16/32-bit direct images in place, and skip only the multipart part that overflows or fails to write while recording it as dropped.
+
 - Implement `org.playground.DeviceRuntime.FrameContextClient/1` (`IFrameContextClient`) in `OneGenSourceController`, remove `IFrameStorageClient`/`frame_storage_` and the Borrow rewrap path, reserve live direct frames into `GraphicsFrameBuilder::reserve<uint8_t>` and publish `GraphicsSpan::subspan(0, usedBytes)` with zero copies (releasing open regions before layout-transition fallback and pooling `FrameLease` and `DirectDestinationState` blocks), bind each run with `DirectRunRecord` + `GraphicsFrameCallbackGate` to reject stale runs/tokens and release open direct state on stop without waiting for credits, map typed readiness errors (`NoReadyCredit`, `ClassNotPrepared`, sticky `ClassRefused`/`Capacity`), and cover stale run binding, stop-before-completion, and late callback rearm in standalone controller/adapter tests.
 
 - Return `GraphicsAllocationSlice` from `RecordingStorage` and `RefusingStorage` in `GraphicsFrameAdapterTest`, drop the removed `GraphicsRangeFrameWriterFailure::MisalignedStorage` branch and the unreachable `RangeStorageMisaligned` planar rejection in `OneGenGraphicsFrameAdapter`, and adopt `DevicePluginSessionCapability::GraphicsViewer`.
