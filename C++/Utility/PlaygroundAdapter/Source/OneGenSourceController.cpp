@@ -645,28 +645,7 @@ OneGenSourceController::activeContextSource(std::string* error) const
     if (error) *error = "Frame context source is not configured.";
     return {};
   }
-  {
-    std::lock_guard stateLock(state->mutex);
-    if (state->stickyError != GraphicsFrameError::None) {
-      if (error) *error = state->stickyMessage.empty()
-          ? contextErrorMessage(state->stickyError) : state->stickyMessage;
-      return {};
-    }
-  }
   return state;
-}
-
-void OneGenSourceController::recordStickyContextFailure(
-    const std::shared_ptr<ContextSourceState>& state,
-    GraphicsFrameError error, const std::string& message)
-{
-  if (!state || (error != GraphicsFrameError::ClassRefused && error != GraphicsFrameError::Capacity))
-    return;
-  std::lock_guard stateLock(state->mutex);
-  if (state->stickyError == GraphicsFrameError::None) {
-    state->stickyError = error;
-    state->stickyMessage = message.empty() ? contextErrorMessage(error) : message;
-  }
 }
 
 void OneGenSourceController::configureDirectSink(
@@ -746,12 +725,6 @@ void OneGenSourceController::configureDirectSink(
     if (!callback) {
       return {DestinationStatus::Refused, {}, {}};
     }
-    {
-      std::lock_guard stateLock(run->sourceState->mutex);
-      if (run->sourceState->stickyError != GraphicsFrameError::None) {
-        return {DestinationStatus::Refused, {}, {}};
-      }
-    }
     auto ctxResult = run->sourceState->source->beginFrame(bytes);
     if (!ctxResult) {
       const auto err = ctxResult.error();
@@ -759,14 +732,22 @@ void OneGenSourceController::configureDirectSink(
         return {DestinationStatus::Busy, {}, {}};
       }
       const auto message = contextErrorMessage(err);
-      recordStickyContextFailure(run->sourceState, err, message);
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      bool firstMessage = false;
       {
         std::lock_guard errors(error_state_->mutex);
-        if (error_state_->message.empty()) error_state_->message = message;
+        if (error_state_->message.empty()) {
+          error_state_->message = message;
+          firstMessage = true;
+        }
       }
-      qWarning().noquote() << QStringLiteral("[GenICam] camera=%1 direct storage refused: %2")
-          .arg(QString::fromStdString(run->sourceName), QString::fromStdString(message));
+      if (firstMessage || (err != GraphicsFrameError::ClassRefused && err != GraphicsFrameError::Capacity))
+        qWarning().noquote() << QStringLiteral("[GenICam] camera=%1 direct storage refused: %2")
+            .arg(QString::fromStdString(run->sourceName), QString::fromStdString(message));
+      // A class or capacity refusal drops only this frame; the run keeps acquiring and the
+      // next frame asks again. Other failures still stop the direct sink.
+      if (err == GraphicsFrameError::ClassRefused || err == GraphicsFrameError::Capacity)
+        return {DestinationStatus::Busy, {}, {}};
       return {DestinationStatus::Refused, {}, {}};
     }
     auto state = std::allocate_shared<DirectDestinationState>(
@@ -780,14 +761,22 @@ void OneGenSourceController::configureDirectSink(
         return {DestinationStatus::Busy, {}, {}};
       }
       const auto message = contextErrorMessage(err);
-      recordStickyContextFailure(run->sourceState, err, message);
       rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+      bool firstMessage = false;
       {
         std::lock_guard errors(error_state_->mutex);
-        if (error_state_->message.empty()) error_state_->message = message;
+        if (error_state_->message.empty()) {
+          error_state_->message = message;
+          firstMessage = true;
+        }
       }
-      qWarning().noquote() << QStringLiteral("[GenICam] camera=%1 direct reserve refused: %2")
-          .arg(QString::fromStdString(run->sourceName), QString::fromStdString(message));
+      if (firstMessage || (err != GraphicsFrameError::ClassRefused && err != GraphicsFrameError::Capacity))
+        qWarning().noquote() << QStringLiteral("[GenICam] camera=%1 direct reserve refused: %2")
+            .arg(QString::fromStdString(run->sourceName), QString::fromStdString(message));
+      // A class or capacity refusal drops only this frame; the run keeps acquiring and the
+      // next frame asks again. Other failures still stop the direct sink.
+      if (err == GraphicsFrameError::ClassRefused || err == GraphicsFrameError::Capacity)
+        return {DestinationStatus::Busy, {}, {}};
       return {DestinationStatus::Refused, {}, {}};
     }
     state->region = std::move(reserved).value();
@@ -1186,10 +1175,6 @@ void OneGenSourceController::deliver(const onegen::Frame& source, const std::str
         image_rejection_sink_ ? &observation : nullptr,
         planar_rejection_sink_ ? &planar : nullptr, sourceName, &storageError);
     if (storageError != GraphicsFrameError::None) {
-      if (storageError == GraphicsFrameError::ClassRefused
-          || storageError == GraphicsFrameError::Capacity) {
-        recordStickyContextFailure(sourceState, storageError, rejectionReason);
-      }
       if (storageError != GraphicsFrameError::NoReadyCredit) {
         std::lock_guard errors(error_state_->mutex);
         if (error_state_->message.empty()) error_state_->message = rejectionReason;

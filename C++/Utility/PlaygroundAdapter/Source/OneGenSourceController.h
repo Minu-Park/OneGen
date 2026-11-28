@@ -177,9 +177,6 @@ private:
   friend class OneGenSourceControllerTests;
   struct ContextSourceState {
     std::shared_ptr<GraphicsFrameContextSource> source;
-    mutable std::mutex mutex;
-    GraphicsFrameError stickyError = GraphicsFrameError::None;
-    std::string stickyMessage;
   };
   struct DirectRunRecord {
     std::shared_ptr<ContextSourceState> sourceState;
@@ -193,8 +190,6 @@ private:
   GraphicsFrameCallbackGate::Token ensureCallbackGateLocked(
       onegen::producer::Lease& lease, const std::string& sourceName);
   std::shared_ptr<ContextSourceState> activeContextSource(std::string* error = nullptr) const;
-  void recordStickyContextFailure(const std::shared_ptr<ContextSourceState>& state,
-      GraphicsFrameError error, const std::string& message);
   bool reportImageRejection(const OneGenImageRejection& evidence, const onegen::Frame& source,
       std::uint64_t sequence, std::size_t readableBytes, bool directInput, bool single) noexcept;
   void reportPlanarRejection(const OneGenPlanarRejection& evidence, const onegen::Frame& source,

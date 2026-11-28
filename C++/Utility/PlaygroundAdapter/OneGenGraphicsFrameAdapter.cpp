@@ -1251,6 +1251,7 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       std::string id;
       std::string displayName;
       std::string group;
+      std::size_t partIndex = 0;
     };
     struct MultipartConfidenceItem
     {
@@ -1272,12 +1273,14 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
     };
 
     for (auto& assembly : preparePlanarRangeSpecs(source, planar_rejection)) {
-      if (!appendBytes(assembly.range.writePlan.totalBytes, assembly.range.writePlan.alignment))
-        return reject("frame size exceeds supported allocation bounds");
+      for (const std::size_t index : assembly.consumed_indices) consumed_parts[index] = true;
+      if (!appendBytes(assembly.range.writePlan.totalBytes, assembly.range.writePlan.alignment)) {
+        dropped(assembly.selected_index, "range size exceeds supported allocation bounds");
+        continue;
+      }
       const auto& selected = source.parts[assembly.selected_index];
       const auto group = std::to_string(selected.source_id) + ":" + std::to_string(selected.region_id);
       const auto id = "range." + group + "." + std::to_string(assembly.selected_index);
-      for (const std::size_t index : assembly.consumed_indices) consumed_parts[index] = true;
       for (const std::size_t index : assembly.used_auxiliary_indices) confidence_used[index] = true;
       plannedRanges.push_back({std::move(assembly.range), id, "Range", group, true, assembly.anchor_part});
     }
@@ -1288,14 +1291,15 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
         std::string rangeDiagnostic;
         const auto auxiliary = planAuxiliary(source, part, part.width, part.height);
         PlannedRangeSpec spec;
-        if (prepareRangeSpec(part, source, auxiliary, spec, &rangeDiagnostic)) {
-          if (!appendBytes(spec.writePlan.totalBytes, spec.writePlan.alignment))
-            return reject("frame size exceeds supported allocation bounds");
+        const bool rangePrepared = prepareRangeSpec(part, source, auxiliary, spec, &rangeDiagnostic);
+        if (rangePrepared && appendBytes(spec.writePlan.totalBytes, spec.writePlan.alignment)) {
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
           const auto id = "range." + group + "." + std::to_string(index);
           for (const std::size_t auxiliaryIndex : auxiliary.used_indices)
             confidence_used[auxiliaryIndex] = true;
           plannedRanges.push_back({std::move(spec), id, "Range", group, false, index});
+        } else if (rangePrepared) {
+          dropped(index, "range size exceeds supported allocation bounds");
         } else if (onegen::coordinate_format(part.data_format).components || is3dPart(part.data_type)) {
           dropped(index, rangeDiagnostic);
         }
@@ -1303,10 +1307,9 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       if (part.data_type == kPart2dImage && !onegen::coordinate_format(part.data_format).components) {
         std::string imageDiagnostic;
         PlannedImageSpec imageSpec;
-        if (prepare2dImageSpec(0, false, part.data_format, part.width, part.height, part.stride,
-                source.pixel_endianness, sequence, part.payload, imageSpec, &imageDiagnostic, nullptr)) {
-          if (!appendBytes(imageSpec.bytes, imageSpec.alignment))
-            return reject("frame size exceeds supported allocation bounds");
+        const bool imagePrepared = prepare2dImageSpec(0, false, part.data_format, part.width, part.height,
+            part.stride, source.pixel_endianness, sequence, part.payload, imageSpec, &imageDiagnostic, nullptr);
+        if (imagePrepared && appendBytes(imageSpec.bytes, imageSpec.alignment)) {
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
           std::string displayName = "Image";
           const onegen::Frame::ComponentIdentity* matched = nullptr;
@@ -1319,7 +1322,9 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
           }
           if (matches == 1) displayName = matched->name;
           plannedImages.push_back({std::move(imageSpec),
-              "image." + group + "." + std::to_string(index), std::move(displayName), group});
+              "image." + group + "." + std::to_string(index), std::move(displayName), group, index});
+        } else if (imagePrepared) {
+          dropped(index, "image size exceeds supported allocation bounds");
         } else {
           dropped(index, imageDiagnostic);
         }
@@ -1342,11 +1347,13 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
         if (part.data_format != kConfidence32f) continue;
         GraphicsRangeWriteLayout confPlan;
         if (prepareConfidencePreviewSpec(part, source.pixel_endianness, confPlan)) {
-          if (!appendBytes(confPlan.totalBytes, confPlan.alignment))
-            return reject("frame size exceeds supported allocation bounds");
+          confidence_used[index] = true;
+          if (!appendBytes(confPlan.totalBytes, confPlan.alignment)) {
+            dropped(index, "confidence size exceeds supported allocation bounds");
+            continue;
+          }
           const auto group = std::to_string(part.source_id) + ":" + std::to_string(part.region_id);
           plannedConfidences.push_back({index, confPlan, "confidence." + group + "." + std::to_string(index), group});
-          confidence_used[index] = true;
         }
       }
     }
@@ -1389,28 +1396,41 @@ std::optional<GraphicsFrame> oneGenGraphicsFrame(
       if (auto range = writeRangeSpec(item.spec, builder, &rangeDiagnostic,
               item.planar && planar_rejection && !*planar_rejection ? &rangeEvidence : nullptr)) {
         result.addRange(item.id, std::move(*range), item.displayName, item.group);
-      } else if (item.planar && planar_rejection && !*planar_rejection) {
-        OneGenPlanarRejection evidence;
-        evidence.reason = rangeEvidence.reason;
-        evidence.anchorPart = item.anchorPart;
-        evidence.requestedStorageBytes = rangeEvidence.requestedStorageBytes;
-        *planar_rejection = evidence;
+      } else {
+        if (item.planar && planar_rejection && !*planar_rejection) {
+          OneGenPlanarRejection evidence;
+          evidence.reason = rangeEvidence.reason;
+          evidence.anchorPart = item.anchorPart;
+          evidence.requestedStorageBytes = rangeEvidence.requestedStorageBytes;
+          *planar_rejection = evidence;
+        }
+        dropped(item.anchorPart, rangeDiagnostic.empty() ? "range write failed" : rangeDiagnostic);
       }
     }
     for (const auto& item : plannedImages) {
       std::string imageDiagnostic;
       if (auto image = write2dImageSpec(item.spec, builder, &imageDiagnostic, nullptr))
         result.addImage(item.id, std::move(*image), item.displayName, item.group);
+      else
+        dropped(item.partIndex, imageDiagnostic.empty() ? "image write failed" : imageDiagnostic);
     }
     for (const auto& item : plannedConfidences) {
       if (auto range = writeConfidencePreview(source.parts[item.partIndex], source.pixel_endianness, item.plan, builder))
         result.addRange(item.id, std::move(*range), "Confidence", item.group);
+      else
+        dropped(item.partIndex, "confidence write failed");
     }
     result.metadata.sourceName = source_name;
     result.metadata.frameIndex = sequence;
     if (source.frame_id) result.metadata.frameId = std::to_string(source.frame_id);
     if (rejection_reason) *rejection_reason = droppedParts;
-    if (!result.isValid()) return reject("multipart payload has no supported image or range data");
+    if (!result.isValid()) {
+      if (rejection_reason && !droppedParts.empty())
+        *rejection_reason = "multipart payload has no supported image or range data; " + droppedParts;
+      else
+        reject("multipart payload has no supported image or range data");
+      return std::nullopt;
+    }
     builder.content() = std::move(result);
     auto published = std::move(builder).publish();
     if (!published) return reject("frame publication failed");
@@ -1561,12 +1581,14 @@ std::optional<GraphicsFrame> oneGenBuildDirectImageFrame(
     return reject(message);
   };
 
-  if (source.payload_type != 0 && source.payload_type != 1 && source.payload_type != 4)
+  if (source.payload_type != 0 && source.payload_type != 1
+      && source.payload_type != 4 && source.payload_type != kPayloadJpeg)
     return rejectImage("payload type does not describe a supported image", GraphicsImageFailure::UnsupportedFormat);
   if (source.payload_type == 4 && !source.buffer_info.image_present)
     return rejectImage("chunk payload contains no image", std::nullopt);
-  const auto format = pixelFormat(source.pixel_format);
-  if (format == GraphicsImagePixelFormat::Unknown || format == GraphicsImagePixelFormat::Jpeg)
+  const bool isJpeg = source.payload_type == kPayloadJpeg;
+  const auto format = isJpeg ? GraphicsImagePixelFormat::Jpeg : pixelFormat(source.pixel_format);
+  if (format == GraphicsImagePixelFormat::Unknown)
     return rejectImage("unknown PFNC pixel format", GraphicsImageFailure::UnsupportedFormat);
   if (used_bytes == 0U || used_bytes > region.size())
     return rejectImage("empty or out-of-range direct payload",
@@ -1575,12 +1597,10 @@ std::optional<GraphicsFrame> oneGenBuildDirectImageFrame(
       || source.height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()))
     return rejectImage("image dimensions exceed the supported integer range", GraphicsImageFailure::InvalidDimensions);
 
-  if (source.pixel_endianness == 2 && !isByteOrdered(format)) {
-    const auto size_bits = static_cast<unsigned>((source.pixel_format >> 16U) & 0xffU);
-    if (size_bits == 10 || size_bits == 12 || size_bits == 14)
-      return rejectImage("big-endian packed pixels are unsupported", GraphicsImageFailure::UnsupportedConversion);
-    return rejectImage("big-endian direct pixels are unsupported", GraphicsImageFailure::UnsupportedConversion);
-  }
+  const bool byteSwap = source.pixel_endianness == 2 && !isByteOrdered(format);
+  const auto sizeBits = static_cast<unsigned>((source.pixel_format >> 16U) & 0xffU);
+  if (byteSwap && (sizeBits == 10 || sizeBits == 12 || sizeBits == 14))
+    return rejectImage("big-endian packed pixels are unsupported", GraphicsImageFailure::UnsupportedConversion);
 
   const auto minimum = GraphicsImageValidation::minimumRowBytes(format, static_cast<int>(source.width));
   const auto stride = source.stride ? source.stride : minimum;
@@ -1588,12 +1608,36 @@ std::optional<GraphicsFrame> oneGenBuildDirectImageFrame(
     return rejectImage("stride exceeds the supported integer range", GraphicsImageFailure::InvalidStride,
         Conversion::None, stride, minimum);
 
+  // The producer already wrote the raw bytes into the region; a big-endian 16/32-bit
+  // payload is byte-swapped in place so the sealed image matches the owned path.
+  const bool swapWords = byteSwap && (sizeBits == 32 || sizeBits % 16U == 0);
+  const std::size_t swapWord = sizeBits == 32 ? 4U : 2U;
+  auto layoutFormat = format;
+  if (swapWords && graphicsImagePixelFormatInfo(format).componentBits != swapWord * 8U)
+    layoutFormat = swapWord == 4U ? GraphicsImagePixelFormat::Mono32 : GraphicsImagePixelFormat::Mono16;
+  const auto conversion = swapWords ? Conversion::SwapByteOrder : isJpeg ? Conversion::JpegCopy : Conversion::Copy;
+
+  const std::uint64_t layoutStride = isJpeg ? 0U : stride;
+  const std::uint64_t layoutMinimum = isJpeg ? 0U
+      : GraphicsImageValidation::minimumRowBytes(layoutFormat, static_cast<int>(source.width));
   const auto failure = GraphicsImageValidation::layoutFailure(
-      format, static_cast<int>(source.width), static_cast<int>(source.height),
-      static_cast<int>(stride), used_bytes);
+      layoutFormat, static_cast<int>(source.width), static_cast<int>(source.height),
+      static_cast<int>(layoutStride), used_bytes);
   if (failure != GraphicsImageFailure::None)
     return rejectImage("invalid image layout or insufficient payload bytes", failure,
-        Conversion::None, stride, minimum);
+        conversion, layoutStride, layoutMinimum);
+
+  if (swapWords) {
+    std::uint8_t* const bytes = region.data();
+    const auto strideBytes = static_cast<std::size_t>(stride);
+    std::size_t rowStart = 0U;
+    for (std::uint64_t row = 0U; row < source.height && rowStart < used_bytes; ++row) {
+      const std::size_t rowBytes = std::min(strideBytes, used_bytes - rowStart);
+      for (std::size_t offset = 0U; offset + swapWord <= rowBytes; offset += swapWord)
+        std::reverse(bytes + rowStart + offset, bytes + rowStart + offset + swapWord);
+      rowStart += strideBytes;
+    }
+  }
 
   GraphicsImage image;
   image.pixels = builder.seal(std::move(region)).subspan(0, used_bytes);

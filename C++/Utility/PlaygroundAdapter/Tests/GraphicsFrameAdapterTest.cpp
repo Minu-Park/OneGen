@@ -76,6 +76,37 @@ private:
   GraphicsFrameError m_error;
 };
 
+class FailingNthAllocationContextSource final : public GraphicsFrameContextSource
+{
+public:
+  explicit FailingNthAllocationContextSource(const std::size_t failingAllocation) noexcept
+      : m_failing(failingAllocation)
+  {
+  }
+
+  [[nodiscard]] GraphicsResult<GraphicsFrameContext> beginFrame(std::size_t) noexcept override
+  {
+    class Allocator final : public GraphicsFrameAllocator
+    {
+    public:
+      explicit Allocator(std::size_t failing) : m_failing(failing) {}
+      GraphicsResult<GraphicsAllocationSlice> allocate(
+          const std::size_t bytes, const std::size_t alignment) noexcept override
+      {
+        if (++m_count == m_failing) return GraphicsFrameError::Capacity;
+        return GraphicsFrameContext::local().allocate(bytes, alignment);
+      }
+    private:
+      std::size_t m_failing;
+      std::size_t m_count = 0;
+    };
+    return GraphicsFrameContext(std::make_shared<Allocator>(m_failing));
+  }
+
+private:
+  std::size_t m_failing;
+};
+
 } // namespace
 
 int main()
@@ -124,6 +155,50 @@ int main()
     assert(direct->images().front().payload.pixels[0] == 1 && direct->images().front().payload.pixels[3] == 4);
   }
 
+  // Direct path swaps big-endian 16-bit pixels in place, row by row, like the owned path.
+  {
+    onegen::Frame swapMeta;
+    swapMeta.width = 2;
+    swapMeta.height = 2;
+    swapMeta.stride = 6;
+    swapMeta.pixel_format = 0x01100007;
+    swapMeta.pixel_endianness = 2;
+    RecordingContextSource swapSource;
+    auto ctxResult = swapSource.beginFrame(16U);
+    assert(ctxResult.hasValue());
+    GraphicsFrameBuilder builder(ctxResult.value());
+    auto region = builder.reserve<std::uint8_t>(16U, 2U);
+    assert(region.hasValue());
+    std::uint8_t* const swapPtr = region.value().data();
+    const std::array<std::uint8_t, 12> raw{1, 2, 3, 4, 9, 9, 5, 6, 7, 8, 9, 9};
+    std::copy(raw.begin(), raw.end(), swapPtr);
+    std::optional<OneGenImageRejection> swapObs;
+    const auto swapped = oneGenBuildDirectImageFrame(
+        swapMeta, 10, builder, std::move(region).value(), raw.size(), nullptr, &swapObs);
+    assert(swapped && swapped->hasImage() && !swapObs);
+    const auto px = swapped->images().front().payload.pixels;
+    assert(px.data() == swapPtr && px.size() == raw.size());
+    const std::array<std::uint8_t, 12> expectedSwap{2, 1, 4, 3, 9, 9, 6, 5, 8, 7, 9, 9};
+    assert(std::equal(px.begin(), px.end(), expectedSwap.begin()));
+  }
+
+  // Direct path still reports the packed big-endian conversion the owned path cannot perform.
+  {
+    onegen::Frame packedMeta;
+    packedMeta.width = 64;
+    packedMeta.height = 1;
+    packedMeta.pixel_format = 0x010a0046;
+    packedMeta.pixel_endianness = 2;
+    RecordingContextSource packedSource;
+    auto ctxResult = packedSource.beginFrame(128U);
+    GraphicsFrameBuilder builder(ctxResult.value());
+    auto region = builder.reserve<std::uint8_t>(16U, 1U);
+    assert(region.hasValue());
+    std::optional<OneGenImageRejection> packedObs;
+    assert(!oneGenBuildDirectImageFrame(packedMeta, 11, builder, std::move(region).value(), 16U, nullptr, &packedObs));
+    assert(packedObs && packedObs->failure == GraphicsImageFailure::UnsupportedConversion);
+  }
+
   // Invalid direct metadata abandons open region without producing a frame.
   {
     onegen::Frame badDirect;
@@ -166,6 +241,17 @@ int main()
   const auto ambiguousNames = oneGenGraphicsFrame(multipleImages, 7, localSource);
   assert(ambiguousNames && ambiguousNames->images()[0].descriptor.displayName == "Image 1");
   assert(ambiguousNames->images()[1].descriptor.displayName == "Phase");
+  // A part whose storage write fails is dropped and diagnosed; the other parts still publish.
+  {
+    multipleImages.components.clear();
+    FailingNthAllocationContextSource failSecond(2U);
+    std::string droppedDiagnostic;
+    const auto partial = oneGenGraphicsFrame(multipleImages, 7, failSecond, &droppedDiagnostic);
+    assert(partial && partial->images().size() == 2U);
+    assert(droppedDiagnostic.find("part=1") != std::string::npos);
+    assert(droppedDiagnostic.find("part=0") == std::string::npos);
+  }
+
   multipleImages.components.clear();
   multipleImages.parts.resize(1);
   const auto singleImage = oneGenGraphicsFrame(multipleImages, 7, localSource);

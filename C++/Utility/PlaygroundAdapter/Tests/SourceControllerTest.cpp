@@ -1775,21 +1775,43 @@ void OneGenSourceControllerTests::frameContextContractAndReadinessMappings()
         return fixture._controller->requestLiveStop(connectionId, done);
     }).error, DeviceConnectionError::None);
 
-    // ClassRefused latches a sticky refusal on Single and subsequent LiveStart until replaced.
+    // ClassRefused drops only the refused frame: a refused Single fails once, and the next request
+    // asks the source again instead of latching a refusal.
     source->setError(GraphicsFrameError::ClassRefused);
     const auto refusedSingle = fixture.invoke([&](auto done) {
         return fixture._controller->requestSingle(connectionId, done);
     });
     QCOMPARE(refusedSingle.error, DeviceConnectionError::BackendFailure);
     source->setError(GraphicsFrameError::None);
-    const std::size_t callsBeforeSticky = source->calls();
-    const auto stickyLive = fixture.invoke([&](auto done) {
+    const std::size_t callsBeforeRetry = source->calls();
+    const int framesBeforeRetry = fixture.frames();
+    QCOMPARE(fixture.invoke([&](auto done) {
         return fixture._controller->requestLiveStart(connectionId, done);
-    });
-    QCOMPARE(stickyLive.error, DeviceConnectionError::BackendFailure);
-    QCOMPARE(source->calls(), callsBeforeSticky);
+    }).error, DeviceConnectionError::None);
+    QVERIFY(waitFor([&] { return fixture.frames() > framesBeforeRetry; }, 10000));
+    QVERIFY(source->calls() > callsBeforeRetry);
 
-    // Injecting a fresh source clears the sticky refusal and allows acquisition to succeed.
+    // A refusal in the middle of a Live run drops and counts each refused frame while the run
+    // keeps acquiring; frames publish again once the Host accepts the class.
+    for (const auto refusal : {GraphicsFrameError::ClassRefused, GraphicsFrameError::Capacity}) {
+        const auto failedBeforeRefusal = fixture._controller->runtimeDiagnostics(sourceIndex).failed;
+        source->setError(refusal);
+        QVERIFY(waitFor([&] {
+            return fixture._controller->runtimeDiagnostics(sourceIndex).failed > failedBeforeRefusal + 1;
+        }, 10000));
+        const int framesDuringRefusal = fixture.frames();
+        source->setError(GraphicsFrameError::None);
+        QVERIFY(waitFor([&] { return fixture.frames() > framesDuringRefusal; }, 10000));
+        const auto liveStates = fixture.states();
+        const auto liveIt = std::find_if(liveStates.begin(), liveStates.end(),
+            [&](const auto& st) { return st.connectionId == connectionId; });
+        QVERIFY(liveIt != liveStates.end() && liveIt->live);
+    }
+    QCOMPARE(fixture.invoke([&](auto done) {
+        return fixture._controller->requestLiveStop(connectionId, done);
+    }).error, DeviceConnectionError::None);
+
+    // Injecting a fresh source still replaces the context source.
     client->setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
     const int framesBeforeFresh = fixture.frames();
     const auto recoveredSingle = fixture.invoke([&](auto done) {
