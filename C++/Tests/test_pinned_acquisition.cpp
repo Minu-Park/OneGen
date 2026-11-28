@@ -1244,9 +1244,61 @@ void direct_capacity_keeps_guard() {
 }
 
 // T19
-void direct_malformed_rejects() {
+// A transport extent that disagrees with the declared layout is no longer rejected: the direct path
+// hands the bytes that exist to the owned path, which keeps them for the adapter to fit.
+void direct_malformed_falls_back_to_owned() {
   Fixture fixture;
-  const auto rejected = [&](const FakeBuffer& input) {
+  const auto fitted = [&](const FakeBuffer& input, std::size_t expected_payload, std::uint32_t repaired) {
+    reset_fake(fixture, input);
+    std::vector<std::uint8_t> backing(64, guard_byte);
+    auto destination = std::span<std::uint8_t>(backing).subspan(16, 32);
+    const auto result = onegen::detail::acquire_into_or_owned(fixture.context, 100, {destination});
+    assert(result.status == onegen::detail::DirectStatus::OwnedFallback);
+    assert(result.reason == onegen::detail::FallbackReason::Malformed);
+    assert(result.frame.payload.size() == expected_payload);
+    assert(result.frame.buffer_info.repaired == repaired);
+    assert(fixture.state.queue_count == 1);
+    assert(std::all_of(backing.begin(), backing.end(),
+                       [](std::uint8_t b) { return b == guard_byte; }));
+  };
+
+  fitted(make_buffer(0, 3, 0, mono8), 0, 0);
+  fitted(make_buffer(4, 0, 0, mono8), 0, 0);
+  {
+    auto input = make_buffer(4, 3, 0, mono8);
+    input.image_offset = input.size_filled + 1;
+    fitted(input, 0, 0);
+  }
+  {
+    // Fewer bytes than the declared layout: the delivered bytes are kept, nothing is read past them.
+    auto input = make_buffer(4, 3, 0, mono8);
+    input.size_filled -= 1;
+    input.data_size = input.size_filled;
+    input.capacity = input.size_filled;
+    input.transport.resize(input.size_filled);
+    fitted(input, 11, 0);
+  }
+  {
+    // Announced data larger than the buffer is cut at the buffer end and recorded.
+    auto input = make_buffer(4, 3, 0, mono8);
+    input.capacity -= 1;
+    fitted(input, 11, onegen::Frame::BufferInfo::DataLargerThanBuffer);
+  }
+  {
+    // The producer's larger-than-buffer flag is recorded; a layout that still fits stays on the direct path.
+    auto input = make_buffer(4, 3, 0, mono8);
+    input.data_larger_than_buffer = true;
+    reset_fake(fixture, input);
+    std::vector<std::uint8_t> backing(64, guard_byte);
+    auto destination = std::span<std::uint8_t>(backing).subspan(16, 32);
+    const auto result = onegen::detail::acquire_into_or_owned(fixture.context, 100, {destination});
+    assert(result.status == onegen::detail::DirectStatus::SharedReady);
+    assert(result.frame.buffer_info.repaired == onegen::Frame::BufferInfo::DataLargerThanBuffer);
+  }
+  {
+    // A missing storage pointer is an SDK failure, not frame data, and still throws.
+    auto input = make_buffer(4, 3, 0, mono8);
+    input.null_base = true;
     reset_fake(fixture, input);
     std::vector<std::uint8_t> backing(64, guard_byte);
     auto destination = std::span<std::uint8_t>(backing).subspan(16, 32);
@@ -1258,34 +1310,42 @@ void direct_malformed_rejects() {
     }
     assert(threw);
     assert(fixture.state.queue_count == 1);
-    assert(std::all_of(backing.begin(), backing.end(),
-                       [](std::uint8_t b) { return b == guard_byte; }));
-  };
+  }
+}
 
-  rejected(make_buffer(0, 3, 0, mono8));
-  rejected(make_buffer(4, 0, 0, mono8));
+// A transport descriptor outside the delivered data is repaired, not fatal: a part is cut to the bytes
+// that exist, an absent part is skipped, an invalid chunk is skipped, and each repair is recorded.
+void owned_repairs_descriptors() {
   {
+    Fixture fixture;
     auto input = make_buffer(4, 3, 0, mono8);
-    input.image_offset = input.size_filled + 1;
-    rejected(input);
+    input.parts.push_back({0, 6, 2, 3, 2, GenTL::PART_DATATYPE_2D_IMAGE, mono8, 0, 10, 20, 30, 0});
+    input.parts.push_back({8, 8, 2, 2, 2, GenTL::PART_DATATYPE_2D_IMAGE, mono8, 0, 10, 20, 31, 0});
+    input.parts.push_back({40, 4, 2, 2, 2, GenTL::PART_DATATYPE_2D_IMAGE, mono8, 0, 10, 20, 32, 0});
+    const auto transport = input.transport;
+    reset_fake(fixture, std::move(input));
+    const auto owned = onegen::detail::grab_owned(fixture.context, 100);
+    assert(fixture.state.queue_count == 1);
+    assert(owned.parts.size() == 2);
+    assert(owned.parts[1].payload == std::vector<std::uint8_t>(transport.begin() + 8, transport.end()));
+    assert(owned.buffer_info.repaired == onegen::Frame::BufferInfo::PartClamped);
   }
   {
+    Fixture fixture;
     auto input = make_buffer(4, 3, 0, mono8);
-    input.size_filled -= 1;
-    input.data_size = input.size_filled;
-    input.capacity = input.size_filled;
-    input.transport.resize(input.size_filled);
-    rejected(input);
-  }
-  {
-    auto input = make_buffer(4, 3, 0, mono8);
-    input.capacity -= 1;
-    rejected(input);
-  }
-  {
-    auto input = make_buffer(4, 3, 0, mono8);
-    input.null_base = true;
-    rejected(input);
+    input.contains_chunk_data = true;
+    input.chunks.push_back({17, 12, 2});
+    input.chunks.push_back({19, 20, 4});
+    input.size_filled = 15;
+    input.capacity = 15;
+    input.data_size = 15;
+    input.transport.resize(15);
+    fill_transport(input.transport);
+    reset_fake(fixture, std::move(input));
+    const auto owned = onegen::detail::grab_owned(fixture.context, 100);
+    assert(fixture.state.queue_count == 1);
+    assert(owned.chunks.size() == 1 && owned.chunks[0].id == 17);
+    assert(owned.buffer_info.repaired == onegen::Frame::BufferInfo::ChunkSkipped);
   }
 }
 
@@ -1452,6 +1512,8 @@ void direct_run_step_order_and_cancel() {
   }
 
   {
+    // A buffer whose layout is malformed is not an error: the reservation is cancelled for the owned
+    // fallback, which carries the delivered bytes to the adapter.
     reset_fake(fixture, make_buffer(4, 0, 0, mono8));
     TestSink sink;
     sink.trace = &fixture.state.log;
@@ -1459,17 +1521,14 @@ void direct_run_step_order_and_cancel() {
     sink.reservation.destination = std::span<std::uint8_t>(backing).subspan(16, 32);
     onegen::Frame fallback;
     onegen::Frame pinned_scratch;
-    bool threw = false;
-    try {
-      onegen::detail::run_direct_step(fixture.context, 100, sink, fallback, pinned_scratch);
-    } catch (const onegen::Error&) {
-      threw = true;
-    }
-    assert(threw);
+    const auto step = onegen::detail::run_direct_step(
+        fixture.context, 100, sink, fallback, pinned_scratch);
+    assert(step == onegen::detail::DirectStep::Fallback);
     assert(fixture.state.queue_count == 1);
-    assert((fixture.state.log == std::vector<std::string>{"reserve", "event", "queue", "cancel"}));
+    assert((fixture.state.log == std::vector<std::string>{"reserve", "event", "queue", "cancel", "note"}));
     assert(sink.cancel_count == 1
-           && sink.cancel_cause == onegen::detail::CancelCause::Exception);
+           && sink.cancel_cause == onegen::detail::CancelCause::Fallback);
+    assert(sink.fallback_reason == onegen::detail::FallbackReason::Malformed);
   }
 }
 
@@ -1636,7 +1695,8 @@ int main() {
   direct_matches_owned();
   direct_fallbacks_match_owned();
   direct_capacity_keeps_guard();
-  direct_malformed_rejects();
+  direct_malformed_falls_back_to_owned();
+  owned_repairs_descriptors();
   direct_run_step_order_and_cancel();
   direct_no_intermediate_allocation();
   direct_timeout_cancels_once();

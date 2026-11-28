@@ -114,6 +114,14 @@ struct Frame {
     bool incomplete = false;
     bool image_present = false;
     bool contains_chunk_data = false;
+    /** Transport descriptors the producer reported that acquisition repaired instead of rejecting. */
+    enum Repair : std::uint32_t {
+      DataLargerThanBuffer = 1U << 0, ///< Announced data exceeded the buffer; only the buffer bytes are kept.
+      ChunkSkipped = 1U << 1,         ///< A chunk descriptor pointed outside the delivered data.
+      PartClamped = 1U << 2,          ///< A part reached past the delivered data and was cut to what exists.
+      PartsLimited = 1U << 3,         ///< The part count exceeded the delivered bytes and was limited.
+    };
+    std::uint32_t repaired = 0;
     std::string diagnostic;
   };
 

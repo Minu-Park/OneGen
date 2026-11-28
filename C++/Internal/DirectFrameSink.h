@@ -89,6 +89,7 @@ inline void copy_frame_metadata_reusing_capacity(Frame& dst, const Frame& src) {
   dst.buffer_info.incomplete = src.buffer_info.incomplete;
   dst.buffer_info.image_present = src.buffer_info.image_present;
   dst.buffer_info.contains_chunk_data = src.buffer_info.contains_chunk_data;
+  dst.buffer_info.repaired = src.buffer_info.repaired;
   if (dst.buffer_info.diagnostic != src.buffer_info.diagnostic) {
     dst.buffer_info.diagnostic = src.buffer_info.diagnostic;
   }
@@ -122,6 +123,8 @@ enum class FallbackReason : std::uint8_t {
   Jpeg,
   Incomplete,
   MetadataTooLarge,
+  /** The transport extents disagree with the declared layout; the owned path fits the bytes. */
+  Malformed,
 };
 
 struct DirectReservation {

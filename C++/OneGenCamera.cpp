@@ -918,7 +918,11 @@ void direct_or_owned_visit(void* user, PinnedBuffer& buffer) {
   }
   const auto transport = buffer.transport();
   const auto check = check_direct_image(metadata, transport);
-  if (check.verdict == LayoutVerdict::Malformed) throw Error(check.malformed_message);
+  // A transport extent that disagrees with the declared layout is fitted on the owned path.
+  if (check.verdict == LayoutVerdict::Malformed) {
+    fallback(FallbackReason::Malformed);
+    return;
+  }
   if (check.verdict == LayoutVerdict::Fallback) {
     fallback(check.reason);
     return;
@@ -1022,9 +1026,12 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
   if (filled == 0 && (f.buffer_info.contains_chunk_data || f.buffer_info.incomplete))
     throw Error("grab: delivered byte count is unavailable for chunk or incomplete data");
   if (filled == 0) filled = capacity;
-  if ((!base && filled) || filled > capacity
-      || u64(GenTL::BUFFER_INFO_DATA_LARGER_THAN_BUFFER))
-    throw Error("grab: buffer payload exceeds announced storage");
+  if (!base && filled) throw Error("grab: buffer payload exceeds announced storage");
+  // Announced data beyond the buffer is cut at the buffer end; the bytes that exist are kept.
+  if (filled > capacity || u64(GenTL::BUFFER_INFO_DATA_LARGER_THAN_BUFFER)) {
+    filled = (std::min)(filled, capacity);
+    f.buffer_info.repaired |= Frame::BufferInfo::DataLargerThanBuffer;
+  }
   f.width = static_cast<std::uint32_t>(u64(GenTL::BUFFER_INFO_WIDTH));
   f.height = static_cast<std::uint32_t>(u64(GenTL::BUFFER_INFO_HEIGHT));
   const auto delivered_height = f.buffer_info.delivered_image_height;
@@ -1127,16 +1134,31 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
                                                              nullptr, &chunk_count);
       if ((chunk_error == GenTL::GC_ERR_SUCCESS || chunk_error == GenTL::GC_ERR_BUFFER_TOO_SMALL)
           && chunk_count) {
-        if (chunk_count > filled) throw Error("grab: chunk count exceeds delivered storage");
+        if (chunk_count > filled) {
+          // Chunk metadata cannot describe more entries than bytes; the image is kept without it.
+          f.buffer_info.repaired |= Frame::BufferInfo::ChunkSkipped;
+          chunk_count = 0;
+        }
         std::vector<GenTL::SINGLE_CHUNK_DATA> chunks(chunk_count);
         const auto chunk_capacity = chunk_count;
-        if (context.gentl->DSGetBufferChunkData(context.stream, data.BufferHandle, chunks.data(),
+        if (chunk_count && context.gentl->DSGetBufferChunkData(context.stream, data.BufferHandle, chunks.data(),
                                                 &chunk_count) == GenTL::GC_ERR_SUCCESS) {
-          if (chunk_count > chunk_capacity) throw Error("grab: invalid returned chunk count");
+          if (chunk_count > chunk_capacity) {
+            f.buffer_info.repaired |= Frame::BufferInfo::ChunkSkipped;
+            chunk_count = chunk_capacity;
+          }
+          // A descriptor outside the delivered data is skipped; valid chunks keep their order.
+          std::size_t kept = 0;
+          for (std::size_t index = 0; index < chunk_count; ++index) {
+            if (chunks[index].ChunkOffset > filled || chunks[index].ChunkLength > filled - chunks[index].ChunkOffset) {
+              f.buffer_info.repaired |= Frame::BufferInfo::ChunkSkipped;
+              continue;
+            }
+            chunks[kept++] = chunks[index];
+          }
+          chunk_count = kept;
           for (std::size_t index = 0; index < chunk_count; ++index) {
             const auto& chunk = chunks[index];
-            if (chunk.ChunkOffset > filled || chunk.ChunkLength > filled - chunk.ChunkOffset)
-              throw Error("grab: chunk exceeds delivered data");
             Frame::Chunk owned;
             owned.id = chunk.ChunkID;
             owned.offset = chunk.ChunkOffset;
@@ -1240,7 +1262,10 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
     if (context.gentl->DSGetNumBufferParts && context.gentl->DSGetBufferPartInfo
         && context.gentl->DSGetNumBufferParts(context.stream, data.BufferHandle, &part_count)
             == GenTL::GC_ERR_SUCCESS) {
-      if (part_count > filled) throw Error("grab: part count exceeds delivered storage");
+      if (part_count > filled) {
+        part_count = static_cast<std::uint32_t>((std::min<std::size_t>)(filled, (std::numeric_limits<std::uint32_t>::max)()));
+        f.buffer_info.repaired |= Frame::BufferInfo::PartsLimited;
+      }
       f.parts.reserve(part_count);
       part_spans.reserve(part_count);
       for (std::uint32_t index = 0; index < part_count; ++index) {
@@ -1275,10 +1300,17 @@ void visit_pinned_buffer(const AcquisitionContext& context, std::uint64_t timeou
         const bool contained = base && part_base && part_address >= base_address
             && part_address - base_address <= filled
             && part_size <= filled - (part_address - base_address);
-        if (!contained && part_size) throw Error("grab: part exceeds delivered data");
-        if (part_size) {
+        // A part that reaches past the delivered data is cut to the bytes that exist.
+        auto readable_size = part_size;
+        if (!contained && part_size) {
+          const bool starts_inside = base && part_base && part_address >= base_address
+              && part_address - base_address <= filled;
+          readable_size = starts_inside ? filled - (part_address - base_address) : 0U;
+          f.buffer_info.repaired |= Frame::BufferInfo::PartClamped;
+        }
+        if (readable_size) {
           f.parts.push_back(std::move(part));
-          part_spans.push_back({part_base, part_size});
+          part_spans.push_back({part_base, readable_size});
         }
       }
     }

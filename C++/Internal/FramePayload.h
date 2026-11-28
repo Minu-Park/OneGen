@@ -6,6 +6,7 @@
 #include "Internal/DirectFrameSink.h"
 #include "Internal/PixelLayout.h"
 #include <GenTL/GenTL.h>
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <span>
@@ -67,6 +68,41 @@ inline ImageSpan single_image_span(const Frame& frame, const std::uint8_t* base,
   return {offset, end};
 }
 
+/**
+ * Fits the image span to what the transport delivered without rejecting: an offset past the end
+ * leaves an empty span, a layout larger than the delivered bytes keeps only the bytes that exist,
+ * and an undeclared or inconsistent layout keeps everything from the offset to the next chunk or
+ * the end. The adapter zero-fills whatever the declared layout needs beyond the span.
+ */
+inline ImageSpan fitted_image_span(const Frame& frame, std::size_t filled) noexcept
+{
+  const auto offset = (std::min)(frame.buffer_info.image_offset, filled);
+  auto end = filled;
+  std::size_t bytes = 0;
+  bool sized = false;
+  if (frame.payload_type != GenTL::PAYLOAD_TYPE_JPEG && frame.stride && frame.height
+      && frame.height <= (std::numeric_limits<std::size_t>::max)() / frame.stride) {
+    bytes = frame.stride * frame.height;
+    sized = true;
+    const auto layout = coordinate_format(frame.pixel_format);
+    if (layout.planar) {
+      if (bytes > (std::numeric_limits<std::size_t>::max)() / layout.components) sized = false;
+      else bytes *= layout.components;
+    }
+  }
+  for (const auto& chunk : frame.chunks) {
+    const auto start = (std::min)(static_cast<std::size_t>((std::min<std::uint64_t>)(chunk.offset, filled)), filled);
+    const auto chunk_end = start + (std::min)(chunk.payload.size(), filled - start);
+    if (start == offset) {
+      if (!sized && chunk_end < end) end = chunk_end;
+    } else if (start > offset && (!sized || start >= offset + (std::min)(bytes, filled - offset))) {
+      if (start < end) end = start;
+    }
+  }
+  if (sized) end = offset + (std::min)(bytes, filled - offset);
+  return {offset, end};
+}
+
 /** Copy a single image from its transport offset, retaining raw non-image payloads. */
 inline void copy_single_payload(Frame& frame, const std::uint8_t* base, std::size_t filled)
 {
@@ -79,7 +115,7 @@ inline void copy_single_payload(Frame& frame, const std::uint8_t* base, std::siz
     frame.payload.assign(base, base + filled);
     return;
   }
-  const auto span = single_image_span(frame, base, filled);
+  const auto span = fitted_image_span(frame, filled);
   frame.payload.assign(base + span.offset, base + span.end);
 }
 
